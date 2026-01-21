@@ -5,7 +5,7 @@ Run this script to create all necessary tables in the SQL Server database
 from app import app, db
 from models import (User, NewHire, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentAssignment, UserNotification)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink)
 
 def init_database():
     """Create all database tables"""
@@ -29,8 +29,11 @@ def init_database():
             print("  - user_tasks (for tasks assigned to users)")
             print("  - document_signature_fields (for signature field locations on documents)")
             print("  - document_signatures (for storing user signatures on documents)")
+            print("  - document_typed_fields (for typed field locations on documents)")
+            print("  - document_typed_field_values (for storing user-entered typed field values)")
             print("  - document_assignments (for assigning documents to users for signing)")
             print("  - user_notifications (for tracking which notifications users have viewed)")
+            print("  - external_links (for external website links shown on user dashboard)")
             db_info = app.config['SQLALCHEMY_DATABASE_URI'].split('@')[1] if '@' in app.config['SQLALCHEMY_DATABASE_URI'] else 'Connected'
             print(f"\nDatabase: {db_info}")
         except Exception as e:

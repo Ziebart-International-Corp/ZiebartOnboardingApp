@@ -7,13 +7,38 @@ from flask_login import LoginManager, login_user, logout_user, login_required, c
 from auth import authenticate_user, login_required, admin_required, User, get_windows_user, check_user_can_login_as_admin
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentAssignment, UserNotification)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink)
 from membership import get_token_groups, get_local_groups
 from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR
 from datetime import datetime
 import os
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
+from io import BytesIO
+import base64
+try:
+    from pdf2image import convert_from_path
+    PDF2IMAGE_AVAILABLE = True
+except (ImportError, Exception):
+    PDF2IMAGE_AVAILABLE = False
+
+try:
+    import fitz  # PyMuPDF
+    FITZ_AVAILABLE = True
+except ImportError:
+    FITZ_AVAILABLE = False
+
+try:
+    from pyhanko.sign import signers, fields
+    from pyhanko.sign.timestamps import HTTPTimeStamper
+    from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding
+    from cryptography.hazmat.backends import default_backend
+    import hashlib
+    PYHANKO_AVAILABLE = True
+except ImportError:
+    PYHANKO_AVAILABLE = False
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
@@ -23,7 +48,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = SQLALCHEMY_ENGINE_OPTIONS
 app.config['UPLOAD_FOLDER'] = BASE_DIR / 'uploads'
 app.config['VIDEO_UPLOAD_FOLDER'] = BASE_DIR / 'uploads' / 'videos'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size (for videos)
-app.config['ALLOWED_EXTENSIONS'] = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif'}
+app.config['ALLOWED_EXTENSIONS'] = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'svg'}
 app.config['ALLOWED_VIDEO_EXTENSIONS'] = {'mp4', 'webm', 'ogg', 'mov', 'avi'}
 
 # Initialize extensions
@@ -138,7 +163,7 @@ def index():
         <title>Onboarding App - Authentication Error</title>
         <style>
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 display: flex;
                 justify-content: center;
                 align-items: center;
@@ -154,7 +179,11 @@ def index():
                 max-width: 500px;
                 text-align: center;
             }
-            h1 { color: #333; }
+            h1, h2, h3, h4, h5, h6 { 
+                color: #000000; 
+                font-weight: 800; 
+                font-family: 'URW Form', Arial, sans-serif; 
+            }
             .error { color: #c33; margin: 20px 0; }
         </style>
     </head>
@@ -321,7 +350,17 @@ def dashboard():
     all_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.created_at.desc()).limit(6).all()
     
     # Get visible documents
-    visible_documents = Document.query.filter_by(is_visible=True).order_by(Document.created_at.desc()).limit(3).all()
+    # Only show assigned documents to users (not just visible ones)
+    assigned_doc_ids = set()
+    if not is_admin:
+        assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
+        assigned_doc_ids = set(a.document_id for a in assigned_documents)
+        visible_documents = Document.query.filter(Document.id.in_(assigned_doc_ids)).order_by(Document.created_at.desc()).limit(3).all()
+    else:
+        visible_documents = Document.query.filter_by(is_visible=True).order_by(Document.created_at.desc()).limit(3).all()
+    
+    # Get active external links for the dashboard
+    external_links = ExternalLink.query.filter_by(is_active=True).order_by(ExternalLink.order, ExternalLink.created_at).all()
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -329,32 +368,62 @@ def dashboard():
     <head>
         <title>Dashboard - Onboarding App</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="preconnect" href="https://fonts.googleapis.com">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .nav-links {
                 display: flex;
@@ -366,10 +435,11 @@ def dashboard():
                 text-decoration: none;
                 font-size: 1em;
                 font-weight: 500;
+                font-family: 'URW Form', Arial, sans-serif;
                 transition: color 0.2s;
             }
             .nav-links a:hover {
-                color: #dc3545;
+                color: #FE0100;
             }
             .user-section {
                 display: flex;
@@ -393,7 +463,7 @@ def dashboard():
                 max-width: 400px;
                 max-height: 500px;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-top: 10px;
                 z-index: 1000;
                 overflow: hidden;
@@ -412,7 +482,7 @@ def dashboard():
             .notification-header h3 {
                 font-size: 1em;
                 font-weight: 600;
-                color: #2d2d2d;
+                color: #000000;
                 margin: 0;
             }
             .notification-list {
@@ -438,13 +508,15 @@ def dashboard():
                 background: #d0e7ff;
             }
             .notification-title {
-                font-weight: 600;
-                color: #333;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #000000;
                 margin-bottom: 5px;
                 font-size: 0.95em;
             }
             .notification-message {
-                color: #666;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #808080;
                 font-size: 0.85em;
                 line-height: 1.4;
             }
@@ -470,7 +542,7 @@ def dashboard():
                 width: 32px;
                 height: 32px;
                 border-radius: 50%;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 display: flex;
                 align-items: center;
@@ -485,7 +557,7 @@ def dashboard():
                 background: white;
                 min-width: 200px;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-top: 10px;
                 z-index: 1000;
                 overflow: hidden;
@@ -495,7 +567,7 @@ def dashboard():
             }
             .dropdown-item {
                 padding: 12px 20px;
-                color: #333;
+                color: #000000;
                 text-decoration: none;
                 display: block;
                 transition: background 0.2s;
@@ -508,9 +580,22 @@ def dashboard():
                 background: #eee;
             }
             .main-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
                 padding: 30px 20px;
+                display: grid;
+                grid-template-columns: 1fr 350px;
+                gap: 30px;
+            }
+            .main-content-left {
+                display: flex;
+                flex-direction: column;
+                gap: 30px;
+            }
+            .sidebar-right {
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
             }
             .welcome-section {
                 text-align: center;
@@ -518,27 +603,31 @@ def dashboard():
             }
             .welcome-section h1 {
                 font-size: 3em;
-                font-weight: 700;
-                color: #2d2d2d;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #000000;
                 margin-bottom: 10px;
             }
             .welcome-section p {
                 font-size: 1.2em;
-                color: #666;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #808080;
                 font-weight: 400;
             }
             .section {
-                background: white;
-                border-radius: 12px;
-                padding: 25px;
+                background: #FFFFFF;
+                border-radius: 1rem;
+                border: 1px solid #E0E0E0;
+                padding: 2rem;
                 margin-bottom: 30px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
             }
             .progress-bar-container {
                 background: #e9ecef;
@@ -564,7 +653,7 @@ def dashboard():
             }
             .task-card {
                 background: #ffffff;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 padding: 20px;
                 display: flex;
                 align-items: center;
@@ -580,7 +669,7 @@ def dashboard():
                 align-items: center;
                 justify-content: center;
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
             }
             .task-content {
                 flex: 1;
@@ -588,24 +677,25 @@ def dashboard():
             .task-content h3 {
                 font-size: 1.1em;
                 margin-bottom: 5px;
-                color: #333;
+                color: #000000;
             }
             .task-content p {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
             .task-btn {
                 padding: 12px 24px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 1em;
                 font-weight: 600;
+                font-family: 'URW Form', Arial, sans-serif;
                 transition: background 0.2s;
             }
             .task-btn:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .videos-grid {
                 display: grid;
@@ -614,7 +704,7 @@ def dashboard():
             }
             .video-card {
                 background: #f8f9fa;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 overflow: hidden;
             }
             .video-thumbnail {
@@ -632,55 +722,83 @@ def dashboard():
             }
             .video-info h3 {
                 font-size: 1em;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 margin-bottom: 10px;
-                color: #333;
+                color: #000000;
             }
             .video-btn {
                 display: block;
                 width: 100%;
                 padding: 12px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 text-align: center;
                 font-size: 1em;
                 font-weight: 600;
                 transition: background 0.2s;
             }
             .video-btn:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .quick-links {
                 display: flex;
-                gap: 20px;
-                flex-wrap: wrap;
+                flex-direction: column;
+                gap: 15px;
             }
             .quick-link {
                 display: flex;
-                flex-direction: column;
+                flex-direction: row;
                 align-items: center;
-                gap: 8px;
+                gap: 15px;
                 text-decoration: none;
-                color: #333;
-                transition: transform 0.2s;
+                color: #000000;
+                padding: 15px;
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                transition: all 0.2s;
             }
             .quick-link:hover {
-                transform: translateY(-2px);
+                transform: translateX(5px);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.12);
             }
             .quick-link-icon {
-                width: 50px;
-                height: 50px;
-                background: #e3f2fd;
+                width: 80px;
+                height: 80px;
+                background: #ffffff;
                 border-radius: 12px;
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                font-size: 1.5em;
+                font-size: 2.5em;
+                overflow: hidden;
+                flex-shrink: 0;
+                border: 1px solid #e0e0e0;
+                padding: 8px;
+            }
+            .quick-link-icon img {
+                width: 100%;
+                height: 100%;
+                object-fit: contain;
+                background: #ffffff;
+            }
+            .quick-link-content {
+                flex: 1;
             }
             .quick-link-text {
-                font-size: 0.85em;
-                text-align: center;
+                font-size: 1.1em;
+                font-weight: 600;
+                text-align: left;
+                color: #000000;
+                margin-bottom: 4px;
+            }
+            .quick-link-description {
+                font-size: 0.9em;
+                color: #808080;
+                text-align: left;
             }
             @media (max-width: 768px) {
                 .nav-links {
@@ -691,6 +809,12 @@ def dashboard():
                 }
                 .videos-grid {
                     grid-template-columns: 1fr;
+                }
+                .main-content {
+                    grid-template-columns: 1fr;
+                }
+                .sidebar-right {
+                    order: -1;
                 }
             }
         </style>
@@ -714,12 +838,12 @@ def dashboard():
                 <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
                     🔔
                     {% if pending_count > 0 %}
-                    <span class="notification-badge" id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background: #dc3545; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;">{{ pending_count }}</span>
+                    <span class="notification-badge" id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;">{{ pending_count }}</span>
                     {% endif %}
                     <div class="notification-dropdown" id="notificationDropdown">
                         <div class="notification-header">
                             <h3>Notifications</h3>
-                            <button onclick="markAllAsRead()" style="background: none; border: none; color: #dc3545; cursor: pointer; font-size: 0.85em; padding: 0;">Mark all read</button>
+                            <button onclick="markAllAsRead()" style="background: none; border: none; color: #FE0100; cursor: pointer; font-size: 0.85em; padding: 0;">Mark all read</button>
                         </div>
                         <div class="notification-list">
                             {% if notifications %}
@@ -753,99 +877,111 @@ def dashboard():
         </div>
         
         <div class="main-content">
-            <div class="welcome-section">
-                <h1>Welcome, {{ user_first_name }}!</h1>
-                <p>Let's get you started with onboarding.</p>
-            </div>
-            
-            {% if required_videos or user_tasks %}
-            <div class="section">
-                <h2 class="section-title">Your Onboarding Tasks</h2>
-                <div class="progress-bar-container">
-                    <div class="progress-bar-fill" style="width: {{ progress_percentage }}%;">
-                        {{ progress_percentage }}%
-                    </div>
-                </div>
-                <div style="text-align: center; margin-top: 10px; color: #666; font-size: 0.9em;">
-                    {{ completed_tasks }} of {{ total_tasks }} tasks completed
+            <div class="main-content-left">
+                <div class="welcome-section">
+                    <h1>Welcome, {{ user_first_name }}!</h1>
+                    <p>Let's get you started with onboarding.</p>
                 </div>
                 
-                {% if incomplete_training or user_tasks %}
-                <div class="task-cards">
-                    {% for video in incomplete_training %}
-                    <div class="task-card">
-                        <div class="task-icon">▶️</div>
-                        <div class="task-content">
-                            <h3>{{ video.title }}</h3>
-                            <p>Complete required training video</p>
+                {% if required_videos or user_tasks %}
+                <div class="section">
+                    <h2 class="section-title">Your Onboarding Tasks</h2>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" style="width: {{ progress_percentage }}%;">
+                            {{ progress_percentage }}%
                         </div>
-                        <a href="{{ url_for('view_training_video', video_id=video.id) }}" class="task-btn">Start ></a>
                     </div>
-                    {% endfor %}
-                    {% for task in user_tasks %}
-                    <div class="task-card">
-                        <div class="task-icon">
-                            {% if task.task_type == 'document' %}
-                            ✍️
+                    <div style="text-align: center; margin-top: 10px; color: #808080; font-size: 0.9em;">
+                        {{ completed_tasks }} of {{ total_tasks }} tasks completed
+                    </div>
+                    
+                    {% if incomplete_training or user_tasks %}
+                    <div class="task-cards">
+                        {% for video in incomplete_training %}
+                        <div class="task-card">
+                            <div class="task-icon">▶️</div>
+                            <div class="task-content">
+                                <h3>{{ video.title }}</h3>
+                                <p>Complete required training video</p>
+                            </div>
+                            <a href="{{ url_for('view_training_video', video_id=video.id) }}" class="task-btn">Start ></a>
+                        </div>
+                        {% endfor %}
+                        {% for task in user_tasks %}
+                        <div class="task-card">
+                            <div class="task-icon">
+                                {% if task.task_type == 'document' %}
+                                ✍️
+                                {% else %}
+                                📋
+                                {% endif %}
+                            </div>
+                            <div class="task-content">
+                                <h3>{{ task.task_title }}</h3>
+                                <p>{{ task.task_description or 'Complete this task' }}</p>
+                            </div>
+                            {% if task.task_type == 'document' and task.document_id %}
+                            <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" class="task-btn">Sign Document ></a>
                             {% else %}
-                            📋
+                            <a href="{{ url_for('user_tasks') }}" class="task-btn">View Task ></a>
                             {% endif %}
                         </div>
-                        <div class="task-content">
-                            <h3>{{ task.task_title }}</h3>
-                            <p>{{ task.task_description or 'Complete this task' }}</p>
-                        </div>
-                        {% if task.task_type == 'document' and task.document_id %}
-                        <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" class="task-btn">Sign Document ></a>
-                        {% else %}
-                        <a href="{{ url_for('user_tasks') }}" class="task-btn">View Task ></a>
-                        {% endif %}
+                        {% endfor %}
                     </div>
-                    {% endfor %}
+                    {% else %}
+                    <div style="text-align: center; padding: 40px 20px; color: #28a745;">
+                        <div style="font-size: 3em; margin-bottom: 15px;">✓</div>
+                        <h3 style="font-size: 1.5em; margin-bottom: 10px; color: #000000; font-weight: 800; font-family: 'URW Form', Arial, sans-serif;">All Tasks Completed!</h3>
+                        <p style="color: #808080; font-size: 1.1em;">Great job! You've completed all your onboarding tasks.</p>
+                    </div>
+                    {% endif %}
                 </div>
-                {% else %}
-                <div style="text-align: center; padding: 40px 20px; color: #28a745;">
-                    <div style="font-size: 3em; margin-bottom: 15px;">✓</div>
-                    <h3 style="font-size: 1.5em; margin-bottom: 10px; color: #333;">All Tasks Completed!</h3>
-                    <p style="color: #666; font-size: 1.1em;">Great job! You've completed all your onboarding tasks.</p>
+                {% endif %}
+                
+                {% if all_videos %}
+                <div class="section">
+                    <h2 class="section-title">Training Videos</h2>
+                    <div class="videos-grid">
+                        {% for video in all_videos %}
+                        <div class="video-card">
+                            <div class="video-thumbnail">📹</div>
+                            <div class="video-info">
+                                <h3>{{ video.title }}</h3>
+                                <a href="{{ url_for('view_training_video', video_id=video.id) }}" class="video-btn">Watch ></a>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
                 </div>
                 {% endif %}
             </div>
-            {% endif %}
             
-            {% if all_videos %}
-            <div class="section">
-                <h2 class="section-title">Training Videos</h2>
-                <div class="videos-grid">
-                    {% for video in all_videos %}
-                    <div class="video-card">
-                        <div class="video-thumbnail">📹</div>
-                        <div class="video-info">
-                            <h3>{{ video.title }}</h3>
-                            <a href="{{ url_for('view_training_video', video_id=video.id) }}" class="video-btn">Watch ></a>
-                        </div>
+            {% if external_links %}
+            <div class="sidebar-right">
+                <div class="section">
+                    <h2 class="section-title" style="margin-bottom: 20px;">Quick Links</h2>
+                    <div class="quick-links">
+                        {% for link in external_links %}
+                        <a href="{{ link.url }}" target="_blank" rel="noopener noreferrer" class="quick-link">
+                            <div class="quick-link-icon">
+                                {% if link.image_filename %}
+                                <img src="{{ url_for('serve_quick_link_image', filename=link.image_filename) }}" alt="{{ link.title }}">
+                                {% else %}
+                                {{ link.icon or '🔗' }}
+                                {% endif %}
+                            </div>
+                            <div class="quick-link-content">
+                                <div class="quick-link-text">{{ link.title }}</div>
+                                {% if link.description %}
+                                <div class="quick-link-description">{{ link.description }}</div>
+                                {% endif %}
+                            </div>
+                        </a>
+                        {% endfor %}
                     </div>
-                    {% endfor %}
                 </div>
             </div>
             {% endif %}
-            
-            <div class="section" style="background: transparent; box-shadow: none; padding: 0;">
-                <div class="quick-links">
-                    <a href="{{ url_for('view_documents') }}" class="quick-link">
-                        <div class="quick-link-icon">📄</div>
-                        <div class="quick-link-text">Company Policies</div>
-                    </a>
-                    <a href="#" class="quick-link">
-                        <div class="quick-link-icon">💻</div>
-                        <div class="quick-link-text">IT Setup</div>
-                    </a>
-                    <a href="#" class="quick-link">
-                        <div class="quick-link-icon">❓</div>
-                        <div class="quick-link-text">Support FAQs</div>
-                    </a>
-                </div>
-            </div>
         </div>
         
         <script>
@@ -947,7 +1083,7 @@ def dashboard():
                                 newBadge.id = 'notificationBadge';
                                 newBadge.className = 'notification-badge';
                                 newBadge.textContent = data.count;
-                                newBadge.style.cssText = 'position: absolute; top: -5px; right: -5px; background: #dc3545; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;';
+                                newBadge.style.cssText = 'position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;';
                                 icon.appendChild(newBadge);
                             }
                         }
@@ -985,7 +1121,7 @@ def dashboard():
          incomplete_training=incomplete_training, all_tasks_completed=all_tasks_completed,
          progress_percentage=progress_percentage, all_videos=all_videos, visible_documents=visible_documents,
          user_tasks=user_tasks, total_tasks=total_tasks, completed_tasks=completed_tasks, 
-         pending_count=pending_count, notifications=notifications)
+         pending_count=pending_count, notifications=notifications, external_links=external_links)
 
 
 @app.route('/tasks')
@@ -1056,31 +1192,60 @@ def user_tasks():
         <title>My Tasks - Onboarding App</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .nav-links {
                 display: flex;
@@ -1092,13 +1257,14 @@ def user_tasks():
                 text-decoration: none;
                 font-size: 1em;
                 font-weight: 500;
+                font-family: 'URW Form', Arial, sans-serif;
                 transition: color 0.2s;
             }
             .nav-links a:hover {
-                color: #dc3545;
+                color: #FE0100;
             }
             .nav-links a.active {
-                color: #dc3545;
+                color: #FE0100;
             }
             .user-section {
                 display: flex;
@@ -1123,7 +1289,7 @@ def user_tasks():
                 width: 32px;
                 height: 32px;
                 border-radius: 50%;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 display: flex;
                 align-items: center;
@@ -1138,7 +1304,7 @@ def user_tasks():
                 background: white;
                 min-width: 200px;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-top: 10px;
                 z-index: 1000;
                 overflow: hidden;
@@ -1148,7 +1314,7 @@ def user_tasks():
             }
             .dropdown-item {
                 padding: 12px 20px;
-                color: #333;
+                color: #000000;
                 text-decoration: none;
                 display: block;
                 transition: background 0.2s;
@@ -1161,18 +1327,18 @@ def user_tasks():
                 background: #eee;
             }
             .main-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
                 padding: 30px 20px;
             }
             .page-title {
                 font-size: 3em;
-                font-weight: 700;
-                color: #2d2d2d;
+                font-weight: 800;
+                color: #000000;
                 margin-bottom: 10px;
             }
             .page-subtitle {
-                color: #666;
+                color: #808080;
                 font-size: 1.2em;
                 margin-bottom: 30px;
             }
@@ -1192,11 +1358,11 @@ def user_tasks():
             .stat-number {
                 font-size: 2.5em;
                 font-weight: bold;
-                color: #dc3545;
+                color: #FE0100;
                 margin-bottom: 5px;
             }
             .stat-label {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
             .task-section {
@@ -1208,9 +1374,9 @@ def user_tasks():
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
+                font-weight: 800;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
                 display: flex;
                 align-items: center;
                 gap: 10px;
@@ -1221,7 +1387,7 @@ def user_tasks():
             }
             .task-item {
                 background: #ffffff;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 padding: 20px;
                 border-left: 4px solid #dc3545;
                 transition: transform 0.2s, box-shadow 0.2s;
@@ -1236,10 +1402,10 @@ def user_tasks():
                 opacity: 0.7;
             }
             .task-item.high-priority {
-                border-left-color: #dc3545;
+                border-left-color: #FE0100;
             }
             .task-item.urgent-priority {
-                border-left-color: #dc3545;
+                border-left-color: #FE0100;
                 background: #fff5f5;
             }
             .task-header {
@@ -1251,7 +1417,7 @@ def user_tasks():
             .task-title {
                 font-size: 1.1em;
                 font-weight: 600;
-                color: #333;
+                color: #000000;
                 flex: 1;
             }
             .task-badges {
@@ -1266,27 +1432,31 @@ def user_tasks():
                 font-weight: 500;
             }
             .badge-pending {
-                background: #fff3cd;
-                color: #856404;
+                background: #808080;
+                color: white;
+            }
+            .badge-pending {
+                background: #808080;
+                color: white;
             }
             .badge-in-progress {
-                background: #cfe2ff;
-                color: #084298;
+                background: #808080;
+                color: white;
             }
             .badge-completed {
-                background: #d1e7dd;
-                color: #0f5132;
+                background: #28a745;
+                color: white;
             }
             .badge-priority {
-                background: #f8d7da;
-                color: #842029;
+                background: #FE0100;
+                color: white;
             }
             .badge-type {
                 background: #e7f3ff;
                 color: #055160;
             }
             .task-description {
-                color: #666;
+                color: #808080;
                 margin-bottom: 15px;
                 line-height: 1.5;
             }
@@ -1303,7 +1473,7 @@ def user_tasks():
             }
             .btn {
                 padding: 8px 16px;
-                border-radius: 6px;
+                border-radius: 0.5rem;
                 text-decoration: none;
                 font-size: 0.9em;
                 font-weight: 500;
@@ -1312,25 +1482,28 @@ def user_tasks():
                 transition: background 0.2s;
             }
             .btn-primary {
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
             }
             .btn-primary:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .btn-success {
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
             }
             .btn-success:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .btn-secondary {
-                background: #6c757d;
-                color: white;
+                background: transparent;
+                color: #FE0100;
+                border: 2px solid #FE0100;
+                border-radius: 0.5rem;
             }
             .btn-secondary:hover {
-                background: #5a6268;
+                background: #FE0100;
+                color: white;
             }
             .empty-state {
                 text-align: center;
@@ -1747,31 +1920,60 @@ def profile():
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .nav-links {
                 display: flex;
@@ -1783,10 +1985,11 @@ def profile():
                 text-decoration: none;
                 font-size: 1em;
                 font-weight: 500;
+                font-family: 'URW Form', Arial, sans-serif;
                 transition: color 0.2s;
             }
             .nav-links a:hover {
-                color: #dc3545;
+                color: #FE0100;
             }
             .user-section {
                 display: flex;
@@ -1811,7 +2014,7 @@ def profile():
                 width: 32px;
                 height: 32px;
                 border-radius: 50%;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 display: flex;
                 align-items: center;
@@ -1826,7 +2029,7 @@ def profile():
                 background: white;
                 min-width: 200px;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-top: 10px;
                 z-index: 1000;
                 overflow: hidden;
@@ -1836,7 +2039,7 @@ def profile():
             }
             .dropdown-item {
                 padding: 12px 20px;
-                color: #333;
+                color: #000000;
                 text-decoration: none;
                 display: block;
                 transition: background 0.2s;
@@ -1876,17 +2079,17 @@ def profile():
             }
             .profile-name {
                 font-size: 2.5em;
-                font-weight: 700;
-                color: #2d2d2d;
+                font-weight: 800;
+                color: #000000;
                 margin-bottom: 10px;
             }
             .profile-username {
-                color: #666;
+                color: #808080;
                 font-size: 1.1em;
                 margin-bottom: 5px;
             }
             .profile-email {
-                color: #666;
+                color: #808080;
                 font-size: 1em;
             }
             .info-section {
@@ -1898,9 +2101,9 @@ def profile():
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
+                font-weight: 800;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
                 display: flex;
                 align-items: center;
                 gap: 10px;
@@ -1917,11 +2120,11 @@ def profile():
             }
             .info-label {
                 font-weight: 600;
-                color: #666;
+                color: #808080;
                 font-size: 0.95em;
             }
             .info-value {
-                color: #333;
+                color: #000000;
                 font-size: 0.95em;
             }
             .groups-list {
@@ -1932,7 +2135,7 @@ def profile():
             }
             .group-badge {
                 background: #f8f8f8;
-                color: #dc3545;
+                color: #FE0100;
                 padding: 8px 15px;
                 border-radius: 20px;
                 font-size: 0.9em;
@@ -1967,6 +2170,9 @@ def profile():
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
+                {% if is_admin %}
+                <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% endif %}
             </div>
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
@@ -2065,7 +2271,7 @@ def new_hire_list():
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
@@ -2074,14 +2280,14 @@ def new_hire_list():
                 padding: 20px;
             }
             .header-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
@@ -2097,7 +2303,7 @@ def new_hire_list():
             table {
                 width: 100%;
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 overflow: hidden;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             }
@@ -2138,7 +2344,7 @@ def new_hire_list():
                 cursor: pointer;
                 font-size: 1.5em;
                 padding: 5px 10px;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 transition: background 0.3s;
             }
             .settings-icon:hover {
@@ -2152,7 +2358,7 @@ def new_hire_list():
                 background: white;
                 min-width: 200px;
                 box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 margin-top: 5px;
                 z-index: 1000;
             }
@@ -2161,7 +2367,7 @@ def new_hire_list():
             }
             .dropdown-item {
                 padding: 12px 20px;
-                color: #333;
+                color: #000000;
                 text-decoration: none;
                 display: block;
                 transition: background 0.2s;
@@ -2196,10 +2402,10 @@ def new_hire_list():
                     </div>
                 </div>
             </div>
+            <a href="{{ url_for('dashboard') }}" class="back-btn">← Back</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('dashboard') }}" class="btn">← Back</a>
             
             {% if new_hires %}
             <table>
@@ -2269,17 +2475,50 @@ def add_new_hire():
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
                 max-width: 1000px;
@@ -2289,14 +2528,19 @@ def add_new_hire():
             .admin-panel {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+            }
+            .admin-panel h2 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                color: #000000;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -2311,7 +2555,8 @@ def add_new_hire():
             .form-group label {
                 display: block;
                 margin-bottom: 5px;
-                font-weight: bold;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .form-group input,
             .form-group textarea,
@@ -2319,7 +2564,7 @@ def add_new_hire():
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 14px;
             }
             .form-group textarea {
@@ -2336,14 +2581,14 @@ def add_new_hire():
                 overflow-y: auto;
                 border: 1px solid #ddd;
                 padding: 15px;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 background: #f8f9fa;
             }
             .checkbox-item {
                 padding: 10px;
                 margin: 5px 0;
                 background: white;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 display: flex;
                 align-items: center;
                 gap: 10px;
@@ -2358,14 +2603,14 @@ def add_new_hire():
             <div class="header-content">
                 <h1>🚀 Start Onboarding Process</h1>
             </div>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('admin_dashboard') }}" class="btn">← Back to Admin Dashboard</a>
             
             <div class="admin-panel">
                 <h2>New Hire Onboarding</h2>
-                <p style="color: #666; margin-bottom: 20px;">Enter the new hire's information and select the required training videos they need to complete.</p>
+                        <p style="color: #808080; margin-bottom: 20px;">Enter the new hire's information and select the required training videos they need to complete.</p>
                 <form method="POST" action="{{ url_for('create_new_hire') }}">
                     <div class="form-group">
                         <label for="username">Username (Domain Username) *</label>
@@ -2397,7 +2642,7 @@ def add_new_hire():
                                 <p>No training videos available. <a href="{{ url_for('manage_training') }}">Upload videos first</a>.</p>
                             {% endif %}
                         </div>
-                        <small style="color: #666;">Select which training videos this new hire must complete</small>
+                        <small style="color: #808080;">Select which training videos this new hire must complete</small>
                     </div>
                     
                     <button type="submit" class="btn btn-success">Start Onboarding</button>
@@ -2576,31 +2821,60 @@ def admin_dashboard():
         <title>Admin Dashboard - Onboarding App</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .nav-links {
                 display: flex;
@@ -2614,14 +2888,14 @@ def admin_dashboard():
                 font-weight: 500;
                 transition: color 0.2s;
                 padding: 5px 10px;
-                border-radius: 4px;
+                border-radius: 0.5rem;
             }
             .nav-links a:hover {
-                color: #dc3545;
+                color: #FE0100;
             }
             .nav-links a.active {
-                color: #dc3545;
-                background: rgba(220, 53, 69, 0.1);
+                color: #FE0100;
+                background: rgba(254, 1, 0, 0.1);
                 font-weight: 600;
             }
             .user-section {
@@ -2646,7 +2920,7 @@ def admin_dashboard():
                 max-width: 400px;
                 max-height: 500px;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-top: 10px;
                 z-index: 1000;
                 overflow: hidden;
@@ -2665,7 +2939,7 @@ def admin_dashboard():
             .notification-header h3 {
                 font-size: 1em;
                 font-weight: 600;
-                color: #2d2d2d;
+                color: #000000;
                 margin: 0;
             }
             .notification-list {
@@ -2691,13 +2965,15 @@ def admin_dashboard():
                 background: #d0e7ff;
             }
             .notification-title {
-                font-weight: 600;
-                color: #333;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #000000;
                 margin-bottom: 5px;
                 font-size: 0.95em;
             }
             .notification-message {
-                color: #666;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #808080;
                 font-size: 0.85em;
                 line-height: 1.4;
             }
@@ -2710,7 +2986,7 @@ def admin_dashboard():
                 position: absolute;
                 top: -5px;
                 right: -8px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 border-radius: 50%;
                 width: 18px;
@@ -2738,7 +3014,7 @@ def admin_dashboard():
                 width: 32px;
                 height: 32px;
                 border-radius: 50%;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 display: flex;
                 align-items: center;
@@ -2753,7 +3029,7 @@ def admin_dashboard():
                 background: white;
                 min-width: 200px;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-top: 10px;
                 z-index: 1000;
                 overflow: hidden;
@@ -2763,7 +3039,7 @@ def admin_dashboard():
             }
             .dropdown-item {
                 padding: 12px 20px;
-                color: #333;
+                color: #000000;
                 text-decoration: none;
                 display: block;
                 transition: background 0.2s;
@@ -2772,7 +3048,7 @@ def admin_dashboard():
                 background: #f5f5f5;
             }
             .main-container {
-                max-width: 1400px;
+                max-width: 1600px;
                 margin: 0 auto;
                 padding: 20px;
                 display: grid;
@@ -2795,13 +3071,14 @@ def admin_dashboard():
             }
             .welcome-banner h1 {
                 font-size: 2.5em;
-                font-weight: 700;
-                color: #2d2d2d;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #000000;
             }
             .filter-dropdown {
                 padding: 8px 15px;
                 border: 1px solid #ddd;
-                border-radius: 6px;
+                border-radius: 0.5rem;
                 background: white;
                 font-size: 0.9em;
             }
@@ -2832,13 +3109,13 @@ def admin_dashboard():
             .summary-icon.green { background: #e8f5e9; }
             .summary-content h3 {
                 font-size: 0.9em;
-                color: #666;
+                color: #808080;
                 margin-bottom: 5px;
             }
             .summary-content .number {
                 font-size: 2em;
                 font-weight: bold;
-                color: #333;
+                color: #000000;
             }
             .section {
                 background: white;
@@ -2854,8 +3131,8 @@ def admin_dashboard():
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
-                color: #2d2d2d;
+                font-weight: 800;
+                color: #000000;
             }
             .progress-item {
                 display: flex;
@@ -2871,7 +3148,7 @@ def admin_dashboard():
                 width: 40px;
                 height: 40px;
                 border-radius: 50%;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 display: flex;
                 align-items: center;
@@ -2888,13 +3165,13 @@ def admin_dashboard():
             .progress-bar {
                 height: 8px;
                 background: #e0e0e0;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 overflow: hidden;
                 position: relative;
             }
             .progress-fill {
                 height: 100%;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 transition: width 0.3s;
             }
             .progress-fill.completed { background: #4caf50; }
@@ -2902,7 +3179,7 @@ def admin_dashboard():
             .progress-fill.not-started { background: #2196f3; }
             .progress-percentage {
                 font-weight: 600;
-                color: #333;
+                color: #000000;
                 min-width: 50px;
                 text-align: right;
             }
@@ -2918,7 +3195,7 @@ def admin_dashboard():
                 align-items: center;
                 gap: 8px;
                 font-size: 0.85em;
-                color: #666;
+                color: #808080;
             }
             .legend-color {
                 width: 12px;
@@ -2935,9 +3212,13 @@ def admin_dashboard():
                 border-bottom: 1px solid #f0f0f0;
             }
             th {
-                font-weight: 600;
-                color: #666;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #000000;
                 font-size: 0.9em;
+            }
+            td {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .table-progress {
                 width: 100px;
@@ -2970,8 +3251,8 @@ def admin_dashboard():
             }
             .sidebar-title {
                 font-size: 1.2em;
-                font-weight: 700;
-                color: #2d2d2d;
+                font-weight: 800;
+                color: #000000;
             }
             .form-status-item {
                 padding: 12px 0;
@@ -2980,6 +3261,7 @@ def admin_dashboard():
                 justify-content: space-between;
                 align-items: center;
                 transition: background 0.2s;
+                gap: 10px;
             }
             .form-status-item:hover {
                 background: #f8f9fa;
@@ -2989,7 +3271,13 @@ def admin_dashboard():
             }
             .form-status-name {
                 font-size: 0.9em;
-                color: #333;
+                color: #000000;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                flex: 1;
+                min-width: 0;
+                max-width: 200px;
             }
             .form-status-progress {
                 width: 120px;
@@ -3005,7 +3293,7 @@ def admin_dashboard():
             }
             .form-status-count {
                 font-size: 0.85em;
-                color: #666;
+                color: #808080;
                 min-width: 50px;
                 text-align: right;
             }
@@ -3025,11 +3313,11 @@ def admin_dashboard():
             .quick-link-text {
                 flex: 1;
                 font-size: 0.9em;
-                color: #333;
+                color: #000000;
             }
             .quick-link-count {
                 font-size: 0.85em;
-                color: #666;
+                color: #808080;
             }
             .new-hires-list {
                 max-height: 400px;
@@ -3062,22 +3350,18 @@ def admin_dashboard():
                 Ziebart Onboarding
             </div>
             <div class="nav-links">
-                <a href="{{ url_for('dashboard') }}">Home</a>
-                <a href="{{ url_for('admin_dashboard') }}" class="active">Dashboard</a>
-                <a href="{{ url_for('new_hire_list') }}">Tasks</a>
-                <a href="{{ url_for('view_documents') }}">Files</a>
-                <a href="#">Profile</a>
+                <a href="{{ url_for('dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">User Dashboard</a>
             </div>
             <div class="user-section">
                 <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
                     🔔
                     {% if pending_count > 0 %}
-                    <span class="notification-badge" id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background: #dc3545; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;">{{ pending_count }}</span>
+                    <span class="notification-badge" id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;">{{ pending_count }}</span>
                     {% endif %}
                     <div class="notification-dropdown" id="notificationDropdown">
                         <div class="notification-header">
                             <h3>Notifications</h3>
-                            <button onclick="markAllAsRead()" style="background: none; border: none; color: #dc3545; cursor: pointer; font-size: 0.85em; padding: 0;">Mark all read</button>
+                            <button onclick="markAllAsRead()" style="background: none; border: none; color: #FE0100; cursor: pointer; font-size: 0.85em; padding: 0;">Mark all read</button>
                         </div>
                         <div class="notification-list">
                             {% if notifications %}
@@ -3112,7 +3396,7 @@ def admin_dashboard():
         <div class="main-container">
             <div class="main-content">
                 <div class="welcome-banner">
-                    <h1>Welcome to the Onboarding Dashboard</h1>
+                    <h1>Welcome to the Admin Dashboard</h1>
                     <select class="filter-dropdown">
                         <option>Last 30 Days</option>
                         <option>Last 7 Days</option>
@@ -3159,7 +3443,7 @@ def admin_dashboard():
                         <div class="progress-item">
                             <div class="progress-avatar">{{ item.new_hire.first_name[0].upper() if item.new_hire.first_name else 'N' }}</div>
                             <div class="progress-info">
-                                <div class="progress-name"><a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" style="color: #333; text-decoration: none; cursor: pointer;">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a></div>
+                                <div class="progress-name"><a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" style="color: #000000; text-decoration: none; cursor: pointer;">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a></div>
                                 <div class="progress-bar">
                                     {% if item.progress == 100 %}
                                     <div class="progress-fill completed" style="width: 100%;"></div>
@@ -3211,7 +3495,7 @@ def admin_dashboard():
                                     <div class="table-progress">
                                         <div class="table-progress-fill" style="width: {{ item.progress }}%;"></div>
                                     </div>
-                                    <span style="font-size: 0.85em; color: #666; margin-left: 8px;">{{ item.progress }}%</span>
+                                    <span style="font-size: 0.85em; color: #808080; margin-left: 8px;">{{ item.progress }}%</span>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -3300,6 +3584,11 @@ def admin_dashboard():
                         <a href="{{ url_for('admin_reports') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">📊</span>
                             <span class="quick-link-text">Reports</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
+                        <a href="{{ url_for('manage_external_links') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">🔗</span>
+                            <span class="quick-link-text">External Links</span>
                             <span class="quick-link-count">→</span>
                         </a>
                     </div>
@@ -3406,7 +3695,7 @@ def admin_dashboard():
                                 newBadge.id = 'notificationBadge';
                                 newBadge.className = 'notification-badge';
                                 newBadge.textContent = data.count;
-                                newBadge.style.cssText = 'position: absolute; top: -5px; right: -5px; background: #dc3545; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;';
+                                newBadge.style.cssText = 'position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;';
                                 icon.appendChild(newBadge);
                             }
                         }
@@ -3459,27 +3748,60 @@ def manage_users():
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -3489,12 +3811,12 @@ def manage_users():
                 background: #28a745;
             }
             .btn-danger {
-                background: #dc3545;
+                background: #FE0100;
             }
             table {
                 width: 100%;
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 overflow: hidden;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-top: 20px;
@@ -3515,7 +3837,7 @@ def manage_users():
                 font-weight: bold;
             }
             .badge-admin {
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
             }
             .badge-user {
@@ -3525,7 +3847,7 @@ def manage_users():
             .action-btn {
                 padding: 5px 15px;
                 border: none;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 cursor: pointer;
                 font-size: 0.9em;
                 text-decoration: none;
@@ -3535,13 +3857,13 @@ def manage_users():
                 margin: 20px 0;
                 background: white;
                 padding: 20px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             }
             .form-group input {
                 padding: 10px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 width: 300px;
                 margin-right: 10px;
             }
@@ -3550,7 +3872,7 @@ def manage_users():
                 background: #28a745;
                 color: white;
                 border: none;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 cursor: pointer;
             }
         </style>
@@ -3560,10 +3882,10 @@ def manage_users():
             <div class="header-content">
                 <h1>👥 Manage Users & Admins</h1>
             </div>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('admin_dashboard') }}" class="btn">← Back to Admin Dashboard</a>
             
             <div class="form-group">
                 <h3>Add User as Admin</h3>
@@ -3702,34 +4024,72 @@ def manage_documents():
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .admin-panel {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+            }
+            .admin-panel h2 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                color: #000000;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -3739,15 +4099,16 @@ def manage_documents():
                 background: #28a745;
             }
             .btn-danger {
-                background: #dc3545;
+                background: #FE0100;
             }
             .btn-primary {
                 background: #007bff;
             }
             .btn-view {
                 background: white;
-                color: black;
-                border: 2px solid black;
+                color: #000000;
+                border: 2px solid #000000;
+                border-radius: 0.5rem;
             }
             .btn-view:hover {
                 background: #f5f5f5;
@@ -3755,7 +4116,7 @@ def manage_documents():
             .upload-form {
                 background: #f8f9fa;
                 padding: 20px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-bottom: 20px;
             }
             .form-group {
@@ -3764,7 +4125,8 @@ def manage_documents():
             .form-group label {
                 display: block;
                 margin-bottom: 5px;
-                font-weight: bold;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .form-group input[type="file"],
             .form-group input[type="text"],
@@ -3772,7 +4134,7 @@ def manage_documents():
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 14px;
             }
             .form-group textarea {
@@ -3790,7 +4152,7 @@ def manage_documents():
             table {
                 width: 100%;
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 overflow: hidden;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-top: 20px;
@@ -3815,13 +4177,13 @@ def manage_documents():
                 color: white;
             }
             .badge-hidden {
-                background: #6c757d;
+                background: #808080;
                 color: white;
             }
             .action-btn {
                 padding: 6px 12px;
                 border: none;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 cursor: pointer;
                 font-size: 0.85em;
                 text-decoration: none;
@@ -3831,25 +4193,30 @@ def manage_documents():
             }
             .actions-group {
                 display: flex;
-                flex-wrap: wrap;
+                flex-wrap: nowrap;
                 gap: 5px;
                 align-items: center;
+                justify-content: space-between;
+                width: 100%;
             }
             .actions-primary {
                 display: flex;
                 gap: 5px;
-                margin-bottom: 5px;
+                flex-wrap: nowrap;
+                flex-shrink: 0;
             }
             .actions-secondary {
                 position: relative;
                 display: inline-block;
+                flex-shrink: 0;
+                margin-left: auto;
             }
             .actions-menu-btn {
                 padding: 6px 12px;
                 background: #6c757d;
                 color: white;
                 border: none;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 cursor: pointer;
                 font-size: 0.85em;
             }
@@ -3864,7 +4231,7 @@ def manage_documents():
                 background: white;
                 min-width: 180px;
                 box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 margin-top: 5px;
                 z-index: 1000;
                 border: 1px solid #ddd;
@@ -3874,7 +4241,7 @@ def manage_documents():
             }
             .actions-dropdown-item {
                 padding: 10px 15px;
-                color: #333;
+                color: #000000;
                 text-decoration: none;
                 display: block;
                 transition: background 0.2s;
@@ -3888,7 +4255,7 @@ def manage_documents():
                 background: #f5f5f5;
             }
             .actions-dropdown-item.danger {
-                color: #dc3545;
+                color: #FE0100;
             }
             .actions-dropdown-item.danger:hover {
                 background: #f8d7da;
@@ -3906,7 +4273,7 @@ def manage_documents():
                 margin-top: 3px;
             }
             .file-size {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
             .modal {
@@ -3930,9 +4297,9 @@ def manage_documents():
                 margin: auto;
                 padding: 0;
                 border: none;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 width: 90%;
-                max-width: 1200px;
+                max-width: 1600px;
                 max-height: 90vh;
                 display: flex;
                 flex-direction: column;
@@ -3949,7 +4316,7 @@ def manage_documents():
             }
             .modal-header h2 {
                 margin: 0;
-                color: #333;
+                color: #000000;
             }
             .close-modal {
                 color: #aaa;
@@ -4002,10 +4369,10 @@ def manage_documents():
             <div class="header-content">
                 <h1>📄 Manage Documents</h1>
             </div>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('admin_dashboard') }}" class="btn">← Back to Admin Dashboard</a>
             
             <div class="admin-panel">
                 <h2>Upload New Document</h2>
@@ -4370,6 +4737,13 @@ def set_signature_fields(doc_id):
     # Get existing signature fields
     existing_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
     
+    # Get existing typed fields (handle case where table might not exist yet)
+    try:
+        existing_typed_fields = DocumentTypedField.query.filter_by(document_id=doc_id).all()
+    except Exception as e:
+        # Table doesn't exist yet, return empty list
+        existing_typed_fields = []
+    
     # Check if document is a PDF (for now, we'll support PDFs primarily)
     is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
     
@@ -4378,30 +4752,64 @@ def set_signature_fields(doc_id):
     <html>
     <head>
         <title>Set Signature Fields - {{ document.original_filename }}</title>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1400px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
-                max-width: 1400px;
+                max-width: 1600px;
                 margin: 20px auto;
                 padding: 0 20px;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -4417,7 +4825,7 @@ def set_signature_fields(doc_id):
                 background: #007bff;
             }
             .btn-danger {
-                background: #dc3545;
+                background: #FE0100;
             }
             .main-content {
                 display: grid;
@@ -4426,7 +4834,7 @@ def set_signature_fields(doc_id):
             }
             .document-viewer-container {
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 padding: 20px;
                 position: relative;
@@ -4436,15 +4844,110 @@ def set_signature_fields(doc_id):
                 background: #525252;
                 min-height: 800px;
                 overflow: auto;
+                padding: 20px;
+                display: flex;
+                justify-content: center;
+                align-items: flex-start;
             }
-            .document-viewer iframe {
-                width: 100%;
-                height: 800px;
-                border: none;
+            #pdfCanvas {
+                max-width: 100%;
+                height: auto;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+                background: white;
+                display: block;
+                cursor: crosshair;
+            }
+            .signature-field-indicator {
+                position: absolute;
+                border: 2px dashed #28a745;
+                background: rgba(40, 167, 69, 0.1);
+                pointer-events: all;
+                z-index: 100;
+                cursor: move;
+                user-select: none;
+                -webkit-user-select: none;
+                -moz-user-select: none;
+                -ms-user-select: none;
+            }
+            .signature-field-indicator.resizing {
+                border: 2px solid #28a745;
+                background: rgba(40, 167, 69, 0.2);
+            }
+            .resize-handle {
+                position: absolute;
+                width: 12px;
+                height: 12px;
+                background: #28a745;
+                border: 2px solid white;
+                border-radius: 50%;
+                cursor: nwse-resize;
+                z-index: 101;
+                pointer-events: all;
+                user-select: none;
+                -webkit-user-select: none;
+            }
+            .resize-handle.bottom-right {
+                bottom: -6px;
+                right: -6px;
+                cursor: nwse-resize;
+            }
+            .resize-handle.bottom-left {
+                bottom: -6px;
+                left: -6px;
+                cursor: nesw-resize;
+            }
+            .resize-handle.top-right {
+                top: -6px;
+                right: -6px;
+                cursor: nesw-resize;
+            }
+            .resize-handle.top-left {
+                top: -6px;
+                left: -6px;
+                cursor: nwse-resize;
+            }
+            .existing-field-marker {
+                position: absolute;
+                border: 2px solid #007bff;
+                background: rgba(0, 123, 255, 0.1);
+                pointer-events: none;
+                z-index: 5;
+            }
+            .existing-field-marker::before {
+                content: attr(data-label);
+                position: absolute;
+                top: -20px;
+                left: 0;
+                background: #007bff;
+                color: white;
+                padding: 2px 6px;
+                font-size: 11px;
+                border-radius: 3px;
+                white-space: nowrap;
+            }
+            .existing-typed-field-marker {
+                position: absolute;
+                border: 2px solid #ffc107;
+                background: rgba(255, 193, 7, 0.1);
+                pointer-events: none;
+                z-index: 5;
+            }
+            .existing-typed-field-marker::before {
+                content: attr(data-label);
+                position: absolute;
+                top: -20px;
+                left: 0;
+                background: #ffc107;
+                color: #000;
+                padding: 2px 6px;
+                font-size: 11px;
+                border-radius: 3px;
+                white-space: nowrap;
+                font-weight: bold;
             }
             .sidebar-panel {
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 padding: 20px;
             }
@@ -4462,14 +4965,14 @@ def set_signature_fields(doc_id):
                 width: 100%;
                 padding: 8px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 14px;
             }
             .signature-field-item {
                 background: #f8f9fa;
                 padding: 10px;
                 margin-bottom: 10px;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 border-left: 3px solid #007bff;
             }
             .signature-field-item h4 {
@@ -4478,13 +4981,13 @@ def set_signature_fields(doc_id):
             }
             .signature-field-item p {
                 font-size: 0.8em;
-                color: #666;
+                color: #808080;
                 margin: 3px 0;
             }
             .instructions {
                 background: #e7f3ff;
                 padding: 15px;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 margin-bottom: 20px;
                 border-left: 4px solid #007bff;
             }
@@ -4506,17 +5009,17 @@ def set_signature_fields(doc_id):
             <div class="header-content">
                 <h1>✍️ Set Signature Fields - {{ document.original_filename }}</h1>
             </div>
+            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('manage_documents') }}" class="btn">← Back to Documents</a>
             
             <div class="main-content">
                 <div class="document-viewer-container">
                     <h3 style="margin-bottom: 15px;">Document Preview</h3>
                     <div class="document-viewer" id="documentViewer">
                         {% if is_pdf %}
-                        <iframe src="{{ url_for('view_document_embed', doc_id=document.id) }}" id="pdfFrame"></iframe>
+                        <canvas id="pdfCanvas"></canvas>
                         {% else %}
                         <p style="padding: 20px; color: white;">Signature fields can only be set on PDF documents. Please convert this document to PDF first.</p>
                         {% endif %}
@@ -4524,35 +5027,80 @@ def set_signature_fields(doc_id):
                 </div>
                 
                 <div class="sidebar-panel">
-                    <div class="instructions">
-                        <h3>Instructions</h3>
-                        <ol>
-                            <li>Click anywhere on the document to place a signature field</li>
-                            <li>Enter a label for the field (e.g., "Employee Signature")</li>
-                            <li>Select the page number where the field should appear</li>
-                            <li>Click "Add Signature Field" to save</li>
-                        </ol>
-                    </div>
-                    
-                    <h3 style="margin-bottom: 15px;">Add Signature Field</h3>
-                    <form id="signatureFieldForm" method="POST" action="{{ url_for('add_signature_field', doc_id=document.id) }}">
+                    <h3 style="margin-bottom: 15px;">Add Field</h3>
+                    <form id="fieldForm" method="POST" onsubmit="return submitFieldForm(event)">
+                        <div class="form-group">
+                            <label for="field_type_selector">Field Type:</label>
+                            <select name="field_type_selector" id="field_type_selector" required onchange="toggleFieldTypeOptions()">
+                                <option value="signature">Signature Field</option>
+                                <option value="typed">Typed Field</option>
+                            </select>
+                        </div>
                         <div class="form-group">
                             <label for="field_label">Field Label:</label>
-                            <input type="text" name="field_label" id="field_label" placeholder="e.g., Employee Signature" required>
+                            <input type="text" name="field_label" id="field_label" placeholder="e.g., Employee Signature, Name, Date" required>
                         </div>
                         <div class="form-group">
                             <label for="page_number">Page Number:</label>
                             <input type="number" name="page_number" id="page_number" value="1" min="1" required>
+                            <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Change this to navigate to different pages</p>
                         </div>
+                        
+                        <!-- Signature Field Options -->
+                        <div id="signatureFieldOptions" class="field-type-options">
+                            <div class="form-group">
+                                <label for="signature_type">Signature Type:</label>
+                                <select name="signature_type" id="signature_type">
+                                    <option value="image">Image Signature (Simple)</option>
+                                    <option value="cryptographic">Cryptographic Signature (Legally Compliant)</option>
+                                </select>
+                                <p style="font-size: 0.85em; color: #666; margin-top: 5px;">
+                                    <strong>Image:</strong> Visual signature overlay<br>
+                                    <strong>Cryptographic:</strong> Legally binding, tamper-evident signature
+                                </p>
+                            </div>
+                        </div>
+                        
+                        <!-- Typed Field Options -->
+                        <div id="typedFieldOptions" class="field-type-options" style="display: none;">
+                            <div class="form-group">
+                                <label for="typed_field_type">Input Type:</label>
+                                <select name="typed_field_type" id="typed_field_type">
+                                    <option value="text">Text</option>
+                                    <option value="name">Name</option>
+                                    <option value="date">Date</option>
+                                    <option value="number">Number</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="typed_placeholder">Placeholder (optional):</label>
+                                <input type="text" name="placeholder" id="typed_placeholder" placeholder="e.g., Enter your name">
+                            </div>
+                            <div class="form-group">
+                                <div class="checkbox-group">
+                                    <input type="checkbox" name="is_required" id="typed_is_required" checked>
+                                    <label for="typed_is_required">Required field</label>
+                                </div>
+                            </div>
+                        </div>
+                        
                         <div class="form-group">
-                            <label>Position (click on document to set):</label>
+                            <label>Position (drag on document to create field):</label>
                             <input type="hidden" name="x_position" id="x_position" required>
                             <input type="hidden" name="y_position" id="y_position" required>
                             <input type="hidden" name="width" id="width" value="200">
                             <input type="hidden" name="height" id="height" value="80">
-                            <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Click on the document above to set position</p>
+                            <div id="positionDisplay" style="font-size: 0.85em; color: #666; margin-top: 5px; padding: 8px; background: #f8f9fa; border-radius: 4px;">
+                                <strong>How to add a field:</strong><br>
+                                1. Select field type above (Signature or Typed Field)<br>
+                                2. Switch to the corresponding mode using the button above the document<br>
+                                3. Click and hold at the top-left corner where you want the field<br>
+                                4. Drag to the bottom-right corner to set the size<br>
+                                5. Release to create the field<br>
+                                6. You can then drag the field to move it, or drag the corner handles to resize it
+                            </div>
                         </div>
-                        <button type="submit" class="btn btn-success" style="width: 100%;">Add Signature Field</button>
+                        <button type="submit" class="btn btn-success" style="width: 100%;" id="submitButton">Add Field</button>
                     </form>
                     
                     <h3 style="margin-top: 30px; margin-bottom: 15px;">Existing Signature Fields</h3>
@@ -4569,7 +5117,25 @@ def set_signature_fields(doc_id):
                             </div>
                             {% endfor %}
                         {% else %}
-                            <p style="color: #666; font-size: 0.9em;">No signature fields yet. Add one using the form above.</p>
+                            <p style="color: #666; font-size: 0.9em;">No signature fields yet.</p>
+                        {% endif %}
+                    </div>
+                    
+                    <h3 style="margin-top: 30px; margin-bottom: 15px;">Existing Typed Fields</h3>
+                    <div id="existingTypedFields">
+                        {% if existing_typed_fields %}
+                            {% for field in existing_typed_fields %}
+                            <div class="signature-field-item" style="border-left-color: #ffc107;">
+                                <h4>{{ field.field_label or 'Typed Field' }}</h4>
+                                <p>Type: {{ field.field_type|title }} • Page: {{ field.page_number }}</p>
+                                <p>Position: ({{ "%.0f"|format(field.x_position) }}, {{ "%.0f"|format(field.y_position) }})</p>
+                                <form method="POST" action="{{ url_for('delete_typed_field', field_id=field.id) }}" style="display: inline;">
+                                    <button type="submit" class="btn btn-danger" style="padding: 5px 10px; font-size: 0.8em;" onclick="return confirm('Delete this typed field?')">Delete</button>
+                                </form>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <p style="color: #666; font-size: 0.9em;">No typed fields yet.</p>
                         {% endif %}
                     </div>
                 </div>
@@ -4577,61 +5143,901 @@ def set_signature_fields(doc_id):
         </div>
         
         <script>
-            var clickX = 0, clickY = 0;
-            var pdfFrame = document.getElementById('pdfFrame');
+            var pdfDoc = null;
+            var currentPage = 1;
+            var pdfScale = 1.0;
+            var canvasOffsetX = 0;
+            var canvasOffsetY = 0;
+            var currentIndicator = null;
+            var isResizing = false;
+            var resizeStartX = 0;
+            var resizeStartY = 0;
+            var resizeStartWidth = 0;
+            var resizeStartHeight = 0;
+            var resizeHandle = null;
             
-            // Create an overlay div to capture clicks
-            var viewerContainer = document.querySelector('.document-viewer');
-            if (viewerContainer) {
-                viewerContainer.style.position = 'relative';
+            // Load PDF using PDF.js
+            function loadPDF() {
+                var canvas = document.getElementById('pdfCanvas');
+                if (!canvas) return;
                 
-                var overlay = document.createElement('div');
-                overlay.style.position = 'absolute';
-                overlay.style.top = '0';
-                overlay.style.left = '0';
-                overlay.style.width = '100%';
-                overlay.style.height = '100%';
-                overlay.style.zIndex = '5';
-                overlay.style.cursor = 'crosshair';
-                overlay.style.background = 'transparent';
-                viewerContainer.appendChild(overlay);
+                // Set up PDF.js worker
+                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
                 
-                overlay.addEventListener('click', function(e) {
-                    var rect = viewerContainer.getBoundingClientRect();
-                    clickX = e.clientX - rect.left;
-                    clickY = e.clientY - rect.top;
+                // Get PDF URL
+                var pdfUrl = '{{ url_for("view_document_embed", doc_id=document.id) }}';
+                
+                    // Load the PDF
+                    pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+                        pdfDoc = pdf;
+                        renderPage(1);
+                        // Wait a bit for canvas to be fully rendered before displaying fields
+                        setTimeout(function() {
+                            displayExistingFields();
+                        }, 100);
+                    }).catch(function(error) {
+                        console.error('Error loading PDF:', error);
+                        document.getElementById('documentViewer').innerHTML = '<p style="padding: 20px; color: white;">Error loading PDF. Please try again.</p>';
+                    });
+            }
+            
+            // Render a PDF page
+            function renderPage(pageNum) {
+                if (!pdfDoc) return;
+                
+                var canvas = document.getElementById('pdfCanvas');
+                var ctx = canvas.getContext('2d');
+                
+                pdfDoc.getPage(pageNum).then(function(page) {
+                    // Calculate scale to fit 800px height (matching user view and embedding)
+                    var viewerHeight = 800;
+                    var viewport = page.getViewport({ scale: 1.0 });
+                    var scale = viewerHeight / viewport.height;
+                    pdfScale = scale;
+                    
+                    // Set canvas size
+                    var scaledViewport = page.getViewport({ scale: scale });
+                    canvas.width = scaledViewport.width;
+                    canvas.height = scaledViewport.height;
+                    
+                    // Render PDF page
+                    var renderContext = {
+                        canvasContext: ctx,
+                        viewport: scaledViewport
+                    };
+                    
+                    page.render(renderContext).promise.then(function() {
+                        // Calculate canvas offset within viewer
+                        var viewer = document.getElementById('documentViewer');
+                        var viewerRect = viewer.getBoundingClientRect();
+                        var canvasRect = canvas.getBoundingClientRect();
+                        canvasOffsetX = canvasRect.left - viewerRect.left;
+                        canvasOffsetY = canvasRect.top - viewerRect.top;
+                        
+                        currentPage = pageNum;
+                        // Wait a bit for canvas to be fully rendered before displaying fields
+                        setTimeout(function() {
+                            displayExistingFields();
+                        }, 50);
+                    });
+                });
+            }
+            
+            // Display existing signature fields on the canvas
+            function displayExistingFields() {
+                // Remove ONLY the saved field markers, NOT the temporary indicators being created/edited
+                var existing = document.querySelectorAll('.existing-field-marker, .existing-typed-field-marker');
+                existing.forEach(function(el) { el.remove(); });
+                
+                var viewer = document.getElementById('documentViewer');
+                var canvas = document.getElementById('pdfCanvas');
+                if (!viewer || !canvas) return;
+                
+                // Get signature fields for current page
+                var fields = [
+                    {% for field in existing_fields %}
+                    {
+                        id: {{ field.id }},
+                        label: '{{ field.field_label or "Signature" }}',
+                        x: {{ field.x_position }},
+                        y: {{ field.y_position }},
+                        width: {{ field.width or 200 }},
+                        height: {{ field.height or 80 }},
+                        page: {{ field.page_number }}
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                ];
+                
+                fields.forEach(function(field) {
+                    if (field.page !== currentPage) return;
+                    
+                    var marker = document.createElement('div');
+                    marker.className = 'existing-field-marker';
+                    marker.setAttribute('data-label', field.label);
+                    // Position markers relative to canvas (convert PDF coordinates to screen coordinates)
+                    var canvas = document.getElementById('pdfCanvas');
+                    if (canvas && canvas.width > 0 && canvas.height > 0) {
+                        var canvasRect = canvas.getBoundingClientRect();
+                        var viewerRect = viewer.getBoundingClientRect();
+                        // Convert PDF coordinates to screen coordinates using scale
+                        var scaleX = canvas.width / canvasRect.width;
+                        var scaleY = canvas.height / canvasRect.height;
+                        if (scaleX > 0 && scaleY > 0) {
+                            marker.style.left = (canvasRect.left - viewerRect.left + (field.x / scaleX)) + 'px';
+                            marker.style.top = (canvasRect.top - viewerRect.top + (field.y / scaleY)) + 'px';
+                            marker.style.width = (field.width / scaleX) + 'px';
+                            marker.style.height = (field.height / scaleY) + 'px';
+                        } else {
+                            // Fallback if scale calculation fails
+                            marker.style.left = (canvasOffsetX + (field.x / pdfScale)) + 'px';
+                            marker.style.top = (canvasOffsetY + (field.y / pdfScale)) + 'px';
+                            marker.style.width = (field.width / pdfScale) + 'px';
+                            marker.style.height = (field.height / pdfScale) + 'px';
+                        }
+                    } else {
+                        // Fallback if canvas not ready
+                        marker.style.left = (canvasOffsetX + (field.x / pdfScale)) + 'px';
+                        marker.style.top = (canvasOffsetY + (field.y / pdfScale)) + 'px';
+                        marker.style.width = (field.width / pdfScale) + 'px';
+                        marker.style.height = (field.height / pdfScale) + 'px';
+                    }
+                    viewer.appendChild(marker);
+                });
+                
+                // Get typed fields for current page
+                var typedFields = [
+                    {% if existing_typed_fields %}
+                    {% for field in existing_typed_fields %}
+                    {
+                        id: {{ field.id }},
+                        label: '{{ field.field_label or "Typed Field" }}',
+                        type: '{{ field.field_type }}',
+                        x: {{ field.x_position }},
+                        y: {{ field.y_position }},
+                        width: {{ field.width or 200 }},
+                        height: {{ field.height or 30 }},
+                        page: {{ field.page_number }}
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                    {% endif %}
+                ];
+                
+                typedFields.forEach(function(field) {
+                    if (field.page !== currentPage) return;
+                    
+                    var marker = document.createElement('div');
+                    marker.className = 'existing-typed-field-marker';
+                    marker.setAttribute('data-label', field.label + ' (' + field.type + ')');
+                    // Position markers relative to canvas (convert PDF coordinates to screen coordinates)
+                    var canvas = document.getElementById('pdfCanvas');
+                    if (canvas && canvas.width > 0 && canvas.height > 0) {
+                        var canvasRect = canvas.getBoundingClientRect();
+                        var viewerRect = viewer.getBoundingClientRect();
+                        // Convert PDF coordinates to screen coordinates using scale
+                        var scaleX = canvas.width / canvasRect.width;
+                        var scaleY = canvas.height / canvasRect.height;
+                        if (scaleX > 0 && scaleY > 0) {
+                            marker.style.left = (canvasRect.left - viewerRect.left + (field.x / scaleX)) + 'px';
+                            marker.style.top = (canvasRect.top - viewerRect.top + (field.y / scaleY)) + 'px';
+                            marker.style.width = (field.width / scaleX) + 'px';
+                            marker.style.height = (field.height / scaleY) + 'px';
+                        } else {
+                            // Fallback if scale calculation fails
+                            marker.style.left = (canvasOffsetX + (field.x / pdfScale)) + 'px';
+                            marker.style.top = (canvasOffsetY + (field.y / pdfScale)) + 'px';
+                            marker.style.width = (field.width / pdfScale) + 'px';
+                            marker.style.height = (field.height / pdfScale) + 'px';
+                        }
+                    } else {
+                        // Fallback if canvas not ready
+                        marker.style.left = (canvasOffsetX + (field.x / pdfScale)) + 'px';
+                        marker.style.top = (canvasOffsetY + (field.y / pdfScale)) + 'px';
+                        marker.style.width = (field.width / pdfScale) + 'px';
+                        marker.style.height = (field.height / pdfScale) + 'px';
+                    }
+                    viewer.appendChild(marker);
+                });
+            }
+            
+            // Handle canvas drag-to-create signature field
+            var canvas = document.getElementById('pdfCanvas');
+            var isDraggingIndicator = false;
+            var isCreatingField = false;
+            var createStartX = 0;
+            var createStartY = 0;
+            var previewIndicator = null;
+            var fieldMode = 'signature'; // 'signature' or 'typed'
+            
+            if (canvas) {
+                canvas.addEventListener('mousedown', function(e) {
+                    // Don't start creating if clicking on existing indicator or resize handle
+                    if (e.target.closest('.signature-field-indicator') || e.target.closest('.typed-field-indicator') || e.target.classList.contains('resize-handle')) {
+                        return;
+                    }
+                    // Don't start creating if already dragging/resizing an existing indicator
+                    if (isDraggingIndicator || isResizing) {
+                        return;
+                    }
+                    // Don't start creating if there's already a current indicator being interacted with
+                    if (currentIndicator && (e.target.closest('.signature-field-indicator') || e.target.closest('.typed-field-indicator'))) {
+                        return;
+                    }
+                    
+                    // Start creating a new field (signature or typed based on mode)
+                    isCreatingField = true;
+                    var canvasRect = canvas.getBoundingClientRect();
+                    
+                    // Get click position in canvas coordinates
+                    var clickX = e.clientX - canvasRect.left;
+                    var clickY = e.clientY - canvasRect.top;
+                    
+                    // Convert to canvas pixel coordinates (accounting for scale)
+                    var scaleX = canvas.width / canvasRect.width;
+                    var scaleY = canvas.height / canvasRect.height;
+                    createStartX = clickX * scaleX;
+                    createStartY = clickY * scaleY;
+                    
+                    // Create preview indicator (style based on mode)
+                    if (previewIndicator) {
+                        previewIndicator.remove();
+                    }
+                    previewIndicator = document.createElement('div');
+                    if (fieldMode === 'typed') {
+                        previewIndicator.className = 'typed-field-indicator';
+                        previewIndicator.style.cssText = 'position: absolute; border: 2px dashed #ffc107; background: rgba(255, 193, 7, 0.1); pointer-events: none; z-index: 100; opacity: 0.7;';
+                    } else {
+                        previewIndicator.className = 'signature-field-indicator';
+                        previewIndicator.style.pointerEvents = 'none';
+                        previewIndicator.style.opacity = '0.7';
+                    }
+                    var viewerRect = document.getElementById('documentViewer').getBoundingClientRect();
+                    previewIndicator.style.left = (canvasRect.left - viewerRect.left + clickX) + 'px';
+                    previewIndicator.style.top = (canvasRect.top - viewerRect.top + clickY) + 'px';
+                    previewIndicator.style.width = '0px';
+                    previewIndicator.style.height = '0px';
+                    document.getElementById('documentViewer').appendChild(previewIndicator);
+                    
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+                
+                // Track mouse movement while creating field
+                document.addEventListener('mousemove', function(e) {
+                    if (!isCreatingField || !previewIndicator) return;
+                    
+                    var canvasRect = canvas.getBoundingClientRect();
+                    var viewerRect = document.getElementById('documentViewer').getBoundingClientRect();
+                    
+                    // Get current mouse position in canvas coordinates
+                    var currentX = e.clientX - canvasRect.left;
+                    var currentY = e.clientY - canvasRect.top;
+                    
+                    // Convert to canvas pixel coordinates
+                    var scaleX = canvas.width / canvasRect.width;
+                    var scaleY = canvas.height / canvasRect.height;
+                    var currentXCanvas = currentX * scaleX;
+                    var currentYCanvas = currentY * scaleY;
+                    
+                    // Calculate field dimensions (from start to current position)
+                    var fieldWidth = Math.abs(currentXCanvas - createStartX);
+                    var fieldHeight = Math.abs(currentYCanvas - createStartY);
+                    
+                    // Ensure minimum size (different for typed vs signature)
+                    if (fieldMode === 'typed') {
+                        if (fieldWidth < 50) fieldWidth = 50;
+                        if (fieldHeight < 20) fieldHeight = 20;
+                    } else {
+                        if (fieldWidth < 50) fieldWidth = 50;
+                        if (fieldHeight < 30) fieldHeight = 30;
+                    }
+                    
+                    // Calculate top-left corner (always use the smaller coordinates)
+                    var xPos = Math.min(createStartX, currentXCanvas);
+                    var yPos = Math.min(createStartY, currentYCanvas);
+                    
+                    // Keep within canvas bounds
+                    xPos = Math.max(0, Math.min(xPos, canvas.width - fieldWidth));
+                    yPos = Math.max(0, Math.min(yPos, canvas.height - fieldHeight));
+                    fieldWidth = Math.min(fieldWidth, canvas.width - xPos);
+                    fieldHeight = Math.min(fieldHeight, canvas.height - yPos);
+                    
+                    // Update preview indicator position and size
+                    previewIndicator.style.left = (canvasRect.left - viewerRect.left + (xPos / scaleX)) + 'px';
+                    previewIndicator.style.top = (canvasRect.top - viewerRect.top + (yPos / scaleY)) + 'px';
+                    previewIndicator.style.width = (fieldWidth / scaleX) + 'px';
+                    previewIndicator.style.height = (fieldHeight / scaleY) + 'px';
+                    
+                    // Update position display
+                    updatePositionDisplay(xPos, yPos, fieldWidth, fieldHeight);
+                });
+                
+                // Finalize field creation on mouseup
+                document.addEventListener('mouseup', function(e) {
+                    if (!isCreatingField) return;
+                    
+                    var canvasRect = canvas.getBoundingClientRect();
+                    
+                    // Get final mouse position
+                    var currentX = e.clientX - canvasRect.left;
+                    var currentY = e.clientY - canvasRect.top;
+                    
+                    // Convert to canvas pixel coordinates
+                    var scaleX = canvas.width / canvasRect.width;
+                    var scaleY = canvas.height / canvasRect.height;
+                    var currentXCanvas = currentX * scaleX;
+                    var currentYCanvas = currentY * scaleY;
+                    
+                    // Calculate final field dimensions
+                    var fieldWidth = Math.abs(currentXCanvas - createStartX);
+                    var fieldHeight = Math.abs(currentYCanvas - createStartY);
+                    
+                    // Ensure minimum size (different for typed vs signature)
+                    var minWidth = 50;
+                    var minHeight = fieldMode === 'typed' ? 20 : 30;
+                    if (fieldWidth < minWidth) fieldWidth = minWidth;
+                    if (fieldHeight < minHeight) fieldHeight = minHeight;
+                    
+                    // Calculate top-left corner
+                    var xPos = Math.min(createStartX, currentXCanvas);
+                    var yPos = Math.min(createStartY, currentYCanvas);
+                    
+                    // Keep within canvas bounds
+                    xPos = Math.max(0, Math.min(xPos, canvas.width - fieldWidth));
+                    yPos = Math.max(0, Math.min(yPos, canvas.height - fieldHeight));
+                    fieldWidth = Math.min(fieldWidth, canvas.width - xPos);
+                    fieldHeight = Math.min(fieldHeight, canvas.height - yPos);
                     
                     // Set the position inputs
-                    document.getElementById('x_position').value = clickX;
-                    document.getElementById('y_position').value = clickY;
+                    document.getElementById('x_position').value = xPos;
+                    document.getElementById('y_position').value = yPos;
+                    document.getElementById('width').value = fieldWidth;
+                    document.getElementById('height').value = fieldHeight;
                     
-                    // Show visual feedback
-                    var indicator = document.createElement('div');
-                    indicator.style.position = 'absolute';
-                    indicator.style.left = (clickX - 100) + 'px';
-                    indicator.style.top = (clickY - 40) + 'px';
-                    indicator.style.width = '200px';
-                    indicator.style.height = '80px';
-                    indicator.style.border = '2px dashed #28a745';
-                    indicator.style.background = 'rgba(40, 167, 69, 0.1)';
-                    indicator.style.pointerEvents = 'none';
-                    indicator.style.zIndex = '20';
-                    viewerContainer.appendChild(indicator);
+                    // Update page number to match current page
+                    document.getElementById('page_number').value = currentPage;
                     
-                    setTimeout(function() {
-                        if (viewerContainer.contains(indicator)) {
-                            viewerContainer.removeChild(indicator);
+                    // Update position display
+                    updatePositionDisplay(xPos, yPos, fieldWidth, fieldHeight);
+                    
+                    // Remove preview indicator
+                    if (previewIndicator) {
+                        previewIndicator.remove();
+                        previewIndicator = null;
+                    }
+                    
+                    // Remove previous final indicator if exists
+                    if (currentIndicator) {
+                        currentIndicator.remove();
+                    }
+                    
+                    // Create final indicator (style based on mode) - always create if we have valid dimensions
+                    if (fieldWidth >= minWidth && fieldHeight >= minHeight) {
+                        var indicator = document.createElement('div');
+                        if (fieldMode === 'typed') {
+                            indicator.className = 'typed-field-indicator';
+                            indicator.style.cssText = 'position: absolute; border: 2px solid #ffc107; background: rgba(255, 193, 7, 0.1); pointer-events: all; z-index: 100; cursor: move;';
+                        } else {
+                            indicator.className = 'signature-field-indicator';
                         }
-                    }, 2000);
+                        var viewerRect = document.getElementById('documentViewer').getBoundingClientRect();
+                        indicator.style.left = (canvasRect.left - viewerRect.left + (xPos / scaleX)) + 'px';
+                        indicator.style.top = (canvasRect.top - viewerRect.top + (yPos / scaleY)) + 'px';
+                        indicator.style.width = (fieldWidth / scaleX) + 'px';
+                        indicator.style.height = (fieldHeight / scaleY) + 'px';
+                        indicator.dataset.x = xPos;
+                        indicator.dataset.y = yPos;
+                        indicator.dataset.width = fieldWidth;
+                        indicator.dataset.height = fieldHeight;
+                        
+                        // Add resize handles
+                        var handles = ['bottom-right', 'bottom-left', 'top-right', 'top-left'];
+                        handles.forEach(function(handleClass) {
+                            var handle = document.createElement('div');
+                            handle.className = 'resize-handle ' + handleClass;
+                            indicator.appendChild(handle);
+                        });
+                        
+                        // Make indicator draggable
+                        makeIndicatorDraggable(indicator);
+                        
+                        // Make handles resizable
+                        makeIndicatorResizable(indicator);
+                        
+                        document.getElementById('documentViewer').appendChild(indicator);
+                        currentIndicator = indicator;
+                        
+                        // Focus on label input
+                        document.getElementById('field_label').focus();
+                    }
                     
-                    // Focus on label input
-                    document.getElementById('field_label').focus();
+                    isCreatingField = false;
                 });
+            }
+            
+            // Make the indicator draggable
+            function makeIndicatorDraggable(indicator) {
+                var isDragging = false;
+                var startX = 0;
+                var startY = 0;
+                var startLeft = 0;
+                var startTop = 0;
+                
+                indicator.addEventListener('mousedown', function(e) {
+                    // Don't drag if clicking on a resize handle
+                    if (e.target.classList.contains('resize-handle') || e.target.closest('.resize-handle')) {
+                        return;
+                    }
+                    isDragging = true;
+                    isDraggingIndicator = true;
+                    startX = e.clientX;
+                    startY = e.clientY;
+                    startLeft = parseFloat(indicator.dataset.x) || 0;
+                    startTop = parseFloat(indicator.dataset.y) || 0;
+                    indicator.style.cursor = 'grabbing';
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.cancelBubble = true;
+                    return false;
+                });
+                
+                var mouseMoveHandler = function(e) {
+                    if (!isDragging) return;
+                    
+                    // Get fresh references to canvas and viewer
+                    var canvas = document.getElementById('pdfCanvas');
+                    var viewer = document.getElementById('documentViewer');
+                    if (!canvas || !viewer) return;
+                    
+                    var canvasRectCurrent = canvas.getBoundingClientRect();
+                    var viewerRectCurrent = viewer.getBoundingClientRect();
+                    
+                    // Convert mouse delta to canvas coordinates
+                    var scaleX = canvas.width / canvasRectCurrent.width;
+                    var scaleY = canvas.height / canvasRectCurrent.height;
+                    
+                    var deltaX = (e.clientX - startX) * scaleX;
+                    var deltaY = (e.clientY - startY) * scaleY;
+                    
+                    var newLeft = startLeft + deltaX;
+                    var newTop = startTop + deltaY;
+                    
+                    // Keep within canvas bounds
+                    var currentWidth = parseFloat(indicator.dataset.width) || 200;
+                    var currentHeight = parseFloat(indicator.dataset.height) || 80;
+                    newLeft = Math.max(0, Math.min(newLeft, canvas.width - currentWidth));
+                    newTop = Math.max(0, Math.min(newTop, canvas.height - currentHeight));
+                    
+                    // Update indicator position
+                    indicator.style.left = (canvasRectCurrent.left - viewerRectCurrent.left + newLeft) + 'px';
+                    indicator.style.top = (canvasRectCurrent.top - viewerRectCurrent.top + newTop) + 'px';
+                    indicator.dataset.x = newLeft;
+                    indicator.dataset.y = newTop;
+                    
+                    // Update hidden inputs
+                    var xInput = document.getElementById('x_position');
+                    var yInput = document.getElementById('y_position');
+                    if (xInput) xInput.value = newLeft;
+                    if (yInput) yInput.value = newTop;
+                    
+                    updatePositionDisplay(newLeft, newTop, currentWidth, currentHeight);
+                    
+                    e.preventDefault();
+                    e.stopPropagation();
+                };
+                
+                var mouseUpHandler = function(e) {
+                    if (isDragging) {
+                        isDragging = false;
+                        isDraggingIndicator = false;
+                        indicator.style.cursor = 'move';
+                        // Small delay to prevent click event from firing
+                        setTimeout(function() {
+                            isDraggingIndicator = false;
+                        }, 100);
+                    }
+                };
+                
+                document.addEventListener('mousemove', mouseMoveHandler);
+                document.addEventListener('mouseup', mouseUpHandler);
+                
+                // Store handlers for cleanup if needed
+                indicator._dragHandlers = { move: mouseMoveHandler, up: mouseUpHandler };
+            }
+            
+            // Make the indicator resizable via corner handles
+            function makeIndicatorResizable(indicator) {
+                var handles = indicator.querySelectorAll('.resize-handle');
+                
+                handles.forEach(function(handle) {
+                    handle.addEventListener('mousedown', function(e) {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        isResizing = true;
+                        resizeHandle = handle.className.split(' ')[1]; // Get handle position
+                        resizeStartX = e.clientX;
+                        resizeStartY = e.clientY;
+                        
+                        resizeStartWidth = parseFloat(indicator.dataset.width) || 200;
+                        resizeStartHeight = parseFloat(indicator.dataset.height) || 80;
+                        
+                        indicator.classList.add('resizing');
+                        return false;
+                    });
+                });
+                
+                var resizeMoveHandler = function(e) {
+                    if (!isResizing || !resizeHandle) return;
+                    
+                    // Get fresh references
+                    var canvas = document.getElementById('pdfCanvas');
+                    var viewer = document.getElementById('documentViewer');
+                    if (!canvas || !viewer) return;
+                    
+                    var canvasRectCurrent = canvas.getBoundingClientRect();
+                    var viewerRectCurrent = viewer.getBoundingClientRect();
+                    var scaleX = canvas.width / canvasRectCurrent.width;
+                    var scaleY = canvas.height / canvasRectCurrent.height;
+                    
+                    var deltaXCanvas = (e.clientX - resizeStartX) * scaleX;
+                    var deltaYCanvas = (e.clientY - resizeStartY) * scaleY;
+                    
+                    var newWidth = resizeStartWidth;
+                    var newHeight = resizeStartHeight;
+                    var newLeft = parseFloat(indicator.dataset.x) || 0;
+                    var newTop = parseFloat(indicator.dataset.y) || 0;
+                    
+                    // Adjust based on which handle is being dragged
+                    if (resizeHandle === 'bottom-right') {
+                        newWidth = Math.max(50, resizeStartWidth + deltaXCanvas);
+                        newHeight = Math.max(30, resizeStartHeight + deltaYCanvas);
+                    } else if (resizeHandle === 'bottom-left') {
+                        newWidth = Math.max(50, resizeStartWidth - deltaXCanvas);
+                        newHeight = Math.max(30, resizeStartHeight + deltaYCanvas);
+                        newLeft = parseFloat(indicator.dataset.x) + (resizeStartWidth - newWidth);
+                    } else if (resizeHandle === 'top-right') {
+                        newWidth = Math.max(50, resizeStartWidth + deltaXCanvas);
+                        newHeight = Math.max(30, resizeStartHeight - deltaYCanvas);
+                        newTop = parseFloat(indicator.dataset.y) + (resizeStartHeight - newHeight);
+                    } else if (resizeHandle === 'top-left') {
+                        newWidth = Math.max(50, resizeStartWidth - deltaXCanvas);
+                        newHeight = Math.max(30, resizeStartHeight - deltaYCanvas);
+                        newLeft = parseFloat(indicator.dataset.x) + (resizeStartWidth - newWidth);
+                        newTop = parseFloat(indicator.dataset.y) + (resizeStartHeight - newHeight);
+                    }
+                    
+                    // Keep within canvas bounds
+                    var canvasWidth = canvas.width;
+                    var canvasHeight = canvas.height;
+                    newLeft = Math.max(0, Math.min(newLeft, canvasWidth - newWidth));
+                    newTop = Math.max(0, Math.min(newTop, canvasHeight - newHeight));
+                    newWidth = Math.min(newWidth, canvasWidth - newLeft);
+                    newHeight = Math.min(newHeight, canvasHeight - newTop);
+                    
+                    // Update indicator
+                    indicator.style.width = newWidth + 'px';
+                    indicator.style.height = newHeight + 'px';
+                    indicator.style.left = (canvasRectCurrent.left - viewerRectCurrent.left + newLeft) + 'px';
+                    indicator.style.top = (canvasRectCurrent.top - viewerRectCurrent.top + newTop) + 'px';
+                    indicator.dataset.x = newLeft;
+                    indicator.dataset.y = newTop;
+                    indicator.dataset.width = newWidth;
+                    indicator.dataset.height = newHeight;
+                    
+                    // Update hidden inputs
+                    var xInput = document.getElementById('x_position');
+                    var yInput = document.getElementById('y_position');
+                    if (xInput) xInput.value = newLeft;
+                    if (yInput) yInput.value = newTop;
+                    document.getElementById('width').value = newWidth;
+                    document.getElementById('height').value = newHeight;
+                    
+                    updatePositionDisplay(newLeft, newTop, newWidth, newHeight);
+                    
+                    e.preventDefault();
+                };
+                
+                var resizeUpHandler = function(e) {
+                    if (isResizing) {
+                        isResizing = false;
+                        resizeHandle = null;
+                        if (indicator) {
+                            indicator.classList.remove('resizing');
+                        }
+                    }
+                };
+                
+                document.addEventListener('mousemove', resizeMoveHandler);
+                document.addEventListener('mouseup', resizeUpHandler);
+                
+                // Store handlers for cleanup if needed
+                indicator._resizeHandlers = { move: resizeMoveHandler, up: resizeUpHandler };
+            }
+            
+            // Helper function to update position display
+            function updatePositionDisplay(x, y, width, height) {
+                var posDisplay = document.getElementById('positionDisplay');
+                if (posDisplay) {
+                    var text = 'Position: (' + Math.round(x) + ', ' + Math.round(y) + ') px<br>Page: ' + currentPage;
+                    if (width && height) {
+                        text += '<br>Size: ' + Math.round(width) + ' x ' + Math.round(height) + ' px';
+                    }
+                    posDisplay.innerHTML = text;
+                    // Color based on current mode
+                    var fieldType = document.getElementById('field_type_selector');
+                    if (fieldType && fieldType.value === 'typed') {
+                        posDisplay.style.color = '#ffc107';
+                    } else {
+                        posDisplay.style.color = '#28a745';
+                    }
+                    posDisplay.style.fontWeight = 'bold';
+                }
+            }
+            
+            // Handle page number change
+            var pageInput = document.getElementById('page_number');
+            if (pageInput) {
+                pageInput.addEventListener('change', function() {
+                    var pageNum = parseInt(this.value) || 1;
+                    if (pdfDoc && pageNum >= 1 && pageNum <= pdfDoc.numPages) {
+                        renderPage(pageNum);
+                    }
+                });
+            }
+            
+            // Toggle field type options based on selection
+            function toggleFieldTypeOptions() {
+                var fieldType = document.getElementById('field_type_selector').value;
+                var signatureOptions = document.getElementById('signatureFieldOptions');
+                var typedOptions = document.getElementById('typedFieldOptions');
+                var submitButton = document.getElementById('submitButton');
+                
+                if (fieldType === 'signature') {
+                    signatureOptions.style.display = 'block';
+                    typedOptions.style.display = 'none';
+                    submitButton.textContent = 'Add Signature Field';
+                    submitButton.className = 'btn btn-success';
+                    // Set default size for signature fields
+                    document.getElementById('width').value = 200;
+                    document.getElementById('height').value = 80;
+                    // Update mode to signature
+                    if (typeof fieldMode !== 'undefined') {
+                        fieldMode = 'signature';
+                        var sigBtn = document.getElementById('modeSignature');
+                        var typedBtn = document.getElementById('modeTyped');
+                        if (sigBtn && typedBtn) {
+                            sigBtn.style.background = '#28a745';
+                            sigBtn.style.color = 'white';
+                            typedBtn.style.background = '#e0e0e0';
+                            typedBtn.style.color = '#000';
+                        }
+                    }
+                } else {
+                    signatureOptions.style.display = 'none';
+                    typedOptions.style.display = 'block';
+                    submitButton.textContent = 'Add Typed Field';
+                    submitButton.className = 'btn btn-primary';
+                    // Set default size for typed fields
+                    document.getElementById('width').value = 200;
+                    document.getElementById('height').value = 30;
+                    // Update mode to typed
+                    if (typeof fieldMode !== 'undefined') {
+                        fieldMode = 'typed';
+                        var sigBtn = document.getElementById('modeSignature');
+                        var typedBtn = document.getElementById('modeTyped');
+                        if (sigBtn && typedBtn) {
+                            typedBtn.style.background = '#ffc107';
+                            typedBtn.style.color = '#000';
+                            sigBtn.style.background = '#e0e0e0';
+                            sigBtn.style.color = '#000';
+                        }
+                    }
+                }
+            }
+            
+            // Handle form submission - use AJAX for typed fields to avoid page reload
+            function submitFieldForm(e) {
+                e.preventDefault();
+                var fieldType = document.getElementById('field_type_selector').value;
+                var xPos = document.getElementById('x_position').value;
+                var yPos = document.getElementById('y_position').value;
+                var width = document.getElementById('width').value;
+                var height = document.getElementById('height').value;
+                
+                if (!xPos || !yPos || xPos == '0' || yPos == '0') {
+                    alert('Please place the field on the document first by clicking and dragging.');
+                    return false;
+                }
+                
+                if (!width || !height || width == '0' || height == '0') {
+                    alert('Please place the field on the document first by clicking and dragging.');
+                    return false;
+                }
+                
+                var form = document.getElementById('fieldForm');
+                var formData = new FormData(form);
+                
+                // Validate required fields
+                var fieldLabel = formData.get('field_label');
+                if (!fieldLabel || fieldLabel.trim() === '') {
+                    alert('Please enter a field label.');
+                    document.getElementById('field_label').focus();
+                    return false;
+                }
+                
+                if (fieldType === 'signature') {
+                    // Submit as signature field (traditional form submit)
+                    var signatureData = {
+                        field_label: fieldLabel,
+                        page_number: formData.get('page_number'),
+                        signature_type: formData.get('signature_type'),
+                        x_position: xPos,
+                        y_position: yPos,
+                        width: width,
+                        height: height
+                    };
+                    
+                    // Create a temporary form and submit it
+                    var tempForm = document.createElement('form');
+                    tempForm.method = 'POST';
+                    tempForm.action = '{{ url_for("add_signature_field", doc_id=document.id) }}';
+                    for (var key in signatureData) {
+                        var input = document.createElement('input');
+                        input.type = 'hidden';
+                        input.name = key;
+                        input.value = signatureData[key];
+                        tempForm.appendChild(input);
+                    }
+                    document.body.appendChild(tempForm);
+                    tempForm.submit();
+                } else {
+                    // Submit as typed field using AJAX (no page reload)
+                    var submitButton = document.getElementById('submitButton');
+                    var originalText = submitButton.textContent;
+                    submitButton.disabled = true;
+                    submitButton.textContent = 'Saving...';
+                    
+                    var typedData = {
+                        field_label: fieldLabel,
+                        page_number: formData.get('page_number'),
+                        field_type: formData.get('typed_field_type') || 'text',
+                        placeholder: formData.get('placeholder') || '',
+                        is_required: formData.get('is_required') ? 'on' : '',
+                        x_position: xPos,
+                        y_position: yPos,
+                        width: width,
+                        height: height
+                    };
+                    
+                    // Create FormData for AJAX
+                    var ajaxFormData = new FormData();
+                    for (var key in typedData) {
+                        if (typedData[key] !== null && typedData[key] !== undefined) {
+                            ajaxFormData.append(key, typedData[key]);
+                        }
+                    }
+                    
+                    // Submit via AJAX
+                    fetch('{{ url_for("add_typed_field", doc_id=document.id) }}', {
+                        method: 'POST',
+                        body: ajaxFormData,
+                        headers: {
+                            'X-Requested-With': 'XMLHttpRequest'
+                        }
+                    })
+                    .then(function(response) {
+                        // Check if response is OK
+                        if (!response.ok) {
+                            // Try to get error message from response
+                            return response.json().catch(function() {
+                                return response.text().then(function(text) {
+                                    throw new Error(text || 'Server error: ' + response.status);
+                                });
+                            }).then(function(data) {
+                                throw new Error(data.message || 'Server error: ' + response.status);
+                            });
+                        }
+                        
+                        // Try to parse as JSON
+                        var contentType = response.headers.get('content-type');
+                        if (contentType && contentType.includes('application/json')) {
+                            return response.json();
+                        } else {
+                            // If not JSON, assume success if status is OK
+                            return {success: true, message: 'Field saved successfully'};
+                        }
+                    })
+                    .then(function(data) {
+                        if (data && data.success) {
+                            // Success - show message and reload to display the new field
+                            alert('Typed field saved successfully!');
+                            window.location.reload();
+                        } else {
+                            var errorMsg = (data && data.message) ? data.message : 'Unknown error occurred';
+                            alert('Error: ' + errorMsg);
+                            submitButton.disabled = false;
+                            submitButton.textContent = originalText;
+                        }
+                    })
+                    .catch(function(error) {
+                        console.error('Error:', error);
+                        var errorMsg = error.message || 'Unknown error occurred';
+                        alert('Error saving typed field: ' + errorMsg);
+                        submitButton.disabled = false;
+                        submitButton.textContent = originalText;
+                    });
+                }
+                
+                return false;
+            }
+            
+            
+            // Initialize field type options on page load
+            if (document.getElementById('field_type_selector')) {
+                toggleFieldTypeOptions();
+            }
+            
+            // Add mode toggle buttons for signature vs typed field (only once, after page loads)
+            // Also sync with the field type selector
+            setTimeout(function() {
+                var viewerContainer = document.querySelector('.document-viewer-container');
+                if (viewerContainer && !document.getElementById('modeContainer')) {
+                    var modeContainer = document.createElement('div');
+                    modeContainer.id = 'modeContainer';
+                    modeContainer.style.cssText = 'position: absolute; top: 10px; right: 10px; z-index: 200; background: white; padding: 10px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);';
+                    modeContainer.innerHTML = '<label style="font-size: 0.9em; font-weight: bold; margin-right: 10px;">Mode:</label>' +
+                        '<button type="button" id="modeSignature" style="padding: 5px 15px; margin-right: 5px; background: #28a745; color: white; border: none; border-radius: 3px; cursor: pointer;">Signature</button>' +
+                        '<button type="button" id="modeTyped" style="padding: 5px 15px; background: #e0e0e0; color: #000; border: none; border-radius: 3px; cursor: pointer;">Typed Field</button>';
+                    viewerContainer.appendChild(modeContainer);
+                    
+                    document.getElementById('modeSignature').addEventListener('click', function() {
+                        fieldMode = 'signature';
+                        this.style.background = '#28a745';
+                        this.style.color = 'white';
+                        document.getElementById('modeTyped').style.background = '#e0e0e0';
+                        document.getElementById('modeTyped').style.color = '#000';
+                        // Sync with form selector
+                        var selector = document.getElementById('field_type_selector');
+                        if (selector) selector.value = 'signature';
+                        toggleFieldTypeOptions();
+                    });
+                    
+                    document.getElementById('modeTyped').addEventListener('click', function() {
+                        fieldMode = 'typed';
+                        this.style.background = '#ffc107';
+                        this.style.color = '#000';
+                        document.getElementById('modeSignature').style.background = '#e0e0e0';
+                        document.getElementById('modeSignature').style.color = '#000';
+                        // Sync with form selector
+                        var selector = document.getElementById('field_type_selector');
+                        if (selector) selector.value = 'typed';
+                        toggleFieldTypeOptions();
+                    });
+                    
+                    // Sync mode buttons when form selector changes
+                    var selector = document.getElementById('field_type_selector');
+                    if (selector) {
+                        selector.addEventListener('change', function() {
+                            if (this.value === 'signature') {
+                                document.getElementById('modeSignature').click();
+                            } else {
+                                document.getElementById('modeTyped').click();
+                            }
+                        });
+                    }
+                }
+            }, 500);
+            
+            
+            // Initialize when page loads
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', loadPDF);
+            } else {
+                loadPDF();
             }
         </script>
     </body>
     </html>
-    ''', document=document, existing_fields=existing_fields, is_pdf=is_pdf)
+    ''', document=document, existing_fields=existing_fields, existing_typed_fields=existing_typed_fields, is_pdf=is_pdf)
 
 
 @app.route('/admin/documents/<int:doc_id>/signature-fields/add', methods=['POST'])
@@ -4644,6 +6050,7 @@ def add_signature_field(doc_id):
         return redirect(url_for('manage_documents'))
     
     try:
+        signature_type = request.form.get('signature_type', 'image')  # 'image' or 'cryptographic'
         signature_field = DocumentSignatureField(
             document_id=doc_id,
             page_number=int(request.form.get('page_number', 1)),
@@ -4652,6 +6059,7 @@ def add_signature_field(doc_id):
             width=float(request.form.get('width', 200)),
             height=float(request.form.get('height', 80)),
             field_label=request.form.get('field_label', '').strip() or None,
+            signature_type=signature_type,
             is_required=True,
             created_by=current_user.username
         )
@@ -4665,6 +6073,131 @@ def add_signature_field(doc_id):
         flash(f'Error adding signature field: {str(e)}', 'error')
     
     return redirect(url_for('set_signature_fields', doc_id=doc_id))
+
+
+@app.route('/admin/documents/<int:doc_id>/typed-fields/add', methods=['POST'])
+@admin_required
+def add_typed_field(doc_id):
+    """Add a typed field to a document"""
+    document = Document.query.get(doc_id)
+    if not document:
+        error_msg = 'Document not found.'
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({'success': False, 'message': error_msg}), 404
+        flash(error_msg, 'error')
+        return redirect(url_for('manage_documents'))
+    
+    try:
+        # Check if table exists by trying to query it
+        try:
+            DocumentTypedField.query.first()
+        except Exception as e:
+            error_msg = 'Typed fields feature requires database tables to be created. Please run init_db.py first.'
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({'success': False, 'message': error_msg}), 400
+            flash(error_msg, 'error')
+            return redirect(url_for('set_signature_fields', doc_id=doc_id))
+        
+        field_type = request.form.get('field_type', 'text')  # 'text', 'date', 'name', etc.
+        
+        # Get and validate required fields
+        x_pos = request.form.get('x_position')
+        y_pos = request.form.get('y_position')
+        width = request.form.get('width')
+        height = request.form.get('height')
+        field_label = request.form.get('field_label', '').strip()
+        
+        if not x_pos or not y_pos or not width or not height:
+            error_msg = 'Missing position or size data. Please try placing the field again.'
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({'success': False, 'message': error_msg}), 400
+            flash(error_msg, 'error')
+            return redirect(url_for('set_signature_fields', doc_id=doc_id))
+        
+        if not field_label:
+            error_msg = 'Field label is required.'
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({'success': False, 'message': error_msg}), 400
+            flash(error_msg, 'error')
+            return redirect(url_for('set_signature_fields', doc_id=doc_id))
+        
+        typed_field = DocumentTypedField(
+            document_id=doc_id,
+            page_number=int(request.form.get('page_number', 1)),
+            x_position=float(x_pos),
+            y_position=float(y_pos),
+            width=float(width),
+            height=float(height),
+            field_label=field_label,
+            field_type=field_type,
+            placeholder=request.form.get('placeholder', '').strip() or None,
+            is_required=request.form.get('is_required') == 'on',
+            created_by=current_user.username
+        )
+        
+        db.session.add(typed_field)
+        db.session.commit()
+        
+        # Check if this is an AJAX request
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({
+                'success': True, 
+                'message': 'Typed field added successfully.', 
+                'field_id': typed_field.id,
+                'field': {
+                    'id': typed_field.id,
+                    'label': typed_field.field_label,
+                    'type': typed_field.field_type,
+                    'x': typed_field.x_position,
+                    'y': typed_field.y_position,
+                    'width': typed_field.width,
+                    'height': typed_field.height,
+                    'page': typed_field.page_number
+                }
+            })
+        
+        flash('Typed field added successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        traceback.print_exc()
+        error_msg = f'Error adding typed field: {str(e)}'
+        
+        # Check if this is an AJAX request
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({'success': False, 'message': error_msg}), 500
+        
+        flash(error_msg, 'error')
+    
+    return redirect(url_for('set_signature_fields', doc_id=doc_id))
+
+
+@app.route('/admin/documents/typed-fields/<int:field_id>/delete', methods=['POST'])
+@admin_required
+def delete_typed_field(field_id):
+    """Delete a typed field"""
+    try:
+        typed_field = DocumentTypedField.query.get(field_id)
+        if not typed_field:
+            flash('Typed field not found.', 'error')
+            return redirect(url_for('manage_documents'))
+        
+        doc_id = typed_field.document_id
+        
+        try:
+            # Delete all values for this field
+            DocumentTypedFieldValue.query.filter_by(typed_field_id=field_id).delete()
+            db.session.delete(typed_field)
+            db.session.commit()
+            flash('Typed field deleted successfully.', 'success')
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error deleting typed field: {str(e)}', 'error')
+        
+        return redirect(url_for('set_signature_fields', doc_id=doc_id))
+    except Exception as e:
+        flash(f'Error: {str(e)}. Typed fields feature may not be available.', 'error')
+        return redirect(url_for('manage_documents'))
 
 
 @app.route('/admin/documents/signature-fields/<int:field_id>/delete', methods=['POST'])
@@ -4717,17 +6250,50 @@ def assign_document(doc_id):
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1000px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
                 max-width: 1000px;
@@ -4737,7 +6303,7 @@ def assign_document(doc_id):
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -4751,7 +6317,7 @@ def assign_document(doc_id):
             }
             .admin-panel {
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 padding: 25px;
                 margin-bottom: 20px;
@@ -4770,7 +6336,7 @@ def assign_document(doc_id):
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 14px;
             }
             .form-group textarea {
@@ -4781,7 +6347,7 @@ def assign_document(doc_id):
                 max-height: 400px;
                 overflow-y: auto;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 padding: 10px;
                 background: #f8f9fa;
             }
@@ -4789,7 +6355,7 @@ def assign_document(doc_id):
                 padding: 10px;
                 margin-bottom: 5px;
                 background: white;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
@@ -4819,7 +6385,7 @@ def assign_document(doc_id):
                 padding: 10px;
                 margin-bottom: 10px;
                 background: #f8f9fa;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
@@ -4831,10 +6397,10 @@ def assign_document(doc_id):
             <div class="header-content">
                 <h1>👤 Assign Document - {{ document.original_filename }}</h1>
             </div>
+            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('manage_documents') }}" class="btn">← Back to Documents</a>
             
             <div class="admin-panel">
                 <h2>Assign to Users</h2>
@@ -5006,11 +6572,17 @@ def remove_document_assignment(assignment_id):
 @app.route('/documents')
 @login_required
 def view_documents():
-    """View all visible documents (regular users) or all documents (admins)"""
+    """View assigned documents (regular users) or all documents (admins)"""
     if current_user.is_admin():
         documents = Document.query.order_by(Document.created_at.desc()).all()
     else:
-        documents = Document.query.filter_by(is_visible=True).order_by(Document.created_at.desc()).all()
+        # For regular users, ONLY show assigned documents
+        assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
+        assigned_doc_ids = [a.document_id for a in assigned_documents]
+        if assigned_doc_ids:
+            documents = Document.query.filter(Document.id.in_(assigned_doc_ids)).order_by(Document.created_at.desc()).all()
+        else:
+            documents = []
     
     # Get assigned documents for current user
     assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
@@ -5025,8 +6597,9 @@ def view_documents():
         signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
         required_fields = [f for f in signature_fields if f.is_required]
         doc.all_signed = len(required_fields) > 0 and all(f.id in signed_field_ids for f in required_fields)
-        doc.needs_signature = len(required_fields) > 0 and not doc.all_signed
+        # Only require signature if document is assigned
         doc.is_assigned = doc.id in assigned_doc_ids
+        doc.needs_signature = doc.is_assigned and len(required_fields) > 0 and not doc.all_signed
         if doc.is_assigned:
             doc.assignment = next((a for a in assigned_documents if a.document_id == doc.id), None)
     
@@ -5044,28 +6617,54 @@ def view_documents():
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .nav-links {
                 display: flex;
@@ -5077,13 +6676,14 @@ def view_documents():
                 text-decoration: none;
                 font-size: 1em;
                 font-weight: 500;
+                font-family: 'URW Form', Arial, sans-serif;
                 transition: color 0.2s;
             }
             .nav-links a:hover {
-                color: #dc3545;
+                color: #FE0100;
             }
             .nav-links a.active {
-                color: #dc3545;
+                color: #FE0100;
             }
             .user-section {
                 display: flex;
@@ -5108,7 +6708,7 @@ def view_documents():
                 width: 32px;
                 height: 32px;
                 border-radius: 50%;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 display: flex;
                 align-items: center;
@@ -5123,7 +6723,7 @@ def view_documents():
                 background: white;
                 min-width: 200px;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-top: 10px;
                 z-index: 1000;
                 overflow: hidden;
@@ -5133,7 +6733,7 @@ def view_documents():
             }
             .dropdown-item {
                 padding: 12px 20px;
-                color: #333;
+                color: #000000;
                 text-decoration: none;
                 display: block;
                 transition: background 0.2s;
@@ -5146,26 +6746,18 @@ def view_documents():
                 background: #eee;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
-            .btn {
-                display: inline-block;
-                padding: 10px 20px;
-                background: #dc3545;
-                color: white;
-                text-decoration: none;
-                border-radius: 5px;
-                margin: 10px 0;
-            }
             .btn:hover {
-                background: #c82333;
+                background: #d60000;
+                opacity: 0.9;
             }
             .documents-list {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-top: 20px;
             }
@@ -5181,27 +6773,52 @@ def view_documents():
             }
             .document-info h3 {
                 margin-bottom: 5px;
-                color: #333;
+                color: #000000;
             }
             .document-info p {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
                 margin: 5px 0;
             }
             .document-actions {
                 display: flex;
                 gap: 10px;
+                align-items: center;
             }
             .file-size {
-                color: #666;
+                color: #808080;
                 font-size: 0.85em;
             }
             .badge {
-                padding: 3px 8px;
-                border-radius: 12px;
-                font-size: 0.8em;
-                background: #6c757d;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                padding: 10px 20px;
+                border-radius: 5px;
+                font-size: 1em;
+                background: #28a745;
                 color: white;
+                text-decoration: none;
+                font-weight: 500;
+                line-height: 1.5;
+                vertical-align: middle;
+                white-space: nowrap;
+            }
+            .btn {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                padding: 10px 20px;
+                background: #FE0100;
+                color: white;
+                text-decoration: none;
+                border-radius: 5px;
+                margin: 0;
+                font-size: 1em;
+                font-weight: 500;
+                line-height: 1.5;
+                vertical-align: middle;
+                white-space: nowrap;
             }
         </style>
     </head>
@@ -5247,9 +6864,6 @@ def view_documents():
                         <div class="document-info">
                             <h3>
                                 {{ doc.original_filename }}
-                                {% if doc.is_assigned %}
-                                <span class="badge" style="background: #007bff; margin-left: 10px;">📋 Assigned to You</span>
-                                {% endif %}
                             </h3>
                             {% if doc.description %}
                             <p>{{ doc.description }}</p>
@@ -5278,7 +6892,7 @@ def view_documents():
                         <div class="document-actions">
                             {% if doc.has_signature_fields %}
                                 {% if doc.all_signed %}
-                                    <span class="badge" style="background: #28a745;">✓ Signed</span>
+                                    <span class="badge">✓ Signed</span>
                                 {% else %}
                                     <a href="{{ url_for('sign_document', doc_id=doc.id) }}" class="btn" style="background: #28a745;">✍️ Sign Document</a>
                                 {% endif %}
@@ -5323,10 +6937,12 @@ def view_document(doc_id):
         flash('Document not found.', 'error')
         return redirect(url_for('dashboard'))
     
-    # Check permissions
-    if not current_user.is_admin() and not document.is_visible:
-        flash('You do not have permission to access this document.', 'error')
-        return redirect(url_for('dashboard'))
+    # Check permissions - only allow if document is assigned to user (unless admin)
+    if not current_user.is_admin():
+        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+        if not assignment:
+            flash('This document has not been assigned to you.', 'error')
+            return redirect(url_for('dashboard'))
     
     # Check if file exists
     if not os.path.exists(document.file_path):
@@ -5355,23 +6971,268 @@ def view_document(doc_id):
 
 
 @app.route('/documents/<int:doc_id>/embed')
+@app.route('/documents/<int:doc_id>/embed/<username>')
 @login_required
-def view_document_embed(doc_id):
-    """Embed a document for viewing in modal (admin can view all, users can only view visible ones)"""
+def view_document_embed(doc_id, username=None):
+    """Embed a document for viewing in modal (admin can view all, users can only view visible ones)
+    
+    If username is provided, show that user's signed version with signatures.
+    Otherwise, show the original blank document.
+    """
     document = Document.query.get(doc_id)
     
     if not document:
         return "Document not found.", 404
     
-    # Check permissions
-    if not current_user.is_admin() and not document.is_visible:
-        return "You do not have permission to access this document.", 403
+    # Check permissions - only allow if document is assigned to user (unless admin)
+    if not current_user.is_admin():
+        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+        if not assignment:
+            return "This document has not been assigned to you.", 403
     
-    # Check if file exists
+    # If username is provided and current user is admin OR it's their own username, show signed version
+    # Otherwise, show original blank document
+    show_signed = False
+    if username:
+        if current_user.is_admin() or username == current_user.username:
+            show_signed = True
+    
+    # If showing signed version, create a temporary PDF with signatures embedded
+    if show_signed:
+        try:
+            # Get user's signatures for this document
+            user_signatures = DocumentSignature.query.filter_by(
+                document_id=doc_id,
+                username=username
+            ).all()
+            
+            # Get typed field values for this user (handle case where table might not exist yet)
+            try:
+                user_typed_values = DocumentTypedFieldValue.query.filter_by(
+                    document_id=doc_id,
+                    username=username
+                ).all()
+                typed_value_map = {val.typed_field_id: val.field_value for val in user_typed_values}
+            except Exception:
+                typed_value_map = {}
+            
+            if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
+                
+                # Create a temporary signed copy
+                import tempfile
+                import shutil
+                
+                # Create temp file
+                temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
+                os.close(temp_fd)
+                
+                # Copy original PDF
+                shutil.copy2(document.file_path, temp_path)
+                
+                # Embed signatures and typed field values into temp copy
+                pdf_doc = fitz.open(temp_path)
+                
+                # Embed signatures
+                for sig in user_signatures:
+                    if not sig.signature_image:
+                        continue
+                    
+                    # Get signature field
+                    field = DocumentSignatureField.query.get(sig.signature_field_id)
+                    if not field:
+                        continue
+                    
+                    # Embed this signature
+                    try:
+                        from PIL import Image
+                        import base64
+                        from io import BytesIO
+                        
+                        page_num = field.page_number - 1
+                        if page_num < 0 or page_num >= len(pdf_doc):
+                            continue
+                        
+                        page = pdf_doc[page_num]
+                        page_rect = page.rect
+                        page_width = page_rect.width
+                        page_height = page_rect.height
+                        
+                        # Convert coordinates (same logic as embed_signature_in_pdf)
+                        viewer_height_px = 800.0
+                        scale_y = page_height / viewer_height_px
+                        viewer_width_px = viewer_height_px * (page_width / page_height)
+                        scale_x = page_width / viewer_width_px
+                        
+                        x_pdf = field.x_position * scale_x
+                        y_pdf = field.y_position * scale_y
+                        width_pdf = (field.width or 200) * scale_x
+                        height_pdf = (field.height or 80) * scale_y
+                        
+                        # Clamp to page bounds
+                        x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+                        y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+                        
+                        # Decode and embed signature
+                        sig_image_data = base64.b64decode(sig.signature_image)
+                        sig_img = Image.open(BytesIO(sig_image_data))
+                        
+                        img_bytes = BytesIO()
+                        sig_img.save(img_bytes, format='PNG')
+                        img_bytes.seek(0)
+                        
+                        img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+                        page.insert_image(img_rect, stream=img_bytes.getvalue())
+                    except Exception as e:
+                        print(f"Error embedding signature {sig.id}: {e}")
+                        continue
+                
+                # Embed typed field values as text (handle case where table might not exist yet)
+                try:
+                    for typed_field_id, field_value in typed_value_map.items():
+                        try:
+                            typed_field = DocumentTypedField.query.get(typed_field_id)
+                            if not typed_field:
+                                continue
+                            
+                            page_num = typed_field.page_number - 1
+                            if page_num < 0 or page_num >= len(pdf_doc):
+                                continue
+                            
+                            page = pdf_doc[page_num]
+                            page_rect = page.rect
+                            page_width = page_rect.width
+                            page_height = page_rect.height
+                            
+                            # Convert coordinates
+                            viewer_height_px = 800.0
+                            scale_y = page_height / viewer_height_px
+                            viewer_width_px = viewer_height_px * (page_width / page_height)
+                            scale_x = page_width / viewer_width_px
+                            
+                            x_pdf = typed_field.x_position * scale_x
+                            y_pdf = typed_field.y_position * scale_y
+                            width_pdf = (typed_field.width or 200) * scale_x
+                            height_pdf = (typed_field.height or 30) * scale_y
+                            
+                            # Clamp to page bounds
+                            x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+                            y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+                            
+                            # Create text rectangle
+                            text_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+                            
+                            # Insert text
+                            # Calculate font size based on height (roughly 70% of height)
+                            font_size = int(height_pdf * 0.7)
+                            if font_size < 8:
+                                font_size = 8
+                            elif font_size > 72:
+                                font_size = 72
+                            
+                            # Debug output
+                            print(f"\n=== Typed Field Embedding ===")
+                            print(f"Field ID: {typed_field_id}, Value: {field_value}")
+                            print(f"Browser coords: x={typed_field.x_position:.1f}, y={typed_field.y_position:.1f}")
+                            print(f"PDF coords: x={x_pdf:.2f}, y={y_pdf:.2f}")
+                            print(f"Size: {width_pdf:.2f} x {height_pdf:.2f}, Font: {font_size}")
+                            print(f"Text rect: {text_rect}")
+                            print(f"========================\n")
+                            
+                            # Insert text using insert_textbox (handles wrapping and clipping)
+                            try:
+                                # Ensure text rect is valid
+                                if text_rect.width <= 0 or text_rect.height <= 0:
+                                    print(f"Invalid text rect: {text_rect}, using insert_text instead")
+                                    raise ValueError("Invalid text rectangle")
+                                
+                                rc = page.insert_textbox(
+                                    text_rect,
+                                    field_value,
+                                    fontsize=font_size,
+                                    align=0,  # Left align
+                                    color=(0, 0, 0),  # Black text
+                                    render_mode=0  # Fill text
+                                )
+                                # insert_textbox returns the number of characters that didn't fit
+                                # Negative return means error, 0 means all text fit
+                                if rc < 0:
+                                    print(f"Textbox insertion failed (rc={rc}), trying insert_text")
+                                    # Use insert_text as fallback (single line, no wrapping)
+                                    # Position text at top of box with some padding
+                                    # Use insert_text with proper baseline positioning
+                                    # y_pdf is top of box, need to add font_size for baseline
+                                    # Also add small padding from left edge
+                                    text_y = y_pdf + font_size + 2  # Baseline position with padding
+                                    page.insert_text(
+                                        (x_pdf + 2, text_y),  # Position at baseline with small padding
+                                        field_value[:100],  # Limit to 100 chars to avoid overflow
+                                        fontsize=font_size,
+                                        color=(0, 0, 0)  # Black text
+                                    )
+                                    print(f"Used insert_text fallback at ({x_pdf + 2:.2f}, {text_y:.2f})")
+                                elif rc > 0:
+                                    print(f"Warning: {rc} characters did not fit in textbox")
+                                else:
+                                    print(f"Textbox inserted successfully")
+                            except Exception as textbox_error:
+                                print(f"Textbox insertion error: {textbox_error}, trying insert_text")
+                                # Fallback to insert_text
+                                try:
+                                    # Use insert_text with proper baseline positioning
+                                    # y_pdf is top of box, need to add font_size for baseline
+                                    text_y = y_pdf + font_size + 2  # Baseline position with padding
+                                    page.insert_text(
+                                        (x_pdf + 2, text_y),  # Position at baseline with small padding
+                                        field_value[:100],  # Limit to 100 chars
+                                        fontsize=font_size,
+                                        color=(0, 0, 0)  # Black text
+                                    )
+                                    print(f"Used insert_text fallback in exception handler at ({x_pdf + 2:.2f}, {text_y:.2f})")
+                                except Exception as text_error:
+                                    print(f"Text insertion also failed: {text_error}")
+                                    import traceback
+                                    traceback.print_exc()
+                                    raise
+                        except Exception as e:
+                            print(f"Error embedding typed field {typed_field_id}: {e}")
+                            continue
+                except Exception as e:
+                    print(f"Error processing typed fields: {e}")
+                    # Continue without typed fields
+                
+                # Save the PDF with all modifications
+                pdf_doc.save(temp_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+                pdf_doc.close()
+                
+                # Verify the file was saved
+                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                    raise Exception("Failed to save PDF with typed fields")
+                
+                # Serve the temp file
+                file_type = document.file_type or 'application/pdf'
+                response = send_file(
+                    temp_path,
+                    as_attachment=False,
+                    mimetype=file_type
+                )
+                response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+                response.headers['Content-Security-Policy'] = "frame-ancestors 'self'"
+                # Prevent caching to ensure fresh PDF with typed fields
+                response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                response.headers['Pragma'] = 'no-cache'
+                response.headers['Expires'] = '0'
+                
+                return response
+        except Exception as e:
+            print(f"Error creating signed copy: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fall through to serve original
+    
+    # Serve original blank document
     if not os.path.exists(document.file_path):
         return "File not found on server.", 404
     
-    # Serve file for embedding (no attachment, allow iframe embedding)
     file_type = document.file_type or 'application/octet-stream'
     
     response = send_file(
@@ -5387,30 +7248,184 @@ def view_document_embed(doc_id):
     return response
 
 
+@app.route('/documents/<int:doc_id>/render-with-signatures')
+@login_required
+def render_document_with_signatures(doc_id):
+    """Render a PDF page as an image with signatures overlaid at exact coordinates"""
+    document = Document.query.get(doc_id)
+    
+    if not document:
+        return "Document not found.", 404
+    
+    # Check permissions - only allow if document is assigned to user (unless admin)
+    if not current_user.is_admin():
+        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+        if not assignment:
+            return "This document has not been assigned to you.", 403
+    
+    # Check if file exists
+    if not os.path.exists(document.file_path):
+        return "File not found on server.", 404
+    
+    # Check if document is a PDF
+    is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
+    if not is_pdf:
+        return "Only PDF documents can be rendered with signatures.", 400
+    
+    # Get page number (default to 1)
+    try:
+        page_num = int(request.args.get('page', 1)) - 1  # PyMuPDF uses 0-based indexing
+    except ValueError:
+        page_num = 0
+    
+    # Get signature fields for this page
+    signature_fields = DocumentSignatureField.query.filter_by(
+        document_id=doc_id, 
+        page_number=page_num + 1
+    ).all()
+    
+    # Get existing signatures by current user for these fields
+    field_ids = [f.id for f in signature_fields]
+    user_signatures = DocumentSignature.query.filter_by(
+        document_id=doc_id, 
+        username=current_user.username
+    ).filter(DocumentSignature.signature_field_id.in_(field_ids)).all() if field_ids else []
+    
+    # Create a map of field_id -> signature
+    sig_map = {sig.signature_field_id: sig for sig in user_signatures}
+    
+    try:
+        from PIL import Image
+        
+        # Use PyMuPDF (fitz) - it's already installed and works reliably
+        if not FITZ_AVAILABLE:
+            return "PDF rendering library (PyMuPDF) not available. Please install pymupdf.", 500
+        
+        # Open PDF
+        pdf_doc = fitz.open(document.file_path)
+        
+        # Validate page number
+        if page_num < 0 or page_num >= len(pdf_doc):
+            pdf_doc.close()
+            return f"Page not found. Document has {len(pdf_doc)} page(s).", 404
+        
+        # Get the page
+        page = pdf_doc[page_num]
+        page_rect = page.rect
+        page_height = page_rect.height
+        
+        if page_height <= 0:
+            pdf_doc.close()
+            return "Invalid page dimensions.", 500
+        
+        # Render page to image - scale to match viewer height (800px)
+        # This ensures coordinates stored from the viewer match the image
+        viewer_height = 800.0
+        scale = viewer_height / page_height
+        mat = fitz.Matrix(scale, scale)
+        pix = page.get_pixmap(matrix=mat)
+        
+        # Convert to PIL Image for signature overlay
+        img_data = pix.tobytes("png")
+        img = Image.open(BytesIO(img_data))
+        
+        # Clean up
+        pix = None
+        pdf_doc.close()
+        
+        # Overlay signatures at exact coordinates
+        for field in signature_fields:
+            if field.id in sig_map:
+                sig = sig_map[field.id]
+                try:
+                    # Decode signature image
+                    sig_image_data = base64.b64decode(sig.signature_image)
+                    sig_img = Image.open(BytesIO(sig_image_data))
+                    
+                    # Use coordinates directly (they're already in pixels matching the image)
+                    # The image is rendered at the same scale as the viewer (800px height)
+                    x = int(field.x_position)
+                    y = int(field.y_position)
+                    width = int(field.width or 200)
+                    height = int(field.height or 80)
+                    
+                    # Ensure coordinates are within image bounds
+                    x = max(0, min(x, img.width - 1))
+                    y = max(0, min(y, img.height - 1))
+                    width = min(width, img.width - x)
+                    height = min(height, img.height - y)
+                    
+                    if width <= 0 or height <= 0:
+                        continue
+                    
+                    # Resize signature to fit the field
+                    sig_img_resized = sig_img.resize((width, height), Image.Resampling.LANCZOS)
+                    
+                    # Paste signature onto the page image
+                    # Use alpha composite if signature has transparency
+                    if sig_img_resized.mode == 'RGBA':
+                        img.paste(sig_img_resized, (x, y), sig_img_resized)
+                    else:
+                        img.paste(sig_img_resized, (x, y))
+                        
+                except Exception as e:
+                    print(f"Error overlaying signature for field {field.id}: {e}")
+                    continue
+        
+        # Convert back to bytes
+        output = BytesIO()
+        img.save(output, format='PNG')
+        output.seek(0)
+        
+        pdf_doc.close()
+        
+        return send_file(output, mimetype='image/png')
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"Error rendering document: {str(e)}", 500
+
+
 @app.route('/documents/<int:doc_id>/sign')
 @login_required
 def sign_document(doc_id):
-    """User interface to sign a document"""
+    """Sign a document - only allowed if document is assigned to user"""
     document = Document.query.get(doc_id)
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('view_documents'))
     
-    # Check permissions
-    if not current_user.is_admin() and not document.is_visible:
-        flash('You do not have permission to access this document.', 'error')
-        return redirect(url_for('view_documents'))
+    # Check permissions - only allow if document is assigned to user (unless admin)
+    if not current_user.is_admin():
+        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+        if not assignment:
+            flash('This document has not been assigned to you.', 'error')
+            return redirect(url_for('view_documents'))
     
     # Get signature fields for this document
     signature_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).order_by(DocumentSignatureField.page_number, DocumentSignatureField.id).all()
     
-    if not signature_fields:
-        flash('This document does not have signature fields configured.', 'error')
+    # Get typed fields for this document (handle case where table might not exist yet)
+    try:
+        typed_fields = DocumentTypedField.query.filter_by(document_id=doc_id).order_by(DocumentTypedField.page_number, DocumentTypedField.id).all()
+    except Exception:
+        typed_fields = []
+    
+    if not signature_fields and not typed_fields:
+        flash('This document does not have any fields configured.', 'error')
         return redirect(url_for('view_documents'))
     
     # Get existing signatures by current user
     user_signatures = DocumentSignature.query.filter_by(document_id=doc_id, username=current_user.username).all()
     signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
+    
+    # Get existing typed field values by current user (handle case where table might not exist yet)
+    try:
+        user_typed_values = DocumentTypedFieldValue.query.filter_by(document_id=doc_id, username=current_user.username).all()
+        filled_typed_field_ids = {val.typed_field_id: val.field_value for val in user_typed_values}
+    except Exception:
+        filled_typed_field_ids = {}
     
     # Check if document is a PDF
     is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
@@ -5423,20 +7438,53 @@ def sign_document(doc_id):
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1400px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
-                max-width: 1400px;
+                max-width: 1600px;
                 margin: 20px auto;
                 padding: 0 20px;
             }
@@ -5456,7 +7504,7 @@ def sign_document(doc_id):
                 background: #28a745;
             }
             .btn-danger {
-                background: #dc3545;
+                background: #FE0100;
             }
             .main-content {
                 display: grid;
@@ -5465,7 +7513,7 @@ def sign_document(doc_id):
             }
             .document-viewer-container {
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 padding: 20px;
                 position: relative;
@@ -5475,21 +7523,54 @@ def sign_document(doc_id):
                 background: #525252;
                 min-height: 800px;
                 overflow: auto;
+                padding: 20px;
+                display: flex;
+                justify-content: center;
+                align-items: flex-start;
             }
-            .document-viewer iframe {
+            #pdfCanvas {
+                max-width: 100%;
+                height: auto;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+                background: white;
+                display: block;
+            }
+            .signature-overlay {
+                position: absolute;
+                pointer-events: none;
+                z-index: 1000;
+                top: 20px;
+                left: 20px;
+                right: 20px;
+                bottom: 20px;
+                overflow: visible;
+            }
+            .signature-overlay-item {
+                position: absolute;
+                border: 2px solid #28a745;
+                background: rgba(255, 255, 255, 0.95);
+                pointer-events: none;
+                box-sizing: border-box;
+                padding: 2px;
+                z-index: 1001;
+                transform: translateZ(0);
+            }
+            .signature-overlay-item img {
                 width: 100%;
-                height: 800px;
-                border: none;
+                height: 100%;
+                object-fit: contain;
+                background: white;
+                display: block;
             }
             .signature-panel {
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 padding: 20px;
             }
             .signature-pad-container {
                 border: 2px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 margin-bottom: 15px;
                 background: white;
             }
@@ -5509,7 +7590,7 @@ def sign_document(doc_id):
                 padding: 8px;
                 border: 1px solid #ddd;
                 background: #f8f9fa;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 cursor: pointer;
             }
             .signature-controls button:hover {
@@ -5522,7 +7603,7 @@ def sign_document(doc_id):
                 background: #f8f9fa;
                 padding: 15px;
                 margin-bottom: 10px;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 border-left: 3px solid #007bff;
             }
             .signature-field-item.signed {
@@ -5535,7 +7616,7 @@ def sign_document(doc_id):
             }
             .signature-field-item p {
                 font-size: 0.8em;
-                color: #666;
+                color: #808080;
                 margin: 3px 0;
             }
             .signature-preview {
@@ -5543,7 +7624,7 @@ def sign_document(doc_id):
                 padding: 10px;
                 background: white;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 max-height: 100px;
                 overflow: hidden;
             }
@@ -5558,17 +7639,17 @@ def sign_document(doc_id):
             <div class="header-content">
                 <h1>✍️ Sign Document - {{ document.original_filename }}</h1>
             </div>
+            <a href="{{ url_for('view_documents') }}" class="back-btn">← Back to Documents</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('view_documents') }}" class="btn">← Back to Documents</a>
             
             <div class="main-content">
                 <div class="document-viewer-container">
                     <h3 style="margin-bottom: 15px;">Document Preview</h3>
-                    <div class="document-viewer">
+                    <div class="document-viewer" id="documentViewer">
                         {% if is_pdf %}
-                        <iframe src="{{ url_for('view_document_embed', doc_id=document.id) }}" id="pdfFrame"></iframe>
+                        <iframe src="{{ url_for('view_document_embed', doc_id=document.id, username=current_user.username) }}" style="width: 100%; height: 800px; border: none;"></iframe>
                         {% else %}
                         <p style="padding: 20px; color: white;">Please download the document to view it.</p>
                         {% endif %}
@@ -5582,26 +7663,111 @@ def sign_document(doc_id):
                     <div class="signature-field-item {% if field.id in signed_field_ids %}signed{% endif %}" id="field-{{ field.id }}">
                         <h4>{{ field.field_label or 'Signature Field' }}</h4>
                         <p>Page: {{ field.page_number }}</p>
+                        {% if field.signature_type == 'cryptographic' %}
+                            <p style="font-size: 0.85em; color: #0066cc; margin-bottom: 10px;">
+                                <strong>🔒 Cryptographic Signature</strong><br>
+                                This is a legally binding, tamper-evident signature.
+                            </p>
+                        {% endif %}
+                        <div id="signature-field-container-{{ field.id }}">
                         {% if field.id in signed_field_ids %}
                             <p style="color: #28a745; font-weight: bold;">✓ Signed</p>
                             {% for sig in user_signatures %}
                                 {% if sig.signature_field_id == field.id %}
-                                <div class="signature-preview">
-                                    <img src="data:image/png;base64,{{ sig.signature_image }}" alt="Signature">
-                                </div>
+                                    {% if sig.signature_type and sig.signature_type == 'cryptographic' %}
+                                        <div class="signature-preview" style="padding: 15px; background: #e8f4f8; border: 2px solid #0066cc; border-radius: 4px;">
+                                            <p style="margin: 0; color: #0066cc; font-weight: bold;">🔒 Cryptographically Signed</p>
+                                            <p style="margin: 5px 0 0 0; font-size: 0.85em; color: #666;">
+                                                Signed: {{ sig.signed_at.strftime('%Y-%m-%d %H:%M:%S') if sig.signed_at else 'N/A' }}<br>
+                                                {% if sig.signature_hash %}
+                                                Hash: {{ sig.signature_hash[:16] }}...
+                                                {% endif %}
+                                            </p>
+                                        </div>
+                                    {% else %}
+                                        {% if sig.signature_image %}
+                                        <div class="signature-preview">
+                                            <img src="data:image/png;base64,{{ sig.signature_image }}" alt="Signature">
+                                        </div>
+                                        {% endif %}
+                                    {% endif %}
                                 {% endif %}
                             {% endfor %}
+                            <button type="button" onclick="redoSignature({{ field.id }})" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Signature</button>
                         {% else %}
-                            <div class="signature-pad-container">
-                                <canvas id="signaturePad-{{ field.id }}" width="350" height="200"></canvas>
-                            </div>
-                            <div class="signature-controls">
-                                <button type="button" onclick="clearSignature({{ field.id }})">Clear</button>
-                                <button type="button" onclick="saveSignature({{ field.id }})" class="btn-success">Save Signature</button>
-                            </div>
+                            {% if field.signature_type == 'cryptographic' %}
+                                <div class="cryptographic-signature-form">
+                                    <div style="padding: 15px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; margin-bottom: 15px;">
+                                        <p style="margin: 0 0 10px 0; font-weight: bold;">Electronic Signature Consent</p>
+                                        <p style="margin: 0; font-size: 0.9em; color: #856404;">
+                                            By clicking "Sign Electronically", you agree that:<br>
+                                            • This electronic signature has the same legal effect as a handwritten signature<br>
+                                            • You consent to conduct business electronically<br>
+                                            • The signed document will be legally binding
+                                        </p>
+                                    </div>
+                                    <label style="display: flex; align-items: center; margin-bottom: 15px; cursor: pointer;">
+                                        <input type="checkbox" id="consent-{{ field.id }}" style="margin-right: 8px; width: 18px; height: 18px;">
+                                        <span>I agree to sign this document electronically</span>
+                                    </label>
+                                    <button type="button" onclick="saveCryptographicSignature({{ field.id }})" class="btn-success" style="width: 100%; padding: 12px; font-size: 1em; font-weight: bold;">
+                                        🔒 Sign Electronically
+                                    </button>
+                                </div>
+                            {% else %}
+                                <div class="signature-pad-container">
+                                    <canvas id="signaturePad-{{ field.id }}" width="350" height="200"></canvas>
+                                </div>
+                                <div class="signature-controls">
+                                    <button type="button" onclick="clearSignature({{ field.id }})">Clear</button>
+                                    <button type="button" onclick="saveSignature({{ field.id }})" class="btn-success">Save Signature</button>
+                                </div>
+                            {% endif %}
                         {% endif %}
+                        </div>
                     </div>
                     {% endfor %}
+                    
+                    {% if typed_fields %}
+                    <hr style="margin: 30px 0; border: 1px solid #ddd;">
+                    <h3 style="margin-bottom: 15px;">Typed Fields</h3>
+                    
+                    {% for field in typed_fields %}
+                    <div class="signature-field-item" style="border-left-color: #ffc107;">
+                        <h4>{{ field.field_label or 'Typed Field' }}</h4>
+                        <p>Type: {{ field.field_type|title }} • Page: {{ field.page_number }}</p>
+                        <div id="typed-field-container-{{ field.id }}">
+                        {% if field.id in filled_typed_field_ids %}
+                            <p style="color: #28a745; font-weight: bold;">✓ Filled</p>
+                            <div style="padding: 10px; background: #f8f9fa; border-radius: 4px; margin-top: 10px;">
+                                <strong>Value:</strong> {{ filled_typed_field_ids[field.id] }}
+                            </div>
+                            <button type="button" onclick="redoTypedField({{ field.id }})" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Field</button>
+                        {% else %}
+                            <div class="form-group" style="margin-top: 10px;">
+                                {% if field.field_type == 'date' %}
+                                    <input type="date" id="typed-field-{{ field.id }}" class="typed-field-input" 
+                                           placeholder="{{ field.placeholder or 'Enter date' }}" 
+                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"
+                                           {% if field.is_required %}required{% endif %}>
+                                {% elif field.field_type == 'number' %}
+                                    <input type="number" id="typed-field-{{ field.id }}" class="typed-field-input" 
+                                           placeholder="{{ field.placeholder or 'Enter number' }}" 
+                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"
+                                           {% if field.is_required %}required{% endif %}>
+                                {% else %}
+                                    <input type="text" id="typed-field-{{ field.id }}" class="typed-field-input" 
+                                           placeholder="{{ field.placeholder or 'Enter ' + field.field_label|lower }}" 
+                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"
+                                           {% if field.is_required %}required{% endif %}>
+                                {% endif %}
+                                <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Save {{ field.field_label }}</button>
+                            </div>
+                        {% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                    {% endif %}
                     
                     <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd;">
                         <p style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
@@ -5616,6 +7782,161 @@ def sign_document(doc_id):
         <script>
             var signaturePads = {};
             var isDrawing = false;
+            var pdfDoc = null;
+            var pdfScale = 1.0;
+            var canvasOffsetX = 0;
+            var canvasOffsetY = 0;
+            
+            // Load PDF using PDF.js
+            function loadPDF() {
+                var canvas = document.getElementById('pdfCanvas');
+                if (!canvas) return;
+                
+                // Set up PDF.js worker
+                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                
+                // Get PDF URL
+                var pdfUrl = '{{ url_for("view_document_embed", doc_id=document.id) }}';
+                
+                // Load the PDF
+                pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+                    pdfDoc = pdf;
+                    
+                    // Render first page (or page with signature fields)
+                    var pageNum = 1;
+                    {% if signature_fields %}
+                    pageNum = {{ signature_fields[0].page_number }};
+                    {% endif %}
+                    
+                    renderPage(pageNum);
+                }).catch(function(error) {
+                    console.error('Error loading PDF:', error);
+                    document.getElementById('documentViewer').innerHTML = '<p style="padding: 20px; color: white;">Error loading PDF. Please try downloading the document.</p>';
+                });
+            }
+            
+            // Render a PDF page
+            function renderPage(pageNum) {
+                if (!pdfDoc) return;
+                
+                var canvas = document.getElementById('pdfCanvas');
+                var ctx = canvas.getContext('2d');
+                
+                pdfDoc.getPage(pageNum).then(function(page) {
+                    // Calculate scale to fit 800px height (matching viewer where admin clicked)
+                    var viewerHeight = 800;
+                    var viewport = page.getViewport({ scale: 1.0 });
+                    var scale = viewerHeight / viewport.height;
+                    pdfScale = scale;
+                    
+                    // Set canvas size
+                    var scaledViewport = page.getViewport({ scale: scale });
+                    canvas.width = scaledViewport.width;
+                    canvas.height = scaledViewport.height;
+                    
+                    // Render PDF page
+                    var renderContext = {
+                        canvasContext: ctx,
+                        viewport: scaledViewport
+                    };
+                    
+                    page.render(renderContext).promise.then(function() {
+                        // Calculate canvas offset within viewer (accounting for padding/centering)
+                        var viewer = document.getElementById('documentViewer');
+                        var viewerRect = viewer.getBoundingClientRect();
+                        var canvasRect = canvas.getBoundingClientRect();
+                        canvasOffsetX = canvasRect.left - viewerRect.left;
+                        canvasOffsetY = canvasRect.top - viewerRect.top;
+                        
+                        // After PDF is rendered, display signatures
+                        displaySignaturesOnPDF();
+                    });
+                });
+            }
+            
+            // Display existing signatures on PDF
+            function displaySignaturesOnPDF() {
+                var overlay = document.getElementById('signatureOverlay');
+                var canvas = document.getElementById('pdfCanvas');
+                var viewer = document.getElementById('documentViewer');
+                if (!overlay || !canvas || !viewer) {
+                    console.log('Missing elements:', {overlay: !!overlay, canvas: !!canvas, viewer: !!viewer});
+                    return;
+                }
+                
+                // Clear existing overlays
+                overlay.innerHTML = '';
+                
+                // Get actual dimensions of viewer container
+                var viewerRect = viewer.getBoundingClientRect();
+                
+                // Signature data from server - build a map of field_id to field data
+                var fieldMap = {
+                    {% for field in signature_fields %}
+                    {{ field.id }}: {
+                        x_position: {{ field.x_position }},
+                        y_position: {{ field.y_position }},
+                        width: {{ field.width or 200 }},
+                        height: {{ field.height or 80 }},
+                        page_number: {{ field.page_number }}
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                };
+                
+                var signatures = [
+                    {% for sig in user_signatures %}
+                    {
+                        field_id: {{ sig.signature_field_id }},
+                        signature_image: 'data:image/png;base64,{{ sig.signature_image }}',
+                        field: fieldMap[{{ sig.signature_field_id }}]
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                ];
+                
+                console.log('Viewer container dimensions:', viewerRect.width, 'x', viewerRect.height);
+                console.log('Signatures to display:', signatures.length);
+                console.log('Field map:', fieldMap);
+                
+                // Display each signature
+                // Coordinates are stored relative to viewer container (where admin clicked)
+                // Adjust for canvas offset within viewer
+                signatures.forEach(function(sigData) {
+                    if (!sigData.field || sigData.field.x_position === undefined) {
+                        return;
+                    }
+                    
+                    var overlayItem = document.createElement('div');
+                    overlayItem.className = 'signature-overlay-item';
+                    
+                    // Use coordinates directly - they're stored relative to viewer
+                    // and overlay is also positioned relative to viewer
+                    overlayItem.style.position = 'absolute';
+                    overlayItem.style.left = sigData.field.x_position + 'px';
+                    overlayItem.style.top = sigData.field.y_position + 'px';
+                    overlayItem.style.width = (sigData.field.width || 200) + 'px';
+                    overlayItem.style.height = (sigData.field.height || 80) + 'px';
+                    
+                    var img = document.createElement('img');
+                    img.src = sigData.signature_image;
+                    img.alt = 'Signature';
+                    img.style.display = 'block';
+                    img.style.width = '100%';
+                    img.style.height = '100%';
+                    img.style.objectFit = 'contain';
+                    overlayItem.appendChild(img);
+                    
+                    overlay.appendChild(overlayItem);
+                    
+                    console.log('Positioned signature at:', sigData.field.x_position, sigData.field.y_position);
+                });
+            }
+            
+            // Initialize when page loads
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', loadPDF);
+            } else {
+                loadPDF();
+            }
             
             // Initialize signature pads for unsigned fields
             {% for field in signature_fields %}
@@ -5734,13 +8055,15 @@ def sign_document(doc_id):
                     },
                     body: JSON.stringify({
                         signature_field_id: fieldId,
-                        signature_image: base64Data
+                        signature_image: base64Data,
+                        consent_given: false
                     })
                 })
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
                         alert('Signature saved successfully!');
+                        // Reload to show signature on PDF
                         location.reload();
                     } else {
                         alert('Error saving signature: ' + (data.error || 'Unknown error'));
@@ -5751,11 +8074,393 @@ def sign_document(doc_id):
                     alert('Error saving signature. Please try again.');
                 });
             }
+            
+            function saveCryptographicSignature(fieldId) {
+                var consentCheckbox = document.getElementById('consent-' + fieldId);
+                if (!consentCheckbox || !consentCheckbox.checked) {
+                    alert('You must agree to sign electronically before proceeding.');
+                    return;
+                }
+                
+                if (!confirm('This will create a legally binding, cryptographically signed document. Continue?')) {
+                    return;
+                }
+                
+                // Send to server
+                fetch('{{ url_for("submit_signature", doc_id=document.id) }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        signature_field_id: fieldId,
+                        signature_image: null,
+                        consent_given: true
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Document signed cryptographically! The signature is legally binding and tamper-evident.');
+                        // Reload to show signature status
+                        location.reload();
+                    } else {
+                        alert('Error signing document: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error signing document. Please try again.');
+                });
+            }
+            
+            function saveTypedField(fieldId) {
+                var input = document.getElementById('typed-field-' + fieldId);
+                if (!input) return;
+                
+                var value = input.value.trim();
+                if (!value) {
+                    alert('Please enter a value for this field.');
+                    return;
+                }
+                
+                // Send to server
+                fetch('{{ url_for("submit_typed_field", doc_id=document.id) }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        typed_field_id: fieldId,
+                        field_value: value
+                    })
+                })
+                .then(response => {
+                    // Check if response is OK
+                    if (!response.ok) {
+                        // Try to get error message from JSON response
+                        return response.json().catch(() => {
+                            // If not JSON, return error with status text
+                            throw new Error('Server error: ' + response.status + ' ' + response.statusText);
+                        }).then(data => {
+                            throw new Error(data.error || 'Server error: ' + response.status);
+                        });
+                    }
+                    // Parse JSON response
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success) {
+                        // Update UI to show field is filled without reloading
+                        var fieldContainer = document.getElementById('typed-field-container-' + fieldId);
+                        if (fieldContainer) {
+                            var fieldLabel = fieldContainer.closest('.signature-field-item').querySelector('h4').textContent;
+                            fieldContainer.innerHTML = '<p style="color: #28a745; font-weight: bold;">✓ Filled</p>' +
+                                '<div style="padding: 10px; background: #f8f9fa; border-radius: 4px; margin-top: 10px;"><strong>Value:</strong> ' + value + '</div>' +
+                                '<button type="button" onclick="redoTypedField(' + fieldId + ')" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Field</button>';
+                            
+                            // Reload the PDF iframe to show the typed field value
+                            setTimeout(function() {
+                                var iframe = document.querySelector('iframe[src*="view_document_embed"]') || 
+                                             document.querySelector('iframe[src*="embed"]') ||
+                                             document.getElementById('documentViewer')?.querySelector('iframe');
+                                if (iframe) {
+                                    var currentSrc = iframe.src;
+                                    // Remove existing cache-busting parameter if present
+                                    currentSrc = currentSrc.split('&_t=')[0].split('?_t=')[0];
+                                    // Add cache-busting parameter
+                                    var separator = currentSrc.includes('?') ? '&' : '?';
+                                    iframe.src = currentSrc + separator + '_t=' + Date.now();
+                                } else {
+                                    // Fallback: reload the entire page
+                                    console.log('Iframe not found, reloading page');
+                                    location.reload();
+                                }
+                            }, 500); // Small delay to ensure PDF is generated
+                        } else {
+                            // Fallback: reload if container not found
+                            location.reload();
+                        }
+                    } else {
+                        alert('Error saving field: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    var errorMsg = error.message || 'Unknown error occurred';
+                    alert('Error saving field: ' + errorMsg);
+                });
+            }
+            
+            // Redo signature field - delete existing signature and show input form again
+            function redoSignature(fieldId) {
+                if (!confirm('Are you sure you want to redo this signature? The current signature will be deleted.')) {
+                    return;
+                }
+                
+                fetch('{{ url_for("delete_signature", doc_id=document.id) }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        signature_field_id: fieldId
+                    })
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().then(data => {
+                            throw new Error(data.error || 'Server error: ' + response.status);
+                        });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success) {
+                        // Reload page to show signature input form again
+                        location.reload();
+                    } else {
+                        alert('Error: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error redoing signature: ' + error.message);
+                });
+            }
+            
+            // Redo typed field - delete existing value and show input form again
+            function redoTypedField(fieldId) {
+                if (!confirm('Are you sure you want to redo this field? The current value will be deleted.')) {
+                    return;
+                }
+                
+                fetch('{{ url_for("delete_typed_field_value", doc_id=document.id) }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        typed_field_id: fieldId
+                    })
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().then(data => {
+                            throw new Error(data.error || 'Server error: ' + response.status);
+                        });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success) {
+                        // Reload page to show input form again
+                        location.reload();
+                    } else {
+                        alert('Error: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error redoing field: ' + error.message);
+                });
+            }
         </script>
     </body>
     </html>
     ''', document=document, signature_fields=signature_fields, signed_field_ids=signed_field_ids, 
-         user_signatures=user_signatures, is_pdf=is_pdf)
+         user_signatures=user_signatures, typed_fields=typed_fields, filled_typed_field_ids=filled_typed_field_ids, is_pdf=is_pdf)
+
+
+def embed_signature_in_pdf(document, signature_field, signature_image_base64):
+    """Embed a signature image directly into the PDF at the specified coordinates"""
+    if not FITZ_AVAILABLE:
+        return False, "PyMuPDF not available"
+    
+    try:
+        from PIL import Image
+        
+        # Open the PDF
+        pdf_doc = fitz.open(document.file_path)
+        
+        # Get the page (0-indexed)
+        page_num = signature_field.page_number - 1
+        if page_num < 0 or page_num >= len(pdf_doc):
+            pdf_doc.close()
+            return False, f"Invalid page number: {signature_field.page_number}"
+        
+        page = pdf_doc[page_num]
+        page_rect = page.rect
+        page_width = page_rect.width
+        page_height = page_rect.height
+        
+        # Convert coordinates from browser pixels to PDF points
+        # The admin page uses PDF.js to render the PDF at exactly 800px height
+        # Coordinates are stored relative to the viewer container (after accounting for canvas offset)
+        # We need to convert these pixel coordinates to PDF points
+        
+        # The PDF.js viewer renders at 800px height, maintaining aspect ratio
+        viewer_height_px = 800.0
+        
+        # Calculate scale factor: PDF points per pixel
+        # This matches the PDF.js rendering scale
+        scale_y = page_height / viewer_height_px
+        
+        # Calculate viewer width at this scale (maintaining aspect ratio)
+        viewer_width_px = viewer_height_px * (page_width / page_height)
+        scale_x = page_width / viewer_width_px
+        
+        # Convert browser pixel coordinates to PDF points
+        # Browser: (x, y) from top-left of canvas (stored directly from canvas click)
+        # PyMuPDF: (x, y) from top-left of page (y increases downward)
+        
+        # Both use top-left origin, so direct conversion works!
+        # X coordinate: direct conversion (both use left as origin)
+        x_pdf = signature_field.x_position * scale_x
+        
+        # Y coordinate: direct conversion (both use top as origin, y increases downward)
+        # signature_field.y_position is pixels from top of canvas (at 800px height scale)
+        # This represents the TOP of the signature field
+        # PyMuPDF also uses top-left origin, so no flipping needed!
+        y_pdf = signature_field.y_position * scale_y
+        
+        # Convert width/height from pixels to PDF points
+        width_pdf = (signature_field.width or 200) * scale_x
+        height_pdf = (signature_field.height or 80) * scale_y
+        
+        # Clamp to page bounds (ensure signature fits on page)
+        x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+        y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+        
+        # Debug output
+        print(f"\n=== Signature Embedding ===")
+        print(f"Browser coords: x={signature_field.x_position:.1f}, y={signature_field.y_position:.1f}")
+        print(f"PDF page: {page_width:.1f} x {page_height:.1f} points")
+        print(f"Scale: x={scale_x:.6f}, y={scale_y:.6f}")
+        print(f"PDF coords: x={x_pdf:.2f}, y={y_pdf:.2f}")
+        print(f"Size: {width_pdf:.2f} x {height_pdf:.2f}")
+        print(f"========================\n")
+        
+        # Decode signature image
+        sig_image_data = base64.b64decode(signature_image_base64)
+        sig_img = Image.open(BytesIO(sig_image_data))
+        
+        # Convert PIL image to bytes for PyMuPDF
+        img_bytes = BytesIO()
+        sig_img.save(img_bytes, format='PNG')
+        img_bytes.seek(0)
+        
+        # Create a PyMuPDF image rectangle
+        # PyMuPDF Rect uses (x0, y0, x1, y1) where (x0,y0) is top-left and (x1,y1) is bottom-right
+        # Origin is top-left, y increases downward
+        # x_pdf and y_pdf are already in PDF points from top-left, so use directly
+        img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+        
+        print(f"PyMuPDF rect: {img_rect}")
+        
+        # Insert the image into the PDF page
+        page.insert_image(img_rect, stream=img_bytes.getvalue())
+        
+        # Save the modified PDF (incremental to preserve other data)
+        pdf_doc.save(document.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+        pdf_doc.close()
+        
+        return True, "Signature embedded successfully"
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, f"Error embedding signature: {str(e)}"
+
+
+def calculate_pdf_hash(file_path):
+    """Calculate SHA-256 hash of a PDF file for audit trail"""
+    import hashlib
+    sha256 = hashlib.sha256()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b''):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def sign_pdf_cryptographically(document, signature_field, username):
+    """
+    Sign a PDF cryptographically using pyHanko (PAdES compliant)
+    This creates a legally binding, tamper-evident signature
+    """
+    if not PYHANKO_AVAILABLE:
+        return False, "pyHanko library not available. Install with: pip install pyhanko[full]"
+    
+    try:
+        # For now, we'll use a self-signed certificate for demonstration
+        # In production, you MUST use a CA-issued document signing certificate
+        # and store private keys securely (HSM/KMS)
+        
+        # TODO: Load certificate and key from secure storage (HSM/KMS)
+        # For now, return an error indicating certificate setup is needed
+        return False, "Cryptographic signing requires certificate setup. Please configure signing certificate and key in secure storage (HSM/KMS)."
+        
+        # Example implementation (commented out until certificates are configured):
+        # signer = signers.SimpleSigner.load(
+        #     key_file="path/to/private_key.pem",
+        #     cert_file="path/to/signing_cert.pem",
+        #     key_passphrase=b"password",  # In production, get from secure vault
+        #     ca_chain_files=["path/to/intermediate_cert.pem"]
+        # )
+        # 
+        # # Optional: Use trusted timestamp authority
+        # tsa = HTTPTimeStamper("https://freetsa.org/tsr") if use_tsa else None
+        # 
+        # with open(document.file_path, "rb") as infile:
+        #     writer = IncrementalPdfFileWriter(infile)
+        #     
+        #     # Convert browser pixel coordinates to PDF points
+        #     # (Same conversion logic as embed_signature_in_pdf)
+        #     pdf_doc = fitz.open(document.file_path)
+        #     page = pdf_doc[signature_field.page_number - 1]
+        #     page_rect = page.rect
+        #     page_width = page_rect.width
+        #     page_height = page_rect.height
+        #     pdf_doc.close()
+        #     
+        #     viewer_height_px = 800.0
+        #     scale_y = page_height / viewer_height_px
+        #     viewer_width_px = viewer_height_px * (page_width / page_height)
+        #     scale_x = page_width / viewer_width_px
+        #     
+        #     x_pdf = signature_field.x_position * scale_x
+        #     y_from_top_pdf = signature_field.y_position * scale_y
+        #     y_pdf = page_height - y_from_top_pdf - (signature_field.height * scale_y)
+        #     width_pdf = signature_field.width * scale_x
+        #     height_pdf = signature_field.height * scale_y
+        #     
+        #     # Create signature field in PDF
+        #     sig_field = fields.SigFieldSpec(
+        #         field_name=f"Signature_{signature_field.id}",
+        #         box=(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf),
+        #         on_page=signature_field.page_number - 1  # 0-indexed
+        #     )
+        #     
+        #     signers.sign_pdf(
+        #         writer,
+        #         signers.PdfSignatureMetadata(
+        #             field_name=f"Signature_{signature_field.id}",
+        #             reason=f"Signed by {username}",
+        #             location="Ziebart Onboarding System",
+        #             use_pades_lta=True  # PAdES Long Term Availability
+        #         ),
+        #         signer=signer,
+        #         timestamper=tsa,
+        #         new_field_spec=sig_field,
+        #         output=open(document.file_path, "wb")
+        #     )
+        # 
+        # return True, "PDF signed cryptographically"
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, f"Error signing PDF: {str(e)}"
 
 
 @app.route('/documents/<int:doc_id>/sign/submit', methods=['POST'])
@@ -5766,21 +8471,37 @@ def submit_signature(doc_id):
     if not document:
         return jsonify({'success': False, 'error': 'Document not found'}), 404
     
-    # Check permissions
-    if not current_user.is_admin() and not document.is_visible:
-        return jsonify({'success': False, 'error': 'Permission denied'}), 403
+    # Check permissions - only allow if document is assigned to user (unless admin)
+    if not current_user.is_admin():
+        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+        if not assignment:
+            return jsonify({'success': False, 'error': 'This document has not been assigned to you.'}), 403
     
     data = request.get_json()
     signature_field_id = data.get('signature_field_id')
-    signature_image = data.get('signature_image')  # Base64 encoded
+    signature_image = data.get('signature_image')  # Base64 encoded (for image type)
+    consent_given = data.get('consent_given', False)  # User consent for electronic signing
     
-    if not signature_field_id or not signature_image:
-        return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+    if not signature_field_id:
+        return jsonify({'success': False, 'error': 'Missing signature field ID'}), 400
     
     # Verify signature field exists and belongs to this document
     signature_field = DocumentSignatureField.query.get(signature_field_id)
     if not signature_field or signature_field.document_id != doc_id:
         return jsonify({'success': False, 'error': 'Invalid signature field'}), 400
+    
+    # Check signature type (default to 'image' if None)
+    signature_type = signature_field.signature_type or 'image'
+    is_cryptographic = signature_type == 'cryptographic'
+    
+    if is_cryptographic:
+        # Cryptographic signatures require consent
+        if not consent_given:
+            return jsonify({'success': False, 'error': 'Electronic signature consent is required'}), 400
+    else:
+        # Image signatures require the image
+        if not signature_image:
+            return jsonify({'success': False, 'error': 'Missing signature image'}), 400
     
     try:
         # Check if user already signed this field
@@ -5792,105 +8513,496 @@ def submit_signature(doc_id):
         
         if existing_signature:
             # Update existing signature
-            existing_signature.signature_image = signature_image
+            if not is_cryptographic:
+                existing_signature.signature_image = signature_image
             existing_signature.signed_at = datetime.utcnow()
             existing_signature.ip_address = request.remote_addr
+            existing_signature.user_agent = request.headers.get('User-Agent', '')
+            existing_signature.consent_given = consent_given
+            sig_to_embed = existing_signature
         else:
-            # Create new signature
-            signature = DocumentSignature(
+            # Create new signature record
+            new_signature = DocumentSignature(
                 document_id=doc_id,
                 signature_field_id=signature_field_id,
                 username=current_user.username,
-                signature_image=signature_image,
-                ip_address=request.remote_addr
+                signature_image=signature_image if not is_cryptographic else None,
+                signature_type=signature_field.signature_type,
+                signed_at=datetime.utcnow(),
+                ip_address=request.remote_addr,
+                user_agent=request.headers.get('User-Agent', ''),
+                consent_given=consent_given
             )
-            db.session.add(signature)
+            db.session.add(new_signature)
+            sig_to_embed = new_signature
+        
+        # Embed signature based on type
+        if is_cryptographic:
+            # Cryptographic signature
+            success, message = sign_pdf_cryptographically(document, signature_field, current_user.username)
+            if success:
+                # Calculate hash of signed PDF for audit trail
+                pdf_hash = calculate_pdf_hash(document.file_path)
+                sig_to_embed.signature_hash = pdf_hash
+        else:
+            # Image signature - don't embed into original, just save to database
+            # The signature will be displayed as an overlay when viewing
+            success, message = True, "Signature saved to database"
+        
+        if not success:
+            db.session.rollback()
+            return jsonify({'success': False, 'error': message}), 500
         
         db.session.commit()
         
-        # Check if all required signature fields are now signed
-        required_fields = DocumentSignatureField.query.filter_by(
-            document_id=doc_id,
-            is_required=True
-        ).all()
+        # Check if all required fields are signed
+        all_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
+        user_sigs = DocumentSignature.query.filter_by(document_id=doc_id, username=current_user.username).all()
+        signed_field_ids = set(sig.signature_field_id for sig in user_sigs)
         
-        if required_fields:
-            user_signatures = DocumentSignature.query.filter_by(
+        all_signed = all(f.id in signed_field_ids for f in all_fields if f.is_required)
+        
+        # Update task completion if all fields signed
+        if all_signed:
+            # Mark document assignment as completed
+            assignment = DocumentAssignment.query.filter_by(
                 document_id=doc_id,
                 username=current_user.username
-            ).all()
-            signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
+            ).first()
+            if assignment:
+                assignment.is_completed = True
+                assignment.completed_at = datetime.utcnow()
             
-            # Check if all required fields are signed
-            all_signed = all(f.id in signed_field_ids for f in required_fields)
+            # Mark user task as completed
+            task = UserTask.query.filter_by(
+                document_id=doc_id,
+                username=current_user.username,
+                task_type='sign_document'
+            ).first()
+            if task:
+                task.is_completed = True
+                task.completed_at = datetime.utcnow()
             
-            if all_signed:
-                # Update UserTask status
-                task = UserTask.query.filter_by(
-                    username=current_user.username,
-                    task_type='document',
-                    document_id=doc_id,
-                    status='pending'
-                ).first()
-                
-                if not task:
-                    # Try in_progress status too
-                    task = UserTask.query.filter_by(
-                        username=current_user.username,
-                        task_type='document',
-                        document_id=doc_id,
-                        status='in_progress'
-                    ).first()
-                
-                if task:
-                    task.status = 'completed'
-                    task.completed_at = datetime.utcnow()
-                
-                # Update DocumentAssignment status
-                assignment = DocumentAssignment.query.filter_by(
-                    document_id=doc_id,
-                    username=current_user.username
-                ).first()
-                
-                if assignment:
-                    assignment.is_completed = True
-                    if not assignment.completed_at:
-                        assignment.completed_at = datetime.utcnow()
-                
-                db.session.commit()
+            db.session.commit()
         
-        return jsonify({'success': True, 'all_signed': all_signed if required_fields else False})
+        return jsonify({'success': True, 'message': 'Signature saved and embedded in PDF'})
+        
     except Exception as e:
         db.session.rollback()
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/documents/<int:doc_id>/typed-field/delete', methods=['POST'])
+@login_required
+def delete_typed_field_value(doc_id):
+    """Delete a typed field value to allow redo"""
+    try:
+        document = Document.query.get(doc_id)
+        if not document:
+            return jsonify({'success': False, 'error': 'Document not found'}), 404
+        
+        # Check permissions - only allow if document is assigned to user (unless admin)
+        if not current_user.is_admin():
+            assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+            if not assignment:
+                return jsonify({'success': False, 'error': 'This document has not been assigned to you.'}), 403
+        
+        data = request.get_json()
+        typed_field_id = data.get('typed_field_id')
+        
+        if not typed_field_id:
+            return jsonify({'success': False, 'error': 'Missing typed field ID'}), 400
+        
+        try:
+            # Find and delete the typed field value
+            typed_field_value = DocumentTypedFieldValue.query.filter_by(
+                document_id=doc_id,
+                typed_field_id=typed_field_id,
+                username=current_user.username
+            ).first()
+            
+            if typed_field_value:
+                db.session.delete(typed_field_value)
+                db.session.commit()
+                return jsonify({'success': True, 'message': 'Typed field value deleted successfully'})
+            else:
+                return jsonify({'success': False, 'error': 'Typed field value not found'}), 404
+        except Exception as e:
+            db.session.rollback()
+            import traceback
+            traceback.print_exc()
+            return jsonify({'success': False, 'error': f'Error deleting typed field value: {str(e)}'}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Error: {str(e)}'}), 500
+
+
+@app.route('/documents/<int:doc_id>/signature/delete', methods=['POST'])
+@login_required
+def delete_signature(doc_id):
+    """Delete a signature to allow redo"""
+    try:
+        document = Document.query.get(doc_id)
+        if not document:
+            return jsonify({'success': False, 'error': 'Document not found'}), 404
+        
+        # Check permissions - only allow if document is assigned to user (unless admin)
+        if not current_user.is_admin():
+            assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+            if not assignment:
+                return jsonify({'success': False, 'error': 'This document has not been assigned to you.'}), 403
+        
+        data = request.get_json()
+        signature_field_id = data.get('signature_field_id')
+        
+        if not signature_field_id:
+            return jsonify({'success': False, 'error': 'Missing signature field ID'}), 400
+        
+        try:
+            # Find and delete the signature
+            signature = DocumentSignature.query.filter_by(
+                document_id=doc_id,
+                signature_field_id=signature_field_id,
+                username=current_user.username
+            ).first()
+            
+            if signature:
+                db.session.delete(signature)
+                db.session.commit()
+                return jsonify({'success': True, 'message': 'Signature deleted successfully'})
+            else:
+                return jsonify({'success': False, 'error': 'Signature not found'}), 404
+        except Exception as e:
+            db.session.rollback()
+            import traceback
+            traceback.print_exc()
+            return jsonify({'success': False, 'error': f'Error deleting signature: {str(e)}'}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Error: {str(e)}'}), 500
+
+
+@app.route('/documents/<int:doc_id>/typed-field/submit', methods=['POST'])
+@login_required
+def submit_typed_field(doc_id):
+    """Submit a typed field value for a document"""
+    try:
+        document = Document.query.get(doc_id)
+        if not document:
+            return jsonify({'success': False, 'error': 'Document not found'}), 404
+        
+        # Check permissions - only allow if document is assigned to user (unless admin)
+        if not current_user.is_admin():
+            assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+            if not assignment:
+                return jsonify({'success': False, 'error': 'This document has not been assigned to you.'}), 403
+        
+        data = request.get_json()
+        typed_field_id = data.get('typed_field_id')
+        field_value = data.get('field_value', '').strip()
+        
+        if not typed_field_id:
+            return jsonify({'success': False, 'error': 'Missing typed field ID'}), 400
+        
+        if not field_value:
+            return jsonify({'success': False, 'error': 'Field value is required'}), 400
+        
+        # Verify typed field exists and belongs to this document
+        try:
+            typed_field = DocumentTypedField.query.get(typed_field_id)
+        except Exception:
+            return jsonify({'success': False, 'error': 'Typed fields feature is not available. Please contact administrator.'}), 500
+        
+        if not typed_field or typed_field.document_id != doc_id:
+            return jsonify({'success': False, 'error': 'Invalid typed field'}), 400
+    
+        try:
+            # Check if user already filled this field
+            try:
+                existing_value = DocumentTypedFieldValue.query.filter_by(
+                    document_id=doc_id,
+                    typed_field_id=typed_field_id,
+                    username=current_user.username
+                ).first()
+            except Exception as table_error:
+                # Table might not exist yet
+                import traceback
+                traceback.print_exc()
+                return jsonify({'success': False, 'error': 'Database table not available. Please contact administrator.'}), 500
+            
+            if existing_value:
+                # Update existing value
+                existing_value.field_value = field_value
+                existing_value.filled_at = datetime.utcnow()
+                existing_value.ip_address = request.remote_addr
+                existing_value.user_agent = request.headers.get('User-Agent', '')
+            else:
+                # Create new value record
+                new_value = DocumentTypedFieldValue(
+                    document_id=doc_id,
+                    typed_field_id=typed_field_id,
+                    username=current_user.username,
+                    field_value=field_value,
+                    filled_at=datetime.utcnow(),
+                    ip_address=request.remote_addr,
+                    user_agent=request.headers.get('User-Agent', '')
+                )
+                db.session.add(new_value)
+            
+            db.session.commit()
+            return jsonify({'success': True, 'message': 'Typed field value saved successfully'})
+        except Exception as e:
+            db.session.rollback()
+            import traceback
+            traceback.print_exc()
+            return jsonify({'success': False, 'error': f'Error saving typed field: {str(e)}'}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Error: {str(e)}'}), 500
 
 
 @app.route('/documents/<int:doc_id>/download')
 @login_required
 def download_document(doc_id):
-    """Download a document (admin can download all, users can only download visible ones)"""
+    """Download a document - for users, download their signed version; for admins, download original"""
     document = Document.query.get(doc_id)
     
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('dashboard'))
     
-    # Check permissions
-    if not current_user.is_admin() and not document.is_visible:
-        flash('You do not have permission to access this document.', 'error')
-        return redirect(url_for('dashboard'))
+    # Check permissions - only allow if document is assigned to user (unless admin)
+    if not current_user.is_admin():
+        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+        if not assignment:
+            flash('This document has not been assigned to you.', 'error')
+            return redirect(url_for('dashboard'))
     
     # Check if file exists
     if not os.path.exists(document.file_path):
         flash('File not found on server.', 'error')
         return redirect(url_for('dashboard'))
     
-    return send_file(
-        document.file_path,
-        as_attachment=True,
-        download_name=document.original_filename,
-        mimetype=document.file_type or 'application/octet-stream'
-    )
+    # For regular users, generate and download their signed version
+    # For admins, download the original document
+    if not current_user.is_admin():
+        # Generate signed PDF for this user
+        try:
+            # Get user's signatures for this document
+            user_signatures = DocumentSignature.query.filter_by(
+                document_id=doc_id,
+                username=current_user.username
+            ).all()
+            
+            # Get typed field values for this user (handle case where table might not exist yet)
+            try:
+                user_typed_values = DocumentTypedFieldValue.query.filter_by(
+                    document_id=doc_id,
+                    username=current_user.username
+                ).all()
+                typed_value_map = {val.typed_field_id: val.field_value for val in user_typed_values}
+            except Exception:
+                typed_value_map = {}
+            
+            if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
+                # Create a temporary signed copy
+                import tempfile
+                import shutil
+                
+                # Create temp file
+                temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
+                os.close(temp_fd)
+                
+                # Copy original PDF
+                shutil.copy2(document.file_path, temp_path)
+                
+                # Embed signatures and typed field values into temp copy
+                pdf_doc = fitz.open(temp_path)
+                
+                # Embed signatures
+                for sig in user_signatures:
+                    if not sig.signature_image:
+                        continue
+                    
+                    # Get signature field
+                    field = DocumentSignatureField.query.get(sig.signature_field_id)
+                    if not field:
+                        continue
+                    
+                    # Embed this signature
+                    try:
+                        from PIL import Image
+                        import base64
+                        from io import BytesIO
+                        
+                        page_num = field.page_number - 1
+                        if page_num < 0 or page_num >= len(pdf_doc):
+                            continue
+                        
+                        page = pdf_doc[page_num]
+                        page_rect = page.rect
+                        page_width = page_rect.width
+                        page_height = page_rect.height
+                        
+                        # Convert coordinates (same logic as embed_signature_in_pdf)
+                        viewer_height_px = 800.0
+                        scale_y = page_height / viewer_height_px
+                        viewer_width_px = viewer_height_px * (page_width / page_height)
+                        scale_x = page_width / viewer_width_px
+                        
+                        x_pdf = field.x_position * scale_x
+                        y_pdf = field.y_position * scale_y
+                        width_pdf = (field.width or 200) * scale_x
+                        height_pdf = (field.height or 80) * scale_y
+                        
+                        # Clamp to page bounds
+                        x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+                        y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+                        
+                        # Decode and embed signature
+                        sig_image_data = base64.b64decode(sig.signature_image)
+                        sig_img = Image.open(BytesIO(sig_image_data))
+                        
+                        img_bytes = BytesIO()
+                        sig_img.save(img_bytes, format='PNG')
+                        img_bytes.seek(0)
+                        
+                        img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+                        page.insert_image(img_rect, stream=img_bytes.getvalue())
+                    except Exception as e:
+                        print(f"Error embedding signature {sig.id}: {e}")
+                        continue
+                
+                # Embed typed field values as text
+                try:
+                    for typed_field_id, field_value in typed_value_map.items():
+                        try:
+                            typed_field = DocumentTypedField.query.get(typed_field_id)
+                            if not typed_field:
+                                continue
+                            
+                            page_num = typed_field.page_number - 1
+                            if page_num < 0 or page_num >= len(pdf_doc):
+                                continue
+                            
+                            page = pdf_doc[page_num]
+                            page_rect = page.rect
+                            page_width = page_rect.width
+                            page_height = page_rect.height
+                            
+                            # Convert coordinates
+                            viewer_height_px = 800.0
+                            scale_y = page_height / viewer_height_px
+                            viewer_width_px = viewer_height_px * (page_width / page_height)
+                            scale_x = page_width / viewer_width_px
+                            
+                            x_pdf = typed_field.x_position * scale_x
+                            y_pdf = typed_field.y_position * scale_y
+                            width_pdf = (typed_field.width or 200) * scale_x
+                            height_pdf = (typed_field.height or 30) * scale_y
+                            
+                            # Clamp to page bounds
+                            x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+                            y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+                            
+                            # Create text rectangle
+                            text_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+                            
+                            # Calculate font size
+                            font_size = int(height_pdf * 0.7)
+                            if font_size < 8:
+                                font_size = 8
+                            elif font_size > 72:
+                                font_size = 72
+                            
+                            # Insert text using insert_textbox
+                            try:
+                                if text_rect.width > 0 and text_rect.height > 0:
+                                    rc = page.insert_textbox(
+                                        text_rect,
+                                        field_value,
+                                        fontsize=font_size,
+                                        align=0,
+                                        color=(0, 0, 0),
+                                        render_mode=0
+                                    )
+                                    if rc < 0:
+                                        # Fallback to insert_text
+                                        text_y = y_pdf + font_size + 2
+                                        page.insert_text(
+                                            (x_pdf + 2, text_y),
+                                            field_value[:100],
+                                            fontsize=font_size,
+                                            color=(0, 0, 0)
+                                        )
+                            except Exception as text_error:
+                                # Fallback to insert_text
+                                try:
+                                    text_y = y_pdf + font_size + 2
+                                    page.insert_text(
+                                        (x_pdf + 2, text_y),
+                                        field_value[:100],
+                                        fontsize=font_size,
+                                        color=(0, 0, 0)
+                                    )
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            print(f"Error embedding typed field {typed_field_id}: {e}")
+                            continue
+                except Exception as e:
+                    print(f"Error processing typed fields: {e}")
+                
+                # Save the PDF
+                pdf_doc.save(temp_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+                pdf_doc.close()
+                
+                # Generate download filename with user's name
+                base_name = os.path.splitext(document.original_filename)[0]
+                ext = os.path.splitext(document.original_filename)[1]
+                download_filename = f"{base_name}_signed_{current_user.username}{ext}"
+                
+                # Send the signed PDF
+                # Note: Temp file will be cleaned up by OS, but we could implement
+                # a background cleanup task if needed for production
+                return send_file(
+                    temp_path,
+                    as_attachment=True,
+                    download_name=download_filename,
+                    mimetype=document.file_type or 'application/pdf'
+                )
+            else:
+                # No signatures or typed fields, just download original
+                return send_file(
+                    document.file_path,
+                    as_attachment=True,
+                    download_name=document.original_filename,
+                    mimetype=document.file_type or 'application/octet-stream'
+                )
+        except Exception as e:
+            print(f"Error generating signed PDF: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fall through to download original
+            return send_file(
+                document.file_path,
+                as_attachment=True,
+                download_name=document.original_filename,
+                mimetype=document.file_type or 'application/octet-stream'
+            )
+    else:
+        # Admin downloads original document
+        return send_file(
+            document.file_path,
+            as_attachment=True,
+            download_name=document.original_filename,
+            mimetype=document.file_type or 'application/octet-stream'
+        )
 
 
 @app.route('/admin/documents/<int:doc_id>/signed-copies')
@@ -5924,27 +9036,60 @@ def view_signed_documents(doc_id):
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -5956,15 +9101,20 @@ def view_signed_documents(doc_id):
             .admin-panel {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+            }
+            .admin-panel h2 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                color: #000000;
             }
             .signed-user-item {
                 background: #f8f9fa;
                 padding: 20px;
                 margin-bottom: 15px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 border-left: 4px solid #28a745;
                 display: flex;
                 justify-content: space-between;
@@ -5972,10 +9122,10 @@ def view_signed_documents(doc_id):
             }
             .user-info h3 {
                 margin-bottom: 5px;
-                color: #333;
+                color: #000000;
             }
             .user-info p {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
             .signature-preview {
@@ -5988,7 +9138,7 @@ def view_signed_documents(doc_id):
                 max-width: 150px;
                 max-height: 60px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 padding: 5px;
                 background: white;
             }
@@ -6004,10 +9154,10 @@ def view_signed_documents(doc_id):
             <div class="header-content">
                 <h1>📥 Signed Copies - {{ document.original_filename }}</h1>
             </div>
+            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('manage_documents') }}" class="btn">← Back to Documents</a>
             
             <div class="admin-panel">
                 <h2>Users Who Have Signed This Document</h2>
@@ -6061,56 +9211,65 @@ def view_form_signatures(doc_id):
         flash('This document has no required signature fields.', 'error')
         return redirect(url_for('admin_dashboard'))
     
-    # Get all users
-    all_users = UserModel.query.all()
+    # Get only users who have been assigned this document
+    assignments = DocumentAssignment.query.filter_by(document_id=doc_id).all()
+    assigned_usernames = set(a.username for a in assignments)
     
-    # Check signing status for each user
-    users_status = []
-    for user in all_users:
-        user_signatures = DocumentSignature.query.filter_by(
-            document_id=doc_id,
-            username=user.username
-        ).all()
-        signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
+    if not assigned_usernames:
+        # If no assignments, show message
+        signed_users = []
+        unsigned_users = []
+    else:
+        # Get user records for assigned users only
+        assigned_users = UserModel.query.filter(UserModel.username.in_(assigned_usernames)).all()
         
-        # Check if user has signed all required fields
-        all_signed = all(f.id in signed_field_ids for f in required_fields)
-        signed_count = len([f for f in required_fields if f.id in signed_field_ids])
-        
-        # Get user's new hire record if exists
-        new_hire = NewHire.query.filter_by(username=user.username).first()
-        try:
-            if new_hire:
-                first_name = new_hire.first_name or ''
-                last_name = new_hire.last_name or ''
-                user_name = f"{first_name} {last_name}".strip() or user.username
-                user_email = getattr(new_hire, 'email', None) or getattr(user, 'email', None) or '-'
-                user_department = getattr(new_hire, 'department', None) or '-'
-            else:
+        # Check signing status for each assigned user
+        users_status = []
+        for user in assigned_users:
+            user_signatures = DocumentSignature.query.filter_by(
+                document_id=doc_id,
+                username=user.username
+            ).all()
+            signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
+            
+            # Check if user has signed all required fields
+            all_signed = all(f.id in signed_field_ids for f in required_fields)
+            signed_count = len([f for f in required_fields if f.id in signed_field_ids])
+            
+            # Get user's new hire record if exists
+            new_hire = NewHire.query.filter_by(username=user.username).first()
+            try:
+                if new_hire:
+                    first_name = new_hire.first_name or ''
+                    last_name = new_hire.last_name or ''
+                    user_name = f"{first_name} {last_name}".strip() or user.username
+                    user_email = getattr(new_hire, 'email', None) or getattr(user, 'email', None) or '-'
+                    user_department = getattr(new_hire, 'department', None) or '-'
+                else:
+                    user_name = user.username
+                    user_email = getattr(user, 'email', None) or '-'
+                    user_department = '-'
+            except Exception as e:
+                # Fallback if there's any error accessing attributes
                 user_name = user.username
-                user_email = getattr(user, 'email', None) or '-'
+                user_email = '-'
                 user_department = '-'
-        except Exception as e:
-            # Fallback if there's any error accessing attributes
-            user_name = user.username
-            user_email = '-'
-            user_department = '-'
+            
+            users_status.append({
+                'username': user.username,
+                'name': user_name,
+                'email': user_email,
+                'department': user_department,
+                'signed': all_signed,
+                'signed_count': signed_count,
+                'total_required': len(required_fields)
+            })
         
-        users_status.append({
-            'username': user.username,
-            'name': user_name,
-            'email': user_email,
-            'department': user_department,
-            'signed': all_signed,
-            'signed_count': signed_count,
-            'total_required': len(required_fields)
-        })
-    
-    # Sort: signed users first, then by name
-    users_status.sort(key=lambda x: (not x['signed'], x['name']))
-    
-    signed_users = [u for u in users_status if u['signed']]
-    unsigned_users = [u for u in users_status if not u['signed']]
+        # Sort: signed users first, then by name
+        users_status.sort(key=lambda x: (not x['signed'], x['name']))
+        
+        signed_users = [u for u in users_status if u['signed']]
+        unsigned_users = [u for u in users_status if not u['signed']]
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -6119,77 +9278,107 @@ def view_form_signatures(doc_id):
         <title>Form Signatures - {{ document.original_filename }}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
                 margin: 5px;
             }
             .btn:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .section {
-                background: white;
-                border-radius: 12px;
-                padding: 25px;
+                background: #FFFFFF;
+                border-radius: 1rem;
+                border: 1px solid #E0E0E0;
+                padding: 2rem;
                 margin-bottom: 30px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
+                font-weight: 800;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
                 border-bottom: 2px solid #dc3545;
                 padding-bottom: 10px;
             }
             .document-header {
                 background: #f8f9fa;
                 padding: 20px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-bottom: 20px;
             }
             .document-header h2 {
                 font-size: 1.4em;
                 margin-bottom: 5px;
-                color: #2d2d2d;
+                color: #000000;
             }
             .document-header p {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
             table {
@@ -6236,7 +9425,7 @@ def view_form_signatures(doc_id):
             }
             .progress-info {
                 font-size: 0.85em;
-                color: #666;
+                color: #808080;
             }
             .stats-summary {
                 display: grid;
@@ -6247,17 +9436,17 @@ def view_form_signatures(doc_id):
             .stat-card {
                 background: #f8f9fa;
                 padding: 20px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 text-align: center;
             }
             .stat-number {
                 font-size: 2.5em;
                 font-weight: bold;
-                color: #dc3545;
+                color: #FE0100;
                 margin-bottom: 5px;
             }
             .stat-label {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
         </style>
@@ -6268,7 +9457,7 @@ def view_form_signatures(doc_id):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="btn" style="background: rgba(255,255,255,0.2);">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -6287,7 +9476,7 @@ def view_form_signatures(doc_id):
                     <div class="stat-label">Signed</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-number" style="color: #dc3545;">{{ unsigned_users|length }}</div>
+                    <div class="stat-number" style="color: #FE0100;">{{ unsigned_users|length }}</div>
                     <div class="stat-label">Not Signed</div>
                 </div>
             </div>
@@ -6366,8 +9555,8 @@ def view_form_signatures(doc_id):
         </div>
     </body>
     </html>
-    ''', document=document, required_fields=required_fields, users_status=users_status,
-         signed_users=signed_users, unsigned_users=unsigned_users)
+    ''', document=document, required_fields=required_fields, users_status=users_status if assigned_usernames else [],
+         signed_users=signed_users, unsigned_users=unsigned_users, assigned_usernames=assigned_usernames)
 
 
 @app.route('/admin/documents/<int:doc_id>/signed-copy/<username>')
@@ -6378,6 +9567,11 @@ def download_signed_document(doc_id, username):
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('manage_documents'))
+    
+    # Check if file exists
+    if not os.path.exists(document.file_path):
+        flash('File not found on server.', 'error')
+        return redirect(url_for('view_signed_documents', doc_id=doc_id))
     
     # Check if document is a PDF
     is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
@@ -6392,186 +9586,198 @@ def download_signed_document(doc_id, username):
         username=username
     ).all()
     
-    if not user_signatures:
-        flash('No signatures found for this user.', 'error')
+    # Get typed field values for this user (handle case where table might not exist yet)
+    try:
+        user_typed_values = DocumentTypedFieldValue.query.filter_by(
+            document_id=doc_id,
+            username=username
+        ).all()
+        typed_value_map = {val.typed_field_id: val.field_value for val in user_typed_values}
+    except Exception:
+        typed_value_map = {}
+    
+    if not user_signatures and not typed_value_map:
+        flash('No signatures or typed fields found for this user.', 'error')
         return redirect(url_for('view_signed_documents', doc_id=doc_id))
     
     try:
-        # Import PDF libraries
-        try:
-            from PyPDF2 import PdfReader, PdfWriter
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.pagesizes import letter
-            from reportlab.lib.utils import ImageReader
-            from io import BytesIO
-            import base64
-            from PIL import Image
-        except ImportError:
-            # Fallback: return original document with a note
-            flash('PDF processing libraries not available. Please install PyPDF2, reportlab, and Pillow.', 'error')
-            return redirect(url_for('download_document', doc_id=doc_id))
-        
-        # Read the original PDF
-        pdf_reader = PdfReader(document.file_path)
-        pdf_writer = PdfWriter()
-        
-        # Get signature fields
-        signature_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
-        field_dict = {f.id: f for f in signature_fields}
-        
-        # Create a mapping of page number to signatures
-        page_signatures = {}
-        for sig in user_signatures:
-            field = field_dict.get(sig.signature_field_id)
-            if field:
-                page_num = field.page_number - 1  # Convert to 0-based index
-                if page_num not in page_signatures:
-                    page_signatures[page_num] = []
-                page_signatures[page_num].append({
-                    'field': field,
-                    'signature': sig
-                })
-        
-        # Debug: Print signature field info
-        print(f"Processing {len(user_signatures)} signatures for document {doc_id}")
-        for page_num, sigs in page_signatures.items():
-            print(f"Page {page_num + 1}: {len(sigs)} signatures")
-            for sig_data in sigs:
-                field = sig_data['field']
-                print(f"  Field {field.id}: x={field.x_position}, y={field.y_position}, width={field.width}, height={field.height}")
-        
-        # Process each page
-        for page_num, page in enumerate(pdf_reader.pages):
-            # Get page dimensions (in points - 1 point = 1/72 inch)
-            page_width = float(page.mediabox.width)
-            page_height = float(page.mediabox.height)
+        if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
+            # Create a temporary signed copy
+            import tempfile
+            import shutil
             
-            # Only create overlay if there are signatures on this page
-            if page_num in page_signatures:
-                # Create a new page with signatures overlaid - use actual page dimensions
-                packet = BytesIO()
-                # Use the actual PDF page dimensions for the canvas
-                can = canvas.Canvas(packet, pagesize=(page_width, page_height))
+            # Create temp file
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
+            os.close(temp_fd)
+            
+            # Copy original PDF
+            shutil.copy2(document.file_path, temp_path)
+            
+            # Embed signatures and typed field values into temp copy
+            pdf_doc = fitz.open(temp_path)
+            
+            # Embed signatures
+            for sig in user_signatures:
+                if not sig.signature_image:
+                    continue
                 
-                # Draw signatures on this page
-                for sig_data in page_signatures[page_num]:
-                    field = sig_data['field']
-                    sig = sig_data['signature']
-                    
-                    # Decode signature image
-                    try:
-                        sig_image_data = base64.b64decode(sig.signature_image)
-                        sig_image = Image.open(BytesIO(sig_image_data))
-                        
-                        # The coordinates stored are in pixels from the iframe viewer
-                        # The iframe viewer typically displays PDFs scaled to fit
-                        # We need to estimate the scale factor or use the coordinates directly
-                        # Standard approach: assume viewer displays at ~96 DPI and PDF is 72 DPI
-                        # Scale factor: 72/96 = 0.75, but this varies by viewer
-                        # For now, try using coordinates directly (assuming 1:1 if viewer is at 72 DPI)
-                        # If that doesn't work, we may need to store coordinates as percentages
-                        
-                        # Get coordinates from the field (stored as x_position, y_position)
-                        x = float(field.x_position)
-                        y_coord = float(field.y_position)
-                        sig_width = float(field.width)
-                        sig_height = float(field.height)
-                        
-                        # The coordinates are stored in screen pixels from the iframe viewer
-                        # The iframe viewer typically scales PDFs to fit the container (800px height)
-                        # We need to convert from viewer pixels to PDF points
-                        # Standard PDF page (8.5x11") = 612x792 points
-                        # Iframe viewer is typically 800px tall, so scale = page_height / 800
-                        
-                        # Estimate the viewer scale - assume viewer height is ~800px
-                        # This is a reasonable default for most browsers
-                        viewer_height = 800.0  # Approximate iframe viewer height
-                        scale_y = page_height / viewer_height
-                        
-                        # For width, we need to account for the aspect ratio
-                        # Viewer width varies, but we can estimate based on page aspect ratio
-                        viewer_width = viewer_height * (page_width / page_height)
-                        scale_x = page_width / viewer_width
-                        
-                        # Apply scaling to convert from viewer pixels to PDF points
-                        x = x * scale_x
-                        y_coord = y_coord * scale_y
-                        sig_width = sig_width * scale_x
-                        sig_height = sig_height * scale_y
-                        
-                        # PDF coordinate system: origin (0,0) is at bottom-left
-                        # Iframe coordinate system: origin (0,0) is at top-left
-                        # So we need to flip the Y coordinate
-                        y = page_height - y_coord - sig_height
-                        
-                        # Clamp coordinates to page bounds
-                        x = max(0, min(x, page_width - sig_width))
-                        y = max(0, min(y, page_height - sig_height))
-                        
-                        # Ensure minimum size
-                        if sig_width < 10:
-                            sig_width = 150
-                        if sig_height < 10:
-                            sig_height = 50
-                        
-                        # Debug output
-                        print(f"Signature placement: x={x:.1f}, y={y:.1f}, width={sig_width:.1f}, height={sig_height:.1f}, page_size=({page_width:.1f}, {page_height:.1f})")
-                        
-                        # Draw signature image on the canvas
-                        img_reader = ImageReader(sig_image)
-                        can.drawImage(
-                            img_reader, 
-                            x, 
-                            y, 
-                            width=sig_width, 
-                            height=sig_height, 
-                            preserveAspectRatio=True,
-                            mask='auto'
-                        )
-                        print(f"Successfully drew signature at ({x:.1f}, {y:.1f})")
-                    except Exception as e:
-                        print(f"Error drawing signature on page {page_num + 1}: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        continue
+                # Get signature field
+                field = DocumentSignatureField.query.get(sig.signature_field_id)
+                if not field:
+                    continue
                 
-                # Save the canvas to create the overlay PDF
-                can.save()
-                packet.seek(0)
-                
+                # Embed this signature
                 try:
-                    overlay_pdf = PdfReader(packet)
+                    from PIL import Image
+                    import base64
+                    from io import BytesIO
                     
-                    # Merge original page with overlay
-                    if len(overlay_pdf.pages) > 0:
-                        overlay_page = overlay_pdf.pages[0]
-                        # Merge the overlay onto the original page
-                        page.merge_page(overlay_page)
+                    page_num = field.page_number - 1
+                    if page_num < 0 or page_num >= len(pdf_doc):
+                        continue
+                    
+                    page = pdf_doc[page_num]
+                    page_rect = page.rect
+                    page_width = page_rect.width
+                    page_height = page_rect.height
+                    
+                    # Convert coordinates (same logic as embed_signature_in_pdf)
+                    viewer_height_px = 800.0
+                    scale_y = page_height / viewer_height_px
+                    viewer_width_px = viewer_height_px * (page_width / page_height)
+                    scale_x = page_width / viewer_width_px
+                    
+                    x_pdf = field.x_position * scale_x
+                    y_pdf = field.y_position * scale_y
+                    width_pdf = (field.width or 200) * scale_x
+                    height_pdf = (field.height or 80) * scale_y
+                    
+                    # Clamp to page bounds
+                    x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+                    y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+                    
+                    # Decode and embed signature
+                    sig_image_data = base64.b64decode(sig.signature_image)
+                    sig_img = Image.open(BytesIO(sig_image_data))
+                    
+                    img_bytes = BytesIO()
+                    sig_img.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    
+                    img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+                    page.insert_image(img_rect, stream=img_bytes.getvalue())
                 except Exception as e:
-                    print(f"Error merging overlay for page {page_num + 1}: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"Error embedding signature {sig.id}: {e}")
+                    continue
             
-            # Add the page (with or without signatures) to the output
-            pdf_writer.add_page(page)
-        
-        # Create output PDF
-        output = BytesIO()
-        pdf_writer.write(output)
-        output.seek(0)
-        
-        # Generate filename
-        filename_base = document.original_filename.rsplit('.', 1)[0]
-        filename = f"{filename_base}_signed_by_{username}.pdf"
-        
-        return send_file(
-            output,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=filename
-        )
+            # Embed typed field values as text
+            try:
+                for typed_field_id, field_value in typed_value_map.items():
+                    try:
+                        typed_field = DocumentTypedField.query.get(typed_field_id)
+                        if not typed_field:
+                            continue
+                        
+                        page_num = typed_field.page_number - 1
+                        if page_num < 0 or page_num >= len(pdf_doc):
+                            continue
+                        
+                        page = pdf_doc[page_num]
+                        page_rect = page.rect
+                        page_width = page_rect.width
+                        page_height = page_rect.height
+                        
+                        # Convert coordinates
+                        viewer_height_px = 800.0
+                        scale_y = page_height / viewer_height_px
+                        viewer_width_px = viewer_height_px * (page_width / page_height)
+                        scale_x = page_width / viewer_width_px
+                        
+                        x_pdf = typed_field.x_position * scale_x
+                        y_pdf = typed_field.y_position * scale_y
+                        width_pdf = (typed_field.width or 200) * scale_x
+                        height_pdf = (typed_field.height or 30) * scale_y
+                        
+                        # Clamp to page bounds
+                        x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+                        y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+                        
+                        # Create text rectangle
+                        text_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+                        
+                        # Calculate font size
+                        font_size = int(height_pdf * 0.7)
+                        if font_size < 8:
+                            font_size = 8
+                        elif font_size > 72:
+                            font_size = 72
+                        
+                        # Insert text using insert_textbox
+                        try:
+                            if text_rect.width > 0 and text_rect.height > 0:
+                                rc = page.insert_textbox(
+                                    text_rect,
+                                    field_value,
+                                    fontsize=font_size,
+                                    align=0,
+                                    color=(0, 0, 0),
+                                    render_mode=0
+                                )
+                                if rc < 0:
+                                    # Fallback to insert_text
+                                    text_y = y_pdf + font_size + 2
+                                    page.insert_text(
+                                        (x_pdf + 2, text_y),
+                                        field_value[:100],
+                                        fontsize=font_size,
+                                        color=(0, 0, 0)
+                                    )
+                        except Exception as text_error:
+                            # Fallback to insert_text
+                            try:
+                                text_y = y_pdf + font_size + 2
+                                page.insert_text(
+                                    (x_pdf + 2, text_y),
+                                    field_value[:100],
+                                    fontsize=font_size,
+                                    color=(0, 0, 0)
+                                )
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        print(f"Error embedding typed field {typed_field_id}: {e}")
+                        continue
+            except Exception as e:
+                print(f"Error processing typed fields: {e}")
+            
+            # Save the PDF
+            pdf_doc.save(temp_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+            pdf_doc.close()
+            
+            # Generate download filename with user's name
+            base_name = os.path.splitext(document.original_filename)[0]
+            ext = os.path.splitext(document.original_filename)[1]
+            download_filename = f"{base_name}_signed_by_{username}{ext}"
+            
+            # Send the signed PDF
+            return send_file(
+                temp_path,
+                as_attachment=True,
+                download_name=download_filename,
+                mimetype=document.file_type or 'application/pdf'
+            )
+        else:
+            # No signatures or typed fields, or PyMuPDF not available
+            if not FITZ_AVAILABLE:
+                flash('PDF processing library not available. Please install PyMuPDF.', 'error')
+            else:
+                flash('No signatures or typed fields found for this user.', 'error')
+            return redirect(url_for('view_signed_documents', doc_id=doc_id))
         
     except Exception as e:
+        print(f"Error generating signed PDF: {e}")
+        import traceback
+        traceback.print_exc()
         flash(f'Error generating signed PDF: {str(e)}', 'error')
         return redirect(url_for('view_signed_documents', doc_id=doc_id))
 
@@ -6638,64 +9844,95 @@ def view_new_hire_details(username):
         <title>{{ new_hire.first_name }} {{ new_hire.last_name }} - Details</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
                 margin: 5px;
             }
             .btn:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .section {
-                background: white;
-                border-radius: 12px;
-                padding: 25px;
+                background: #FFFFFF;
+                border-radius: 1rem;
+                border: 1px solid #E0E0E0;
+                padding: 2rem;
                 margin-bottom: 30px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
             }
             .user-header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #FE0100;
                 color: white;
                 padding: 30px;
                 border-radius: 12px;
@@ -6738,7 +9975,7 @@ def view_new_hire_details(username):
                 width: 100%;
                 padding: 10px 12px;
                 border: 1px solid rgba(255,255,255,0.3);
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 background: rgba(255,255,255,0.2);
                 color: white;
                 font-size: 1em;
@@ -6755,21 +9992,21 @@ def view_new_hire_details(username):
                 background: rgba(255,255,255,0.3);
             }
             .user-info-table select option {
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
             }
             .video-item {
                 background: #f8f9fa;
                 padding: 20px;
                 margin-bottom: 15px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 border-left: 4px solid #dc3545;
             }
             .video-item.completed {
                 border-left-color: #28a745;
             }
             .video-item.failed {
-                border-left-color: #dc3545;
+                border-left-color: #FE0100;
             }
             .video-header {
                 display: flex;
@@ -6780,7 +10017,7 @@ def view_new_hire_details(username):
             .video-title {
                 font-size: 1.2em;
                 font-weight: 600;
-                color: #2d2d2d;
+                color: #000000;
             }
             .badge {
                 padding: 5px 12px;
@@ -6793,12 +10030,12 @@ def view_new_hire_details(username):
                 color: #155724;
             }
             .badge-failed {
-                background: #f8d7da;
-                color: #721c24;
+                background: #FE0100;
+                color: white;
             }
             .badge-in-progress {
-                background: #fff3cd;
-                color: #856404;
+                background: #808080;
+                color: white;
             }
             .badge-not-started {
                 background: #d1ecf1;
@@ -6813,14 +10050,14 @@ def view_new_hire_details(username):
                 background: white;
                 padding: 15px;
                 margin-bottom: 10px;
-                border-radius: 6px;
+                border-radius: 0.5rem;
                 border-left: 3px solid #007bff;
             }
             .quiz-question.correct {
                 border-left-color: #28a745;
             }
             .quiz-question.incorrect {
-                border-left-color: #dc3545;
+                border-left-color: #FE0100;
             }
             .question-text {
                 font-weight: 600;
@@ -6829,7 +10066,7 @@ def view_new_hire_details(username):
             .answer-item {
                 padding: 8px;
                 margin: 5px 0;
-                border-radius: 4px;
+                border-radius: 0.5rem;
             }
             .answer-item.selected {
                 background: #e7f3ff;
@@ -6844,7 +10081,7 @@ def view_new_hire_details(username):
                 background: #f8f9fa;
                 padding: 20px;
                 margin-bottom: 15px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 border-left: 4px solid #007bff;
             }
             .signature-preview {
@@ -6857,7 +10094,7 @@ def view_new_hire_details(username):
                 max-width: 150px;
                 max-height: 60px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 padding: 5px;
                 background: white;
             }
@@ -6874,7 +10111,7 @@ def view_new_hire_details(username):
             th {
                 background: #f8f9fa;
                 font-weight: 600;
-                color: #2d2d2d;
+                color: #000000;
             }
         </style>
     </head>
@@ -6884,7 +10121,7 @@ def view_new_hire_details(username):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="btn" style="background: rgba(255,255,255,0.2);">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -7096,34 +10333,72 @@ def manage_checklist():
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .admin-panel {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+            }
+            .admin-panel h2 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                color: #000000;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -7136,7 +10411,7 @@ def manage_checklist():
                 background: #007bff;
             }
             .btn-danger {
-                background: #dc3545;
+                background: #FE0100;
             }
             .btn-small {
                 padding: 5px 10px;
@@ -7148,7 +10423,8 @@ def manage_checklist():
             .form-group label {
                 display: block;
                 margin-bottom: 5px;
-                font-weight: bold;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .form-group input,
             .form-group textarea,
@@ -7156,7 +10432,7 @@ def manage_checklist():
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 14px;
             }
             .form-group textarea {
@@ -7186,10 +10462,10 @@ def manage_checklist():
             }
             .item-info h3 {
                 margin-bottom: 5px;
-                color: #333;
+                color: #000000;
             }
             .item-info p {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
                 margin: 5px 0;
             }
@@ -7197,7 +10473,7 @@ def manage_checklist():
                 display: flex;
                 gap: 15px;
                 align-items: center;
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
             .item-actions {
@@ -7242,10 +10518,10 @@ def manage_checklist():
             <div class="header-content">
                 <h1>✅ Manage New Hire Checklist</h1>
             </div>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('admin_dashboard') }}" class="btn">← Back to Admin Dashboard</a>
             
             <div class="admin-panel">
                 <h2>Add New Checklist Item</h2>
@@ -7383,13 +10659,50 @@ def edit_checklist_item(item_id):
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
+            }
+            .header-content {
+                max-width: 1600px;
+                margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
                 max-width: 800px;
@@ -7399,13 +10712,13 @@ def edit_checklist_item(item_id):
             .admin-panel {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -7420,14 +10733,15 @@ def edit_checklist_item(item_id):
             .form-group label {
                 display: block;
                 margin-bottom: 5px;
-                font-weight: bold;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .form-group input,
             .form-group textarea {
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 14px;
             }
             .form-group textarea {
@@ -7442,11 +10756,13 @@ def edit_checklist_item(item_id):
     </head>
     <body>
         <div class="header">
-            <h1>Edit Checklist Item</h1>
+            <div class="header-content">
+                <h1>Edit Checklist Item</h1>
+            </div>
+            <a href="{{ url_for('manage_checklist') }}" class="back-btn">← Back to Checklist</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('manage_checklist') }}" class="btn">← Back to Checklist</a>
             
             <div class="admin-panel">
                 <h2>Edit Checklist Item</h2>
@@ -7614,17 +10930,50 @@ def view_checklist():
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
                 max-width: 1000px;
@@ -7634,14 +10983,19 @@ def view_checklist():
             .admin-panel {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+            }
+            .admin-panel h2 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                color: #000000;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -7657,7 +11011,7 @@ def view_checklist():
                 background: #f8f9fa;
                 padding: 20px;
                 margin-bottom: 15px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 border-left: 4px solid #007bff;
                 display: flex;
                 align-items: flex-start;
@@ -7683,7 +11037,7 @@ def view_checklist():
             }
             .item-content h3 {
                 margin-bottom: 8px;
-                color: #333;
+                color: #000000;
                 font-size: 1.1em;
             }
             .item-content.completed h3 {
@@ -7694,7 +11048,7 @@ def view_checklist():
                 display: flex;
                 gap: 20px;
                 margin-top: 10px;
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
             .badge {
@@ -7735,7 +11089,7 @@ def view_checklist():
             .stat-card {
                 background: #f8f9fa;
                 padding: 15px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 text-align: center;
             }
             .stat-card .number {
@@ -7744,7 +11098,7 @@ def view_checklist():
                 color: #007bff;
             }
             .stat-card .label {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
                 margin-top: 5px;
             }
@@ -7755,10 +11109,10 @@ def view_checklist():
             <div class="header-content">
                 <h1>✅ New Hire Checklist</h1>
             </div>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('admin_dashboard') }}" class="btn">← Back to Admin Dashboard</a>
             
             <div class="admin-panel">
                 <h2>Onboarding Checklist</h2>
@@ -7936,61 +11290,92 @@ def view_user_checklists():
         <title>User Checklists - Onboarding App</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
                 margin: 5px;
             }
             .btn:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .section {
-                background: white;
-                border-radius: 12px;
-                padding: 25px;
+                background: #FFFFFF;
+                border-radius: 1rem;
+                border: 1px solid #E0E0E0;
+                padding: 2rem;
                 margin-bottom: 30px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
             }
             .user-list {
                 display: grid;
@@ -8000,7 +11385,7 @@ def view_user_checklists():
             .user-card {
                 background: #f8f9fa;
                 padding: 20px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 border: 2px solid transparent;
                 cursor: pointer;
                 transition: all 0.2s;
@@ -8015,10 +11400,10 @@ def view_user_checklists():
             }
             .user-card h3 {
                 margin-bottom: 8px;
-                color: #2d2d2d;
+                color: #000000;
             }
             .user-card p {
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
         </style>
@@ -8029,7 +11414,7 @@ def view_user_checklists():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="btn" style="background: rgba(255,255,255,0.2);">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -8081,36 +11466,65 @@ def view_user_checklist(username):
         <title>{{ new_hire.first_name }} {{ new_hire.last_name }} - Checklist</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -8120,7 +11534,7 @@ def view_user_checklist(username):
                 font-size: 14px;
             }
             .btn:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .btn-success {
                 background: #28a745;
@@ -8134,20 +11548,22 @@ def view_user_checklist(username):
                 padding: 0 20px;
             }
             .section {
-                background: white;
-                border-radius: 12px;
-                padding: 25px;
+                background: #FFFFFF;
+                border-radius: 1rem;
+                border: 1px solid #E0E0E0;
+                padding: 2rem;
                 margin-bottom: 30px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
             }
             .user-header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #FE0100;
                 color: white;
                 padding: 20px;
                 border-radius: 12px;
@@ -8161,7 +11577,7 @@ def view_user_checklist(username):
                 background: #f8f9fa;
                 padding: 20px;
                 margin-bottom: 15px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 border-left: 4px solid #007bff;
                 display: flex;
                 align-items: flex-start;
@@ -8186,7 +11602,7 @@ def view_user_checklist(username):
             }
             .item-content h3 {
                 margin-bottom: 8px;
-                color: #333;
+                color: #000000;
                 font-size: 1.1em;
             }
             .item-content.completed h3 {
@@ -8197,7 +11613,7 @@ def view_user_checklist(username):
                 display: flex;
                 gap: 20px;
                 margin-top: 10px;
-                color: #666;
+                color: #808080;
                 font-size: 0.9em;
             }
             .progress-bar {
@@ -8228,7 +11644,7 @@ def view_user_checklist(username):
             .stat-card {
                 background: rgba(255,255,255,0.2);
                 padding: 15px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 text-align: center;
             }
             .stat-card .number {
@@ -8249,7 +11665,7 @@ def view_user_checklist(username):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
-            <a href="{{ url_for('view_user_checklists') }}" class="btn" style="background: rgba(255,255,255,0.2);">← Back to User List</a>
+            <a href="{{ url_for('view_user_checklists') }}" class="back-btn">← Back to User List</a>
         </div>
         
         <div class="container">
@@ -8416,6 +11832,1478 @@ def update_user_checklist(username):
     return redirect(url_for('view_user_checklist', username=username))
 
 
+@app.route('/admin/external-links')
+@admin_required
+def manage_external_links():
+    """Admin page to manage external links"""
+    try:
+        links = ExternalLink.query.order_by(ExternalLink.order, ExternalLink.created_at).all()
+    except Exception as e:
+        import traceback
+        print(f"Error in manage_external_links: {e}")
+        print(traceback.format_exc())
+        flash(f'Error loading links: {str(e)}', 'error')
+        links = []
+    
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manage External Links - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body {
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
+            }
+            .top-header {
+                background: #000000;
+                padding: 12px 30px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
+            }
+            .logo-section {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                font-size: 1.4em;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
+            }
+            .logo-section img {
+                height: 80px;
+                width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
+            }
+            .btn {
+                display: inline-block;
+                padding: 10px 20px;
+                background: #FE0100;
+                color: white;
+                text-decoration: none;
+                border-radius: 5px;
+                margin: 5px;
+                border: none;
+                cursor: pointer;
+                font-size: 14px;
+            }
+            .btn:hover {
+                background: #FE0100;
+            }
+            .btn-success {
+                background: #28a745;
+            }
+            .btn-success:hover {
+                background: #218838;
+            }
+            .btn-danger {
+                background: #FE0100;
+            }
+            .btn-danger:hover {
+                background: #FE0100;
+            }
+            .container {
+                max-width: 1600px;
+                margin: 30px auto;
+                padding: 0 20px;
+            }
+            .section {
+                background: #FFFFFF;
+                border-radius: 1rem;
+                border: 1px solid #E0E0E0;
+                padding: 2rem;
+                margin-bottom: 30px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            }
+            .section-title {
+                font-size: 1.6em;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                margin-bottom: 20px;
+                color: #000000;
+            }
+            .form-group {
+                margin-bottom: 20px;
+            }
+            .form-group label {
+                display: block;
+                margin-bottom: 8px;
+                font-weight: 600;
+                color: #000000;
+            }
+            .form-group input,
+            .form-group textarea {
+                width: 100%;
+                padding: 10px 12px;
+                border: 1px solid #ddd;
+                border-radius: 0.5rem;
+                font-size: 14px;
+                font-family: inherit;
+            }
+            .form-group textarea {
+                min-height: 80px;
+                resize: vertical;
+            }
+            .form-row {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 15px;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+            }
+            th, td {
+                padding: 14px 16px;
+                text-align: left;
+                border-bottom: 1px solid #e5e5e5;
+            }
+            th {
+                background: #2d2d2d;
+                color: #ffffff;
+                font-weight: 600;
+                font-size: 0.9em;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            tbody tr {
+                transition: background-color 0.2s;
+            }
+            tbody tr:hover {
+                background-color: #f8f9fa;
+            }
+            tbody tr:last-child td {
+                border-bottom: none;
+            }
+            .badge {
+                padding: 4px 10px;
+                border-radius: 12px;
+                font-size: 0.8em;
+                font-weight: 600;
+            }
+            .badge-active {
+                background: #d4edda;
+                color: #155724;
+            }
+            .badge-inactive {
+                background: #f8d7da;
+                color: #842029;
+            }
+            .action-buttons {
+                display: flex;
+                gap: 8px;
+            }
+            .btn-small {
+                padding: 6px 12px;
+                font-size: 0.85em;
+            }
+            .empty-state {
+                text-align: center;
+                padding: 40px 20px;
+                color: #999;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="top-header">
+            <div class="logo-section">
+                <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+                Ziebart Onboarding
+            </div>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+        </div>
+        
+        <div class="container">
+            <div class="section">
+                <h2 class="section-title">Add New External Link</h2>
+                <form method="POST" action="{{ url_for('add_external_link') }}" enctype="multipart/form-data">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="title">Link Title *</label>
+                            <input type="text" name="title" id="title" required placeholder="e.g., Company Portal">
+                        </div>
+                        <div class="form-group">
+                            <label for="url">URL *</label>
+                            <input type="url" name="url" id="url" required placeholder="https://example.com">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="icon">Icon (Emoji) - Use if no image</label>
+                            <input type="text" name="icon" id="icon" placeholder="🔗" value="🔗" maxlength="2">
+                        </div>
+                        <div class="form-group">
+                            <label for="order">Display Order</label>
+                            <input type="number" name="order" id="order" value="0" min="0">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="image">Image (optional) - Recommended size: 100x100px</label>
+                        <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+                            <input type="file" name="image" id="image" accept="image/*" style="flex: 1;">
+                            <button type="button" onclick="openImageCropper()" class="btn" style="background: #007bff; white-space: nowrap;">Crop Image</button>
+                        </div>
+                        <small style="color: #666;">Allowed: JPG, PNG, GIF, SVG (Max 5MB). Upload an image, then click "Crop Image" to select a square area.</small>
+                        <input type="hidden" name="cropped_image" id="cropped_image">
+                        <div id="imagePreview" style="margin-top: 10px; display: none;">
+                            <p style="font-weight: 600; margin-bottom: 5px;">Preview:</p>
+                            <img id="previewImg" style="max-width: 200px; max-height: 200px; border: 1px solid #ddd; border-radius: 8px; padding: 5px;">
+                        </div>
+                    </div>
+                    <!-- Image Cropper Modal -->
+                    <div id="imageCropperModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 10000; align-items: center; justify-content: center;">
+                        <div style="background: white; padding: 20px; border-radius: 12px; max-width: 90%; max-height: 90%; overflow: auto;">
+                            <h3 style="margin-bottom: 15px;">Crop Image (Select Square Area)</h3>
+                            <div style="position: relative; margin-bottom: 15px;">
+                                <img id="cropImagePreview" style="max-width: 100%; max-height: 500px; display: block;">
+                                <canvas id="cropCanvas" style="display: none;"></canvas>
+                            </div>
+                            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                                <button type="button" onclick="cancelCrop()" class="btn" style="background: #6c757d;">Cancel</button>
+                                <button type="button" onclick="applyCrop()" class="btn btn-success">Apply Crop</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="description">Description (optional)</label>
+                        <textarea name="description" id="description" placeholder="Brief description of the link..."></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-success">Add Link</button>
+                </form>
+            </div>
+            
+            <script>
+                var cropper = null;
+                var originalImage = null;
+                var cropData = null;
+                
+                function handleImageSelect(event) {
+                    var file = event.target.files[0];
+                    if (!file) return;
+                    
+                    // Skip SVG files (they don't need cropping)
+                    if (file.name.toLowerCase().endsWith('.svg')) {
+                        document.getElementById('cropped_image').value = '';
+                        return;
+                    }
+                    
+                    var reader = new FileReader();
+                    reader.onload = function(e) {
+                        var img = document.getElementById('cropImagePreview');
+                        img.src = e.target.result;
+                        originalImage = e.target.result;
+                        
+                        // Show cropper modal
+                        document.getElementById('imageCropperModal').style.display = 'flex';
+                        
+                        // Initialize simple crop interface
+                        setTimeout(function() {
+                            initCropInterface(img);
+                        }, 100);
+                    };
+                    reader.readAsDataURL(file);
+                }
+                
+                function initCropInterface(img) {
+                    // Create a simple crop interface using canvas
+                    var canvas = document.getElementById('cropCanvas');
+                    var ctx = canvas.getContext('2d');
+                    
+                    // Set canvas size to match image
+                    var imgElement = new Image();
+                    imgElement.onload = function() {
+                        var maxSize = 800;
+                        var scale = Math.min(maxSize / imgElement.width, maxSize / imgElement.height, 1);
+                        canvas.width = imgElement.width * scale;
+                        canvas.height = imgElement.height * scale;
+                        
+                        ctx.drawImage(imgElement, 0, 0, canvas.width, canvas.height);
+                        
+                        // Draw crop overlay
+                        drawCropOverlay();
+                    };
+                    imgElement.src = img.src;
+                }
+                
+                var cropX = 0, cropY = 0, cropSize = 200;
+                var isDragging = false;
+                var dragStartX = 0, dragStartY = 0;
+                var startCropX = 0, startCropY = 0;
+                
+                function drawCropOverlay() {
+                    var canvas = document.getElementById('cropCanvas');
+                    var ctx = canvas.getContext('2d');
+                    var img = document.getElementById('cropImagePreview');
+                    
+                    // Redraw image
+                    var imgElement = new Image();
+                    imgElement.onload = function() {
+                        var maxSize = 800;
+                        var scale = Math.min(maxSize / imgElement.width, maxSize / imgElement.height, 1);
+                        canvas.width = imgElement.width * scale;
+                        canvas.height = imgElement.height * scale;
+                        
+                        ctx.drawImage(imgElement, 0, 0, canvas.width, canvas.height);
+                        
+                        // Initialize crop size to fit image
+                        cropSize = Math.min(canvas.width, canvas.height) * 0.8;
+                        cropX = (canvas.width - cropSize) / 2;
+                        cropY = (canvas.height - cropSize) / 2;
+                        
+                        // Draw semi-transparent overlay
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        
+                        // Clear crop area
+                        ctx.save();
+                        ctx.globalCompositeOperation = 'destination-out';
+                        ctx.fillRect(cropX, cropY, cropSize, cropSize);
+                        ctx.restore();
+                        
+                        // Draw crop border
+                        ctx.strokeStyle = '#fff';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(cropX, cropY, cropSize, cropSize);
+                        
+                        // Draw corner handles
+                        var handleSize = 10;
+                        ctx.fillStyle = '#fff';
+                        // Top-left
+                        ctx.fillRect(cropX - handleSize/2, cropY - handleSize/2, handleSize, handleSize);
+                        // Top-right
+                        ctx.fillRect(cropX + cropSize - handleSize/2, cropY - handleSize/2, handleSize, handleSize);
+                        // Bottom-left
+                        ctx.fillRect(cropX - handleSize/2, cropY + cropSize - handleSize/2, handleSize, handleSize);
+                        // Bottom-right
+                        ctx.fillRect(cropX + cropSize - handleSize/2, cropY + cropSize - handleSize/2, handleSize, handleSize);
+                        
+                        // Show canvas instead of image
+                        img.style.display = 'none';
+                        canvas.style.display = 'block';
+                        canvas.style.maxWidth = '100%';
+                        canvas.style.maxHeight = '500px';
+                        canvas.style.cursor = 'move';
+                        
+                        // Add mouse events
+                        canvas.onmousedown = startDrag;
+                        canvas.onmousemove = onDrag;
+                        canvas.onmouseup = endDrag;
+                        canvas.onmouseleave = endDrag;
+                    };
+                    imgElement.src = originalImage;
+                }
+                
+                function startDrag(e) {
+                    var canvas = document.getElementById('cropCanvas');
+                    var rect = canvas.getBoundingClientRect();
+                    var x = (e.clientX - rect.left) * (canvas.width / rect.width);
+                    var y = (e.clientY - rect.top) * (canvas.height / rect.height);
+                    
+                    // Check if clicking on corner (resize) or inside (move)
+                    var handleSize = 20;
+                    var isCorner = (
+                        (x >= cropX - handleSize && x <= cropX + handleSize && y >= cropY - handleSize && y <= cropY + handleSize) ||
+                        (x >= cropX + cropSize - handleSize && x <= cropX + cropSize + handleSize && y >= cropY - handleSize && y <= cropY + handleSize) ||
+                        (x >= cropX - handleSize && x <= cropX + handleSize && y >= cropY + cropSize - handleSize && y <= cropY + cropSize + handleSize) ||
+                        (x >= cropX + cropSize - handleSize && x <= cropX + cropSize + handleSize && y >= cropY + cropSize - handleSize && y <= cropY + cropSize + handleSize)
+                    );
+                    
+                    if (isCorner) {
+                        // Resize mode
+                        isDragging = 'resize';
+                    } else if (x >= cropX && x <= cropX + cropSize && y >= cropY && y <= cropY + cropSize) {
+                        // Move mode
+                        isDragging = 'move';
+                        dragStartX = x - cropX;
+                        dragStartY = y - cropY;
+                    }
+                    
+                    startCropX = cropX;
+                    startCropY = cropY;
+                }
+                
+                function onDrag(e) {
+                    if (!isDragging) return;
+                    
+                    var canvas = document.getElementById('cropCanvas');
+                    var rect = canvas.getBoundingClientRect();
+                    var x = (e.clientX - rect.left) * (canvas.width / rect.width);
+                    var y = (e.clientY - rect.top) * (canvas.height / rect.height);
+                    
+                    if (isDragging === 'move') {
+                        cropX = Math.max(0, Math.min(canvas.width - cropSize, x - dragStartX));
+                        cropY = Math.max(0, Math.min(canvas.height - cropSize, y - dragStartY));
+                    } else if (isDragging === 'resize') {
+                        var newSize = Math.max(50, Math.min(canvas.width, canvas.height, Math.abs(x - startCropX), Math.abs(y - startCropY)));
+                        cropSize = newSize;
+                        cropX = Math.max(0, Math.min(canvas.width - cropSize, startCropX));
+                        cropY = Math.max(0, Math.min(canvas.height - cropSize, startCropY));
+                    }
+                    
+                    drawCropOverlay();
+                }
+                
+                function endDrag() {
+                    isDragging = false;
+                }
+                
+                function applyCrop() {
+                    var canvas = document.getElementById('cropCanvas');
+                    var img = document.getElementById('cropImagePreview');
+                    
+                    // Create a new canvas for the cropped image
+                    var croppedCanvas = document.createElement('canvas');
+                    croppedCanvas.width = 200; // Output size
+                    croppedCanvas.height = 200;
+                    var ctx = croppedCanvas.getContext('2d');
+                    
+                    // Load original image to get full resolution
+                    var imgElement = new Image();
+                    imgElement.onload = function() {
+                        // Calculate scale factor
+                        var scaleX = imgElement.width / canvas.width;
+                        var scaleY = imgElement.height / canvas.height;
+                        
+                        // Calculate actual crop coordinates in original image
+                        var srcX = cropX * scaleX;
+                        var srcY = cropY * scaleY;
+                        var srcSize = cropSize * Math.min(scaleX, scaleY);
+                        
+                        // Draw cropped and resized image
+                        ctx.drawImage(imgElement, srcX, srcY, srcSize, srcSize, 0, 0, 200, 200);
+                        
+                        // Convert to base64
+                        var croppedData = croppedCanvas.toDataURL('image/png');
+                        document.getElementById('cropped_image').value = croppedData;
+                        
+                        // Update preview
+                        img.src = croppedData;
+                        img.style.display = 'block';
+                        canvas.style.display = 'none';
+                        
+                        // Show preview in form
+                        var previewDiv = document.getElementById('imagePreview');
+                        var previewImg = document.getElementById('previewImg');
+                        if (previewDiv && previewImg) {
+                            previewImg.src = croppedData;
+                            previewDiv.style.display = 'block';
+                        }
+                        
+                        // Hide modal
+                        document.getElementById('imageCropperModal').style.display = 'none';
+                        
+                        // Show success message
+                        alert('Crop applied! Click "Add Link" to save.');
+                    };
+                    imgElement.src = originalImage;
+                }
+                
+                function cancelCrop() {
+                    document.getElementById('imageCropperModal').style.display = 'none';
+                    document.getElementById('image').value = '';
+                    document.getElementById('cropped_image').value = '';
+                }
+            </script>
+            
+            <div class="section">
+                <h2 class="section-title">External Links ({{ links|length }} total)</h2>
+                {% if links %}
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Icon</th>
+                            <th>Title</th>
+                            <th>URL</th>
+                            <th>Description</th>
+                            <th>Order</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for link in links %}
+                        <tr>
+                            <td>
+                                {% if link.image_filename %}
+                                <img src="{{ url_for('serve_quick_link_image', filename=link.image_filename) }}" alt="{{ link.title }}" style="width: 50px; height: 50px; object-fit: contain; border-radius: 8px;">
+                                {% else %}
+                                <span style="font-size: 1.5em;">{{ link.icon or '🔗' }}</span>
+                                {% endif %}
+                            </td>
+                            <td><strong>{{ link.title }}</strong></td>
+                            <td><a href="{{ link.url }}" target="_blank" style="color: #007bff; text-decoration: none;">{{ link.url[:50] }}{% if link.url|length > 50 %}...{% endif %}</a></td>
+                            <td>{{ link.description or '-' }}</td>
+                            <td>{{ link.order }}</td>
+                            <td>
+                                <span class="badge badge-{{ 'active' if link.is_active else 'inactive' }}">
+                                    {{ 'Active' if link.is_active else 'Inactive' }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="action-buttons">
+                                    <a href="{{ url_for('edit_external_link', link_id=link.id) }}" class="btn btn-small" style="background: #007bff;">Edit</a>
+                                    <form method="POST" action="{{ url_for('toggle_external_link', link_id=link.id) }}" style="display: inline;">
+                                        <button type="submit" class="btn btn-small" style="background: {{ '#6c757d' if link.is_active else '#28a745' }};">
+                                            {{ 'Deactivate' if link.is_active else 'Activate' }}
+                                        </button>
+                                    </form>
+                                    <form method="POST" action="{{ url_for('delete_external_link', link_id=link.id) }}" style="display: inline;">
+                                        <button type="submit" class="btn btn-small btn-danger" onclick="return confirm('Delete this link?')">Delete</button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="empty-state">
+                    <p>No external links yet. Add one above to get started.</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </body>
+    </html>
+    ''', links=links)
+
+
+@app.route('/admin/external-links/add', methods=['POST'])
+@admin_required
+def add_external_link():
+    """Add a new external link"""
+    title = request.form.get('title', '').strip()
+    url = request.form.get('url', '').strip()
+    description = request.form.get('description', '').strip() or None
+    icon = request.form.get('icon', '🔗').strip() or '🔗'
+    order = int(request.form.get('order', 0) or 0)
+    
+    if not title or not url:
+        flash('Title and URL are required.', 'error')
+        return redirect(url_for('manage_external_links'))
+    
+    image_filename = None
+    # Handle cropped image (preferred) or regular image upload
+    cropped_image_data = request.form.get('cropped_image', '').strip()
+    
+    if cropped_image_data:
+        # Process cropped image (base64 data)
+        try:
+            from PIL import Image
+            import base64
+            from io import BytesIO
+            
+            # Remove data URL prefix if present
+            if ',' in cropped_image_data:
+                cropped_image_data = cropped_image_data.split(',')[1]
+            
+            # Decode base64 image
+            image_data = base64.b64decode(cropped_image_data)
+            img = Image.open(BytesIO(image_data))
+            
+            # Convert to RGBA for processing
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            
+            # Detect and remove background color (check corners for background color)
+            width, height = img.size
+            corner_pixels = [
+                img.getpixel((0, 0)),  # Top-left
+                img.getpixel((width-1, 0)),  # Top-right
+                img.getpixel((0, height-1)),  # Bottom-left
+                img.getpixel((width-1, height-1))  # Bottom-right
+            ]
+            
+            # Find the most common corner color (likely the background)
+            from collections import Counter
+            corner_colors = [pixel[:3] for pixel in corner_pixels]  # Get RGB, ignore alpha
+            bg_color = Counter(corner_colors).most_common(1)[0][0]
+            
+            # Create a mask for background pixels (with tolerance for slight variations)
+            tolerance = 30  # Allow some variation in color matching
+            data = img.getdata()
+            new_data = []
+            for item in data:
+                r, g, b, a = item
+                # Check if pixel matches background color (within tolerance)
+                if (abs(r - bg_color[0]) < tolerance and 
+                    abs(g - bg_color[1]) < tolerance and 
+                    abs(b - bg_color[2]) < tolerance):
+                    # Make transparent
+                    new_data.append((255, 255, 255, 0))
+                else:
+                    # Keep original pixel
+                    new_data.append(item)
+            
+            # Apply the mask
+            img.putdata(new_data)
+            
+            # Create white background and paste image
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            background.paste(img, mask=img.split()[-1])  # Use alpha channel as mask
+            img = background
+            
+            # Resize to square if needed (200x200)
+            if img.size[0] != img.size[1]:
+                size = min(img.size)
+                img = img.crop((0, 0, size, size))
+            img = img.resize((200, 200), Image.Resampling.LANCZOS)
+            
+            # Generate filename
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_')
+            filename = timestamp + 'cropped_logo.png'
+            
+            # Create quick_links folder if it doesn't exist
+            quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+            quick_links_folder.mkdir(exist_ok=True)
+            
+            # Save file
+            file_path = quick_links_folder / filename
+            img.save(str(file_path), 'PNG', optimize=True)
+            image_filename = filename
+        except Exception as e:
+            print(f"Error processing cropped image: {e}")
+            import traceback
+            traceback.print_exc()
+            flash(f'Error processing cropped image: {str(e)}', 'error')
+            # Fall through to regular image upload
+            cropped_image_data = None
+    
+    # Handle regular image upload if no cropped image (only if cropped_image is empty)
+    if not image_filename and not cropped_image_data and 'image' in request.files:
+        image_file = request.files['image']
+        if image_file and image_file.filename:
+            # Check if it's an allowed image type
+            if image_file.filename.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
+                # Secure the filename
+                original_filename = image_file.filename
+                filename = secure_filename(original_filename)
+                
+                # Add timestamp to avoid conflicts
+                timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_')
+                filename = timestamp + filename
+                
+                # Create quick_links folder if it doesn't exist
+                quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+                quick_links_folder.mkdir(exist_ok=True)
+                
+                # Save file
+                file_path = quick_links_folder / filename
+                image_file.save(str(file_path))
+                image_filename = filename
+            else:
+                flash('Invalid image format. Allowed: JPG, PNG, GIF, SVG', 'error')
+                return redirect(url_for('manage_external_links'))
+    
+    try:
+        link = ExternalLink(
+            title=title,
+            url=url,
+            description=description,
+            icon=icon,
+            image_filename=image_filename,
+            order=order,
+            is_active=True,
+            created_by=current_user.username
+        )
+        db.session.add(link)
+        db.session.commit()
+        flash(f'External link "{title}" added successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error adding link: {str(e)}', 'error')
+    
+    return redirect(url_for('manage_external_links'))
+
+
+@app.route('/admin/external-links/<int:link_id>/edit')
+@admin_required
+def edit_external_link(link_id):
+    """Edit an external link"""
+    link = ExternalLink.query.get(link_id)
+    if not link:
+        flash('Link not found.', 'error')
+        return redirect(url_for('manage_external_links'))
+    
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Edit External Link - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body {
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
+            }
+            .top-header {
+                background: #000000;
+                padding: 12px 30px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
+            }
+            .logo-section {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                font-size: 1.4em;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
+            }
+            .logo-section img {
+                height: 80px;
+                width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
+            }
+            .btn {
+                display: inline-block;
+                padding: 10px 20px;
+                background: #FE0100;
+                color: white;
+                text-decoration: none;
+                border-radius: 5px;
+                margin: 5px;
+                border: none;
+                cursor: pointer;
+                font-size: 14px;
+            }
+            .btn:hover {
+                background: #FE0100;
+            }
+            .btn-success {
+                background: #28a745;
+            }
+            .btn-success:hover {
+                background: #218838;
+            }
+            .container {
+                max-width: 800px;
+                margin: 30px auto;
+                padding: 0 20px;
+            }
+            .section {
+                background: #FFFFFF;
+                border-radius: 1rem;
+                border: 1px solid #E0E0E0;
+                padding: 2rem;
+                margin-bottom: 30px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            }
+            .section-title {
+                font-size: 1.6em;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                margin-bottom: 20px;
+                color: #000000;
+            }
+            .form-group {
+                margin-bottom: 20px;
+            }
+            .form-group label {
+                display: block;
+                margin-bottom: 8px;
+                font-weight: 600;
+                color: #000000;
+            }
+            .form-group input,
+            .form-group textarea {
+                width: 100%;
+                padding: 10px 12px;
+                border: 1px solid #ddd;
+                border-radius: 0.5rem;
+                font-size: 14px;
+                font-family: inherit;
+            }
+            .form-group textarea {
+                min-height: 80px;
+                resize: vertical;
+            }
+            .form-row {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 15px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="top-header">
+            <div class="logo-section">
+                <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+                Ziebart Onboarding
+            </div>
+            <a href="{{ url_for('manage_external_links') }}" class="back-btn">← Back to Links</a>
+        </div>
+        
+        <div class="container">
+            <div class="section">
+                <h2 class="section-title">Edit External Link</h2>
+                <form method="POST" action="{{ url_for('update_external_link', link_id=link.id) }}" enctype="multipart/form-data">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="title">Link Title *</label>
+                            <input type="text" name="title" id="title" value="{{ link.title }}" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="url">URL *</label>
+                            <input type="url" name="url" id="url" value="{{ link.url }}" required>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="icon">Icon (Emoji) - Use if no image</label>
+                            <input type="text" name="icon" id="icon" value="{{ link.icon or '🔗' }}" maxlength="2">
+                        </div>
+                        <div class="form-group">
+                            <label for="order">Display Order</label>
+                            <input type="number" name="order" id="order" value="{{ link.order }}" min="0">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Current Image:</label>
+                        {% if link.image_filename %}
+                        <div style="margin: 10px 0;">
+                            <img id="currentImageDisplay" src="{{ url_for('serve_quick_link_image', filename=link.image_filename) }}" alt="{{ link.title }}" style="width: 80px; height: 80px; object-fit: contain; border-radius: 8px; border: 1px solid #ddd; padding: 5px;">
+                            <div style="margin-top: 5px; display: flex; gap: 10px;">
+                                <button type="button" onclick="cropExistingImage()" class="btn btn-small" style="background: #007bff;">Crop Image</button>
+                                <button type="button" onclick="removeCurrentImage()" class="btn btn-small" style="background: #FE0100;">Remove Image</button>
+                            </div>
+                        </div>
+                        {% else %}
+                        <p style="color: #999; font-style: italic;">No image uploaded</p>
+                        {% endif %}
+                        <label for="image" style="margin-top: 10px; display: block;">Upload New Image (optional):</label>
+                        <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+                            <input type="file" name="image" id="image" accept="image/*" style="flex: 1;">
+                            <button type="button" onclick="openImageCropper()" class="btn" style="background: #007bff; white-space: nowrap;">Crop Image</button>
+                        </div>
+                        <small style="color: #666;">Allowed: JPG, PNG, GIF, SVG (Max 5MB). Upload an image, then click "Crop Image" to select a square area.</small>
+                        <input type="hidden" name="cropped_image" id="cropped_image">
+                        <div id="imagePreview" style="margin-top: 10px; display: none;">
+                            <p style="font-weight: 600; margin-bottom: 5px;">Preview:</p>
+                            <img id="previewImg" style="max-width: 200px; max-height: 200px; border: 1px solid #ddd; border-radius: 8px; padding: 5px;">
+                        </div>
+                    </div>
+                    <!-- Image Cropper Modal -->
+                    <div id="imageCropperModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 10000; align-items: center; justify-content: center;">
+                        <div style="background: white; padding: 20px; border-radius: 12px; max-width: 90%; max-height: 90%; overflow: auto;">
+                            <h3 style="margin-bottom: 15px;">Crop Image (Select Square Area)</h3>
+                            <div style="position: relative; margin-bottom: 15px;">
+                                <img id="cropImagePreview" style="max-width: 100%; max-height: 500px; display: block;">
+                                <canvas id="cropCanvas" style="display: none;"></canvas>
+                            </div>
+                            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                                <button type="button" onclick="cancelCrop()" class="btn" style="background: #6c757d;">Cancel</button>
+                                <button type="button" onclick="applyCrop()" class="btn btn-success">Apply Crop</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="description">Description (optional)</label>
+                        <textarea name="description" id="description">{{ link.description or '' }}</textarea>
+                    </div>
+                    <button type="submit" class="btn btn-success">Update Link</button>
+                </form>
+            </div>
+        </div>
+        
+        <script>
+            var cropper = null;
+            var originalImage = null;
+            var cropData = null;
+            
+            function openImageCropper() {
+                var fileInput = document.getElementById('image');
+                var file = fileInput.files[0];
+                
+                if (!file) {
+                    alert('Please select an image file first.');
+                    return;
+                }
+                
+                // Skip SVG files (they don't need cropping)
+                if (file.name.toLowerCase().endsWith('.svg')) {
+                    alert('SVG files do not need cropping. They will be used as-is.');
+                    document.getElementById('cropped_image').value = '';
+                    return;
+                }
+                
+                var reader = new FileReader();
+                reader.onload = function(e) {
+                    var img = document.getElementById('cropImagePreview');
+                    img.src = e.target.result;
+                    originalImage = e.target.result;
+                    
+                    // Show cropper modal
+                    document.getElementById('imageCropperModal').style.display = 'flex';
+                    
+                    // Initialize simple crop interface
+                    setTimeout(function() {
+                        initCropInterface(img);
+                    }, 100);
+                };
+                reader.readAsDataURL(file);
+            }
+            
+            function removeCurrentImage() {
+                if (confirm('Remove the current image? This cannot be undone.')) {
+                    // Submit form with remove_image flag
+                    var form = document.querySelector('form');
+                    var removeInput = document.createElement('input');
+                    removeInput.type = 'hidden';
+                    removeInput.name = 'remove_image';
+                    removeInput.value = '1';
+                    form.appendChild(removeInput);
+                    form.submit();
+                }
+            }
+            
+            function initCropInterface(img) {
+                // Create a simple crop interface using canvas
+                var canvas = document.getElementById('cropCanvas');
+                var ctx = canvas.getContext('2d');
+                
+                // Set canvas size to match image
+                var imgElement = new Image();
+                imgElement.onload = function() {
+                    var maxSize = 800;
+                    var scale = Math.min(maxSize / imgElement.width, maxSize / imgElement.height, 1);
+                    canvas.width = imgElement.width * scale;
+                    canvas.height = imgElement.height * scale;
+                    
+                    ctx.drawImage(imgElement, 0, 0, canvas.width, canvas.height);
+                    
+                    // Draw crop overlay
+                    drawCropOverlay();
+                };
+                imgElement.src = img.src;
+            }
+            
+            var cropX = 0, cropY = 0, cropSize = 200;
+            var isDragging = false;
+            var dragStartX = 0, dragStartY = 0;
+            var startCropX = 0, startCropY = 0;
+            
+            function drawCropOverlay() {
+                var canvas = document.getElementById('cropCanvas');
+                var ctx = canvas.getContext('2d');
+                var img = document.getElementById('cropImagePreview');
+                
+                // Redraw image
+                var imgElement = new Image();
+                imgElement.onload = function() {
+                    var maxSize = 800;
+                    var scale = Math.min(maxSize / imgElement.width, maxSize / imgElement.height, 1);
+                    canvas.width = imgElement.width * scale;
+                    canvas.height = imgElement.height * scale;
+                    
+                    ctx.drawImage(imgElement, 0, 0, canvas.width, canvas.height);
+                    
+                    // Initialize crop size to fit image
+                    cropSize = Math.min(canvas.width, canvas.height) * 0.8;
+                    cropX = (canvas.width - cropSize) / 2;
+                    cropY = (canvas.height - cropSize) / 2;
+                    
+                    // Draw semi-transparent overlay
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    // Clear crop area
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'destination-out';
+                    ctx.fillRect(cropX, cropY, cropSize, cropSize);
+                    ctx.restore();
+                    
+                    // Draw crop border
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(cropX, cropY, cropSize, cropSize);
+                    
+                    // Draw corner handles
+                    var handleSize = 10;
+                    ctx.fillStyle = '#fff';
+                    // Top-left
+                    ctx.fillRect(cropX - handleSize/2, cropY - handleSize/2, handleSize, handleSize);
+                    // Top-right
+                    ctx.fillRect(cropX + cropSize - handleSize/2, cropY - handleSize/2, handleSize, handleSize);
+                    // Bottom-left
+                    ctx.fillRect(cropX - handleSize/2, cropY + cropSize - handleSize/2, handleSize, handleSize);
+                    // Bottom-right
+                    ctx.fillRect(cropX + cropSize - handleSize/2, cropY + cropSize - handleSize/2, handleSize, handleSize);
+                    
+                    // Show canvas instead of image
+                    img.style.display = 'none';
+                    canvas.style.display = 'block';
+                    canvas.style.maxWidth = '100%';
+                    canvas.style.maxHeight = '500px';
+                    canvas.style.cursor = 'move';
+                    
+                    // Add mouse events
+                    canvas.onmousedown = startDrag;
+                    canvas.onmousemove = onDrag;
+                    canvas.onmouseup = endDrag;
+                    canvas.onmouseleave = endDrag;
+                };
+                imgElement.src = originalImage;
+            }
+            
+            function startDrag(e) {
+                var canvas = document.getElementById('cropCanvas');
+                var rect = canvas.getBoundingClientRect();
+                var x = (e.clientX - rect.left) * (canvas.width / rect.width);
+                var y = (e.clientY - rect.top) * (canvas.height / rect.height);
+                
+                // Check if clicking on corner (resize) or inside (move)
+                var handleSize = 20;
+                var isCorner = (
+                    (x >= cropX - handleSize && x <= cropX + handleSize && y >= cropY - handleSize && y <= cropY + handleSize) ||
+                    (x >= cropX + cropSize - handleSize && x <= cropX + cropSize + handleSize && y >= cropY - handleSize && y <= cropY + handleSize) ||
+                    (x >= cropX - handleSize && x <= cropX + handleSize && y >= cropY + cropSize - handleSize && y <= cropY + cropSize + handleSize) ||
+                    (x >= cropX + cropSize - handleSize && x <= cropX + cropSize + handleSize && y >= cropY + cropSize - handleSize && y <= cropY + cropSize + handleSize)
+                );
+                
+                if (isCorner) {
+                    // Resize mode
+                    isDragging = 'resize';
+                } else if (x >= cropX && x <= cropX + cropSize && y >= cropY && y <= cropY + cropSize) {
+                    // Move mode
+                    isDragging = 'move';
+                    dragStartX = x - cropX;
+                    dragStartY = y - cropY;
+                }
+                
+                startCropX = cropX;
+                startCropY = cropY;
+            }
+            
+            function onDrag(e) {
+                if (!isDragging) return;
+                
+                var canvas = document.getElementById('cropCanvas');
+                var rect = canvas.getBoundingClientRect();
+                var x = (e.clientX - rect.left) * (canvas.width / rect.width);
+                var y = (e.clientY - rect.top) * (canvas.height / rect.height);
+                
+                if (isDragging === 'move') {
+                    cropX = Math.max(0, Math.min(canvas.width - cropSize, x - dragStartX));
+                    cropY = Math.max(0, Math.min(canvas.height - cropSize, y - dragStartY));
+                } else if (isDragging === 'resize') {
+                    var newSize = Math.max(50, Math.min(canvas.width, canvas.height, Math.abs(x - startCropX), Math.abs(y - startCropY)));
+                    cropSize = newSize;
+                    cropX = Math.max(0, Math.min(canvas.width - cropSize, startCropX));
+                    cropY = Math.max(0, Math.min(canvas.height - cropSize, startCropY));
+                }
+                
+                drawCropOverlay();
+            }
+            
+            function endDrag() {
+                isDragging = false;
+            }
+            
+            function applyCrop() {
+                var canvas = document.getElementById('cropCanvas');
+                var img = document.getElementById('cropImagePreview');
+                
+                // Create a new canvas for the cropped image
+                var croppedCanvas = document.createElement('canvas');
+                croppedCanvas.width = 200; // Output size
+                croppedCanvas.height = 200;
+                var ctx = croppedCanvas.getContext('2d');
+                
+                // Load original image to get full resolution
+                var imgElement = new Image();
+                imgElement.onload = function() {
+                    // Calculate scale factor
+                    var scaleX = imgElement.width / canvas.width;
+                    var scaleY = imgElement.height / canvas.height;
+                    
+                    // Calculate actual crop coordinates in original image
+                    var srcX = cropX * scaleX;
+                    var srcY = cropY * scaleY;
+                    var srcSize = cropSize * Math.min(scaleX, scaleY);
+                    
+                    // Draw cropped and resized image
+                    ctx.drawImage(imgElement, srcX, srcY, srcSize, srcSize, 0, 0, 200, 200);
+                    
+                    // Convert to base64
+                    var croppedData = croppedCanvas.toDataURL('image/png');
+                    document.getElementById('cropped_image').value = croppedData;
+                    
+                    // Clear the file input so it doesn't submit the original file
+                    document.getElementById('image').value = '';
+                    
+                    // Update preview
+                    img.src = croppedData;
+                    img.style.display = 'block';
+                    canvas.style.display = 'none';
+                    
+                    // Show preview in form
+                    var previewDiv = document.getElementById('imagePreview');
+                    var previewImg = document.getElementById('previewImg');
+                    if (previewDiv && previewImg) {
+                        previewImg.src = croppedData;
+                        previewDiv.style.display = 'block';
+                    }
+                    
+                    // Update current image display if it exists
+                    var currentImg = document.getElementById('currentImageDisplay');
+                    if (currentImg) {
+                        currentImg.src = croppedData;
+                    }
+                    
+                    // Hide modal
+                    document.getElementById('imageCropperModal').style.display = 'none';
+                    
+                    // Show success message
+                    alert('Crop applied! Click "Update Link" to save.');
+                };
+                imgElement.src = originalImage;
+            }
+            
+            function cancelCrop() {
+                document.getElementById('imageCropperModal').style.display = 'none';
+                document.getElementById('image').value = '';
+                document.getElementById('cropped_image').value = '';
+            }
+            
+            function cropExistingImage() {
+                // Get the current image URL
+                var currentImg = document.getElementById('currentImageDisplay');
+                if (!currentImg) {
+                    alert('No current image found.');
+                    return;
+                }
+                
+                // Load the existing image
+                var imgUrl = currentImg.src;
+                originalImage = imgUrl;
+                
+                // Show cropper modal
+                var img = document.getElementById('cropImagePreview');
+                img.src = imgUrl;
+                document.getElementById('imageCropperModal').style.display = 'flex';
+                
+                // Initialize simple crop interface
+                setTimeout(function() {
+                    initCropInterface(img);
+                }, 100);
+            }
+            
+            function removeCurrentImage() {
+                if (confirm('Remove the current image? This cannot be undone.')) {
+                    // Submit form with remove_image flag
+                    var form = document.querySelector('form');
+                    var removeInput = document.createElement('input');
+                    removeInput.type = 'hidden';
+                    removeInput.name = 'remove_image';
+                    removeInput.value = '1';
+                    form.appendChild(removeInput);
+                    form.submit();
+                }
+            }
+        </script>
+    </body>
+    </html>
+    ''', link=link)
+
+
+@app.route('/admin/external-links/<int:link_id>/update', methods=['POST'])
+@admin_required
+def update_external_link(link_id):
+    """Update an external link"""
+    link = ExternalLink.query.get(link_id)
+    if not link:
+        flash('Link not found.', 'error')
+        return redirect(url_for('manage_external_links'))
+    
+    title = request.form.get('title', '').strip()
+    url = request.form.get('url', '').strip()
+    description = request.form.get('description', '').strip() or None
+    icon = request.form.get('icon', '🔗').strip() or '🔗'
+    order = int(request.form.get('order', 0) or 0)
+    remove_image = request.form.get('remove_image') == '1'
+    
+    if not title or not url:
+        flash('Title and URL are required.', 'error')
+        return redirect(url_for('edit_external_link', link_id=link_id))
+    
+    # Handle image removal
+    if remove_image and link.image_filename:
+        try:
+            quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+            old_file_path = quick_links_folder / link.image_filename
+            if old_file_path.exists():
+                old_file_path.unlink()
+        except Exception as e:
+            print(f"Error removing old image: {e}")
+        link.image_filename = None
+    
+    # Handle cropped image (preferred) or regular image upload
+    cropped_image_data = request.form.get('cropped_image', '').strip()
+    
+    if cropped_image_data:
+        # Process cropped image (base64 data)
+        try:
+            from PIL import Image
+            import base64
+            from io import BytesIO
+            
+            # Remove old image if exists
+            if link.image_filename:
+                try:
+                    quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+                    old_file_path = quick_links_folder / link.image_filename
+                    if old_file_path.exists():
+                        old_file_path.unlink()
+                except Exception as e:
+                    print(f"Error removing old image: {e}")
+            
+            # Remove data URL prefix if present
+            if ',' in cropped_image_data:
+                cropped_image_data = cropped_image_data.split(',')[1]
+            
+            # Decode base64 image
+            image_data = base64.b64decode(cropped_image_data)
+            img = Image.open(BytesIO(image_data))
+            
+            # Convert to RGBA for processing
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            
+            # Detect and remove background color (check corners for background color)
+            width, height = img.size
+            corner_pixels = [
+                img.getpixel((0, 0)),  # Top-left
+                img.getpixel((width-1, 0)),  # Top-right
+                img.getpixel((0, height-1)),  # Bottom-left
+                img.getpixel((width-1, height-1))  # Bottom-right
+            ]
+            
+            # Find the most common corner color (likely the background)
+            from collections import Counter
+            corner_colors = [pixel[:3] for pixel in corner_pixels]  # Get RGB, ignore alpha
+            bg_color = Counter(corner_colors).most_common(1)[0][0]
+            
+            # Create a mask for background pixels (with tolerance for slight variations)
+            tolerance = 30  # Allow some variation in color matching
+            data = img.getdata()
+            new_data = []
+            for item in data:
+                r, g, b, a = item
+                # Check if pixel matches background color (within tolerance)
+                if (abs(r - bg_color[0]) < tolerance and 
+                    abs(g - bg_color[1]) < tolerance and 
+                    abs(b - bg_color[2]) < tolerance):
+                    # Make transparent
+                    new_data.append((255, 255, 255, 0))
+                else:
+                    # Keep original pixel
+                    new_data.append(item)
+            
+            # Apply the mask
+            img.putdata(new_data)
+            
+            # Create white background and paste image
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            background.paste(img, mask=img.split()[-1])  # Use alpha channel as mask
+            img = background
+            
+            # Resize to square if needed (200x200)
+            if img.size[0] != img.size[1]:
+                size = min(img.size)
+                img = img.crop((0, 0, size, size))
+            img = img.resize((200, 200), Image.Resampling.LANCZOS)
+            
+            # Generate filename
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_')
+            filename = timestamp + 'cropped_logo.png'
+            
+            # Create quick_links folder if it doesn't exist
+            quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+            quick_links_folder.mkdir(exist_ok=True)
+            
+            # Save file
+            file_path = quick_links_folder / filename
+            img.save(str(file_path), 'PNG', optimize=True)
+            link.image_filename = filename
+        except Exception as e:
+            print(f"Error processing cropped image: {e}")
+            import traceback
+            traceback.print_exc()
+            flash(f'Error processing cropped image: {str(e)}', 'error')
+            # Fall through to regular image upload
+            cropped_image_data = None
+    
+    # Handle regular image upload if no cropped image (only if cropped_image is empty)
+    if not link.image_filename and not cropped_image_data and 'image' in request.files:
+        image_file = request.files['image']
+        if image_file and image_file.filename:
+            # Check if it's an allowed image type
+            if image_file.filename.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg')):
+                # Remove old image if exists
+                if link.image_filename:
+                    try:
+                        quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+                        old_file_path = quick_links_folder / link.image_filename
+                        if old_file_path.exists():
+                            old_file_path.unlink()
+                    except Exception as e:
+                        print(f"Error removing old image: {e}")
+                
+                # Secure the filename
+                original_filename = image_file.filename
+                filename = secure_filename(original_filename)
+                
+                # Add timestamp to avoid conflicts
+                timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_')
+                filename = timestamp + filename
+                
+                # Create quick_links folder if it doesn't exist
+                quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+                quick_links_folder.mkdir(exist_ok=True)
+                
+                # Save file
+                file_path = quick_links_folder / filename
+                image_file.save(str(file_path))
+                link.image_filename = filename
+            else:
+                flash('Invalid image format. Allowed: JPG, PNG, GIF, SVG', 'error')
+                return redirect(url_for('edit_external_link', link_id=link_id))
+    
+    try:
+        link.title = title
+        link.url = url
+        link.description = description
+        link.icon = icon
+        link.order = order
+        link.updated_at = datetime.utcnow()
+        db.session.commit()
+        flash(f'External link "{title}" updated successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating link: {str(e)}', 'error')
+    
+    return redirect(url_for('manage_external_links'))
+
+
+@app.route('/admin/external-links/<int:link_id>/toggle', methods=['POST'])
+@admin_required
+def toggle_external_link(link_id):
+    """Toggle external link active status"""
+    link = ExternalLink.query.get(link_id)
+    if not link:
+        flash('Link not found.', 'error')
+        return redirect(url_for('manage_external_links'))
+    
+    try:
+        link.is_active = not link.is_active
+        link.updated_at = datetime.utcnow()
+        db.session.commit()
+        status = 'activated' if link.is_active else 'deactivated'
+        flash(f'Link "{link.title}" {status} successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error toggling link: {str(e)}', 'error')
+    
+    return redirect(url_for('manage_external_links'))
+
+
+@app.route('/admin/external-links/<int:link_id>/delete', methods=['POST'])
+@admin_required
+def delete_external_link(link_id):
+    """Delete an external link"""
+    link = ExternalLink.query.get(link_id)
+    if not link:
+        flash('Link not found.', 'error')
+        return redirect(url_for('manage_external_links'))
+    
+    try:
+        title = link.title
+        # Delete associated image file if it exists
+        if link.image_filename:
+            try:
+                quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+                image_path = quick_links_folder / link.image_filename
+                if image_path.exists():
+                    image_path.unlink()
+            except Exception as e:
+                print(f"Error deleting image file: {e}")
+        
+        db.session.delete(link)
+        db.session.commit()
+        flash(f'External link "{title}" deleted successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error deleting link: {str(e)}', 'error')
+    
+    return redirect(url_for('manage_external_links'))
+
+
 @app.route('/admin/reports')
 @admin_required
 def admin_reports():
@@ -8506,61 +13394,92 @@ def admin_reports():
         <title>Reports - Onboarding App</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                background: #ffffff;
-                color: #333;
+                font-family: 'URW Form', Arial, sans-serif;
+                background: #FFFFFF;
+                color: #000000;
+            }
+            p, span, div, td, th, label, input, textarea, select, button, a {
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
                 margin: 5px;
             }
             .btn:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .container {
-                max-width: 1400px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .section {
-                background: white;
-                border-radius: 12px;
-                padding: 25px;
+                background: #FFFFFF;
+                border-radius: 1rem;
+                border: 1px solid #E0E0E0;
+                padding: 2rem;
                 margin-bottom: 30px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
             }
             .section-title {
                 font-size: 1.6em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
             }
             table {
                 width: 100%;
@@ -8594,7 +13513,7 @@ def admin_reports():
                 width: 120px;
                 height: 22px;
                 background: #e5e5e5;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 overflow: hidden;
                 display: inline-block;
                 vertical-align: middle;
@@ -8614,7 +13533,7 @@ def admin_reports():
                 font-size: 1.4em;
                 font-weight: 600;
                 margin-bottom: 20px;
-                color: #2d2d2d;
+                color: #000000;
                 border-bottom: 2px solid #dc3545;
                 padding-bottom: 10px;
             }
@@ -8626,7 +13545,7 @@ def admin_reports():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="btn" style="background: rgba(255,255,255,0.2);">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -8888,38 +13807,76 @@ def manage_training():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Harassment Training Management - Onboarding App</title>
+        <title>Training Management - Onboarding App</title>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
             }
             .header-content {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .admin-panel {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+            }
+            .admin-panel h2 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                color: #000000;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
                 border-radius: 5px;
@@ -8932,7 +13889,7 @@ def manage_training():
                 background: #007bff;
             }
             .btn-danger {
-                background: #dc3545;
+                background: #FE0100;
             }
             .btn-small {
                 padding: 5px 10px;
@@ -8944,7 +13901,8 @@ def manage_training():
             .form-group label {
                 display: block;
                 margin-bottom: 5px;
-                font-weight: bold;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .form-group input,
             .form-group textarea,
@@ -8952,7 +13910,7 @@ def manage_training():
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 14px;
             }
             .form-group textarea {
@@ -8967,7 +13925,7 @@ def manage_training():
             table {
                 width: 100%;
                 background: white;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 overflow: hidden;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-top: 20px;
@@ -8996,12 +13954,12 @@ def manage_training():
     <body>
         <div class="header">
             <div class="header-content">
-                <h1>🎓 Harassment Training Management</h1>
+                <h1>🎓 Training Management</h1>
             </div>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('admin_dashboard') }}" class="btn">← Back to Admin Dashboard</a>
             
             <div class="admin-panel">
                 <h2>Upload Training Video</h2>
@@ -9171,33 +14129,75 @@ def manage_video_quiz(video_id):
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .header {
-                background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+                background: #000000;
                 color: white;
-                padding: 20px;
+                padding: 12px 30px;
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
+            }
+            .header-content {
+                max-width: 1600px;
+                margin: 0 auto;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                flex: 1;
+            }
+            .header-content h1 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                margin: 0;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
             .admin-panel {
                 background: white;
                 padding: 25px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+            }
+            .admin-panel h2 {
+                font-family: 'URW Form', Arial, sans-serif;
+                font-weight: 800;
+                color: #000000;
             }
             .btn {
                 display: inline-block;
                 padding: 10px 20px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 text-decoration: none;
-                border-radius: 5px;
+                border-radius: 0.5rem;
                 margin: 5px;
             }
             .btn-success {
@@ -9207,7 +14207,7 @@ def manage_video_quiz(video_id):
                 background: #007bff;
             }
             .btn-danger {
-                background: #dc3545;
+                background: #FE0100;
             }
             .btn-small {
                 padding: 5px 10px;
@@ -9219,7 +14219,8 @@ def manage_video_quiz(video_id):
             .form-group label {
                 display: block;
                 margin-bottom: 5px;
-                font-weight: bold;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .form-group input,
             .form-group textarea,
@@ -9227,7 +14228,7 @@ def manage_video_quiz(video_id):
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
-                border-radius: 4px;
+                border-radius: 0.5rem;
                 font-size: 14px;
             }
             .form-group textarea {
@@ -9256,11 +14257,13 @@ def manage_video_quiz(video_id):
     </head>
     <body>
         <div class="header">
-            <h1>📝 Manage Quiz: {{ video.title }}</h1>
+            <div class="header-content">
+                <h1>📝 Manage Quiz: {{ video.title }}</h1>
+            </div>
+            <a href="{{ url_for('manage_training') }}" class="back-btn">← Back to Training</a>
         </div>
         
         <div class="container">
-            <a href="{{ url_for('manage_training') }}" class="btn">← Back to Training Management</a>
             
             <div class="admin-panel">
                 <h2>Add Quiz Question</h2>
@@ -9545,7 +14548,7 @@ def view_training_video(video_id):
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #1a1a1a;
                 color: white;
             }
@@ -9555,13 +14558,13 @@ def view_training_video(video_id):
                 text-align: center;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 20px auto;
                 padding: 0 20px;
             }
             .video-container {
                 background: #000;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 overflow: hidden;
                 margin-bottom: 20px;
                 position: relative;
@@ -9605,15 +14608,15 @@ def view_training_video(video_id):
             }
             .quiz-content {
                 background: white;
-                color: #333;
+                color: #000000;
                 padding: 30px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 max-width: 800px;
                 width: 100%;
             }
             .quiz-content h2 {
                 margin-bottom: 20px;
-                color: #dc3545;
+                color: #FE0100;
             }
             .quiz-content .question {
                 font-size: 1.2em;
@@ -9639,7 +14642,7 @@ def view_training_video(video_id):
             }
             .btn {
                 padding: 12px 24px;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 border: none;
                 border-radius: 5px;
@@ -9648,7 +14651,7 @@ def view_training_video(video_id):
                 margin-top: 20px;
             }
             .btn:hover {
-                background: #c82333;
+                background: #FE0100;
             }
             .btn-success {
                 background: #28a745;
@@ -9659,7 +14662,7 @@ def view_training_video(video_id):
             .progress-info {
                 background: #2a2a2a;
                 padding: 15px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-bottom: 20px;
                 display: flex;
                 justify-content: space-between;
@@ -9677,7 +14680,7 @@ def view_training_video(video_id):
                 color: #28a745;
             }
             .score-fail {
-                color: #dc3545;
+                color: #FE0100;
             }
         </style>
     </head>
@@ -10118,6 +15121,19 @@ def serve_ziebart_logo():
     return send_from_directory(app.config['UPLOAD_FOLDER'], 'ziebart.svg', mimetype='image/svg+xml')
 
 
+@app.route('/uploads/quick-links/<filename>')
+def serve_quick_link_image(filename):
+    """Serve quick link images"""
+    try:
+        quick_links_folder = app.config['UPLOAD_FOLDER'] / 'quick_links'
+        if not quick_links_folder.exists():
+            quick_links_folder.mkdir(exist_ok=True)
+        return send_from_directory(quick_links_folder, filename)
+    except Exception as e:
+        from flask import abort
+        abort(404)
+
+
 @app.route('/api/training/save-answer', methods=['POST'])
 @login_required
 def save_quiz_answer():
@@ -10385,28 +15401,54 @@ def list_training_videos():
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: Arial, sans-serif;
+                font-family: 'URW Form', Arial, sans-serif;
                 background: #f5f5f5;
             }
             .top-header {
-                background: #2d2d2d;
+                background: #000000;
                 padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                overflow: visible;
+                position: relative;
+                z-index: 100;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .logo-section {
                 display: flex;
                 align-items: center;
                 gap: 12px;
                 font-size: 1.4em;
-                font-weight: 700;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
                 color: #ffffff;
+                position: relative;
+                z-index: 101;
+                height: 100%;
             }
             .logo-section img {
-                height: 40px;
+                height: 80px;
                 width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
             }
             .nav-links {
                 display: flex;
@@ -10418,13 +15460,14 @@ def list_training_videos():
                 text-decoration: none;
                 font-size: 1em;
                 font-weight: 500;
+                font-family: 'URW Form', Arial, sans-serif;
                 transition: color 0.2s;
             }
             .nav-links a:hover {
-                color: #dc3545;
+                color: #FE0100;
             }
             .nav-links a.active {
-                color: #dc3545;
+                color: #FE0100;
             }
             .user-section {
                 display: flex;
@@ -10449,7 +15492,7 @@ def list_training_videos():
                 width: 32px;
                 height: 32px;
                 border-radius: 50%;
-                background: #dc3545;
+                background: #FE0100;
                 color: white;
                 display: flex;
                 align-items: center;
@@ -10464,7 +15507,7 @@ def list_training_videos():
                 background: white;
                 min-width: 200px;
                 box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 margin-top: 10px;
                 z-index: 1000;
                 overflow: hidden;
@@ -10474,7 +15517,7 @@ def list_training_videos():
             }
             .dropdown-item {
                 padding: 12px 20px;
-                color: #333;
+                color: #000000;
                 text-decoration: none;
                 display: block;
                 transition: background 0.2s;
@@ -10487,7 +15530,7 @@ def list_training_videos():
                 background: #eee;
             }
             .container {
-                max-width: 1200px;
+                max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
@@ -10509,15 +15552,15 @@ def list_training_videos():
             .training-card {
                 background: white;
                 padding: 20px;
-                border-radius: 8px;
+                border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             }
             .training-card h3 {
                 margin-bottom: 10px;
-                color: #333;
+                color: #000000;
             }
             .training-card p {
-                color: #666;
+                color: #808080;
                 margin-bottom: 15px;
             }
             .progress-info {
@@ -10538,7 +15581,7 @@ def list_training_videos():
                 background: #28a745;
             }
             .badge-failed {
-                background: #dc3545;
+                background: #FE0100;
             }
             .badge-in-progress {
                 background: #ffc107;
@@ -10699,9 +15742,10 @@ def api_user():
     })
 
 
+# WSGI application - required for IIS/wfastcgi
+# The 'app' object is the Flask application instance
+application = app
+
 if __name__ == '__main__':
     # For local development
     app.run(debug=True, host='0.0.0.0', port=5000)
-else:
-    # For IIS deployment with FastCGI
-    pass

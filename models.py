@@ -334,12 +334,13 @@ class DocumentSignatureField(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     document_id = db.Column(db.Integer, db.ForeignKey('documents.id'), nullable=False)
     page_number = db.Column(db.Integer, nullable=False, default=1)  # Page number (1-indexed)
-    x_position = db.Column(db.Float, nullable=False)  # X coordinate (percentage or pixels)
-    y_position = db.Column(db.Float, nullable=False)  # Y coordinate (percentage or pixels)
-    width = db.Column(db.Float, nullable=False, default=200)  # Width of signature field
-    height = db.Column(db.Float, nullable=False, default=80)  # Height of signature field
+    x_position = db.Column(db.Float, nullable=False)  # X coordinate in browser pixels (relative to viewer)
+    y_position = db.Column(db.Float, nullable=False)  # Y coordinate in browser pixels (relative to viewer)
+    width = db.Column(db.Float, nullable=False, default=200)  # Width in browser pixels
+    height = db.Column(db.Float, nullable=False, default=80)  # Height in browser pixels
     field_label = db.Column(db.String(200))  # Optional label (e.g., "Employee Signature")
     is_required = db.Column(db.Boolean, default=True)  # Whether signature is required
+    signature_type = db.Column(db.String(20), default='image')  # 'image' or 'cryptographic'
     created_by = db.Column(db.String(100))  # Username of admin who created the field
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -372,9 +373,14 @@ class DocumentSignature(db.Model):
     document_id = db.Column(db.Integer, db.ForeignKey('documents.id'), nullable=False)
     signature_field_id = db.Column(db.Integer, db.ForeignKey('document_signature_fields.id'), nullable=False)
     username = db.Column(db.String(100), nullable=False, index=True)  # Username who signed
-    signature_image = db.Column(db.Text, nullable=False)  # Base64 encoded signature image
+    signature_image = db.Column(db.Text, nullable=True)  # Base64 encoded signature image (for image-based)
+    signature_hash = db.Column(db.String(64), nullable=True)  # SHA-256 hash of signed PDF (for cryptographic)
+    certificate_serial = db.Column(db.String(200), nullable=True)  # Certificate serial number (for cryptographic)
+    signature_type = db.Column(db.String(20), default='image')  # 'image' or 'cryptographic'
     signed_at = db.Column(db.DateTime, default=datetime.utcnow)
     ip_address = db.Column(db.String(50))  # IP address when signed (for audit)
+    user_agent = db.Column(db.String(500), nullable=True)  # Browser user agent
+    consent_given = db.Column(db.Boolean, default=False)  # User consent for electronic signing
     
     # Relationships
     document = db.relationship('Document', backref='signatures')
@@ -392,6 +398,79 @@ class DocumentSignature(db.Model):
             'username': self.username,
             'signed_at': self.signed_at.isoformat() if self.signed_at else None,
             'ip_address': self.ip_address
+        }
+
+
+class DocumentTypedField(db.Model):
+    """Typed field locations on documents - where admins mark where users should type (name, date, etc.)"""
+    __tablename__ = 'document_typed_fields'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey('documents.id'), nullable=False)
+    page_number = db.Column(db.Integer, nullable=False, default=1)  # Page number (1-indexed)
+    x_position = db.Column(db.Float, nullable=False)  # X coordinate in browser pixels
+    y_position = db.Column(db.Float, nullable=False)  # Y coordinate in browser pixels
+    width = db.Column(db.Float, nullable=False, default=200)  # Width in browser pixels
+    height = db.Column(db.Float, nullable=False, default=30)  # Height in browser pixels
+    field_label = db.Column(db.String(200))  # Label (e.g., "Name", "Date")
+    field_type = db.Column(db.String(20), default='text')  # 'text', 'date', 'name', etc.
+    is_required = db.Column(db.Boolean, default=True)  # Whether field is required
+    placeholder = db.Column(db.String(200))  # Placeholder text
+    created_by = db.Column(db.String(100))  # Username of admin who created the field
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    document = db.relationship('Document', backref='typed_fields')
+    
+    def __repr__(self):
+        return f'<DocumentTypedField {self.id} on Document {self.document_id}, Page {self.page_number}>'
+    
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'document_id': self.document_id,
+            'page_number': self.page_number,
+            'x_position': self.x_position,
+            'y_position': self.y_position,
+            'width': self.width,
+            'height': self.height,
+            'field_label': self.field_label,
+            'field_type': self.field_type,
+            'is_required': self.is_required,
+            'placeholder': self.placeholder
+        }
+
+
+class DocumentTypedFieldValue(db.Model):
+    """User-entered values for typed fields"""
+    __tablename__ = 'document_typed_field_values'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey('documents.id'), nullable=False)
+    typed_field_id = db.Column(db.Integer, db.ForeignKey('document_typed_fields.id'), nullable=False)
+    username = db.Column(db.String(100), nullable=False, index=True)  # Username who filled the field
+    field_value = db.Column(db.Text, nullable=False)  # The text value entered
+    filled_at = db.Column(db.DateTime, default=datetime.utcnow)
+    ip_address = db.Column(db.String(50))  # IP address when filled (for audit)
+    user_agent = db.Column(db.String(500), nullable=True)  # Browser user agent
+    
+    # Relationships
+    document = db.relationship('Document', backref='typed_field_values')
+    typed_field = db.relationship('DocumentTypedField', backref='values')
+    
+    def __repr__(self):
+        return f'<DocumentTypedFieldValue {self.id} by {self.username} on Field {self.typed_field_id}>'
+    
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'document_id': self.document_id,
+            'typed_field_id': self.typed_field_id,
+            'username': self.username,
+            'field_value': self.field_value,
+            'filled_at': self.filled_at.isoformat() if self.filled_at else None
         }
 
 
@@ -427,6 +506,42 @@ class DocumentAssignment(db.Model):
             'is_completed': self.is_completed,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'notes': self.notes
+        }
+
+
+class ExternalLink(db.Model):
+    """External links that admins can add for users to see on their dashboard"""
+    __tablename__ = 'external_links'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    url = db.Column(db.String(500), nullable=False)
+    description = db.Column(db.Text)
+    icon = db.Column(db.String(100), default='🔗')  # Emoji or icon identifier
+    image_filename = db.Column(db.String(255))  # Filename of uploaded image
+    order = db.Column(db.Integer, default=0)  # Display order
+    is_active = db.Column(db.Boolean, default=True)
+    created_by = db.Column(db.String(100))  # Username of admin who created it
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f'<ExternalLink {self.title} ({self.url})>'
+    
+    def to_dict(self):
+        """Convert to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'title': self.title,
+            'url': self.url,
+            'description': self.description,
+            'icon': self.icon,
+            'image_filename': self.image_filename,
+            'order': self.order,
+            'is_active': self.is_active,
+            'created_by': self.created_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
 
