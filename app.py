@@ -299,147 +299,196 @@ def is_signature_field_signed(document_id, field, username):
 @login_required
 def dashboard():
     """User dashboard"""
-    is_admin = current_user.is_admin()
+    try:
+        is_admin = current_user.is_admin()
+        
+        # Get new hire record for current user
+        try:
+            user_new_hire = NewHire.query.filter_by(username=current_user.username).first()
+            user_first_name = user_new_hire.first_name if user_new_hire else current_user.username
+            user_full_name = f"{user_new_hire.first_name} {user_new_hire.last_name}" if user_new_hire else current_user.username
+        except Exception as e:
+            user_new_hire = None
+            user_first_name = current_user.username
+            user_full_name = current_user.username
+        
+        # Get required training videos for current user
+        required_videos = []
+        completed_required_videos = []
+        
+        if user_new_hire:
+            try:
+                required_videos = list(user_new_hire.required_training_videos)
+                # Check which ones are completed
+                for video in required_videos:
+                    try:
+                        progress = UserTrainingProgress.query.filter_by(
+                            username=current_user.username,
+                            video_id=video.id,
+                            is_completed=True,
+                            is_passed=True
+                        ).first()
+                        if progress:
+                            completed_required_videos.append(video.id)
+                    except Exception as e:
+                        # Skip this video if there's an error
+                        continue
+            except Exception as e:
+                # If there's an error getting videos, use empty list
+                required_videos = []
+        
+        incomplete_training = [v for v in required_videos if v.id not in completed_required_videos]
+        
+        # Get user tasks assigned to current user
+        try:
+            all_user_tasks = UserTask.query.filter_by(username=current_user.username).all()
+        except Exception as e:
+            all_user_tasks = []
+        
+        # Check document tasks and update completion status
+        for task in all_user_tasks:
+            try:
+                if task.task_type == 'document' and task.document_id:
+                    document = Document.query.get(task.document_id)
+                    if document:
+                        # Check if all required signature fields are signed
+                        try:
+                            required_fields = DocumentSignatureField.query.filter_by(
+                                document_id=task.document_id,
+                                is_required=True
+                            ).all()
+                            
+                            if required_fields:
+                                # Check if all required fields are signed (using helper to handle deleted fields)
+                                try:
+                                    all_signed = all(is_signature_field_signed(task.document_id, f, current_user.username) for f in required_fields)
+                                    
+                                    if all_signed and task.status != 'completed':
+                                        # Auto-complete the task
+                                        task.status = 'completed'
+                                        task.completed_at = datetime.utcnow()
+                                        db.session.commit()
+                                    
+                                    # Update assignment completion status
+                                    assignment = DocumentAssignment.query.filter_by(
+                                        document_id=task.document_id,
+                                        username=current_user.username
+                                    ).first()
+                                    if assignment:
+                                        assignment.is_completed = all_signed
+                                        if all_signed and not assignment.completed_at:
+                                            assignment.completed_at = datetime.utcnow()
+                                        db.session.commit()
+                                except Exception as e:
+                                    # If checking signatures fails, skip this task
+                                    continue
+                        except Exception as e:
+                            # If getting required fields fails, skip this task
+                            continue
+            except Exception as e:
+                # If processing this task fails, skip it
+                continue
     
-    # Get new hire record for current user
-    user_new_hire = NewHire.query.filter_by(username=current_user.username).first()
-    user_first_name = user_new_hire.first_name if user_new_hire else current_user.username
-    user_full_name = f"{user_new_hire.first_name} {user_new_hire.last_name}" if user_new_hire else current_user.username
-    
-    # Get required training videos for current user
-    required_videos = []
-    completed_required_videos = []
-    
-    if user_new_hire:
-        required_videos = list(user_new_hire.required_training_videos)
-        # Check which ones are completed
-        for video in required_videos:
-            progress = UserTrainingProgress.query.filter_by(
-                username=current_user.username,
-                video_id=video.id,
-                is_completed=True,
-                is_passed=True
-            ).first()
-            if progress:
-                completed_required_videos.append(video.id)
-    
-    incomplete_training = [v for v in required_videos if v.id not in completed_required_videos]
-    
-    # Get user tasks assigned to current user
-    all_user_tasks = UserTask.query.filter_by(username=current_user.username).all()
-    
-    # Check document tasks and update completion status
-    for task in all_user_tasks:
-        if task.task_type == 'document' and task.document_id:
-            document = Document.query.get(task.document_id)
-            if document:
-                # Check if all required signature fields are signed
-                required_fields = DocumentSignatureField.query.filter_by(
-                    document_id=task.document_id,
-                    is_required=True
-                ).all()
+        # Filter out completed tasks for dashboard display
+        user_tasks = [t for t in all_user_tasks if t.status != 'completed']
+        completed_user_tasks = [t for t in all_user_tasks if t.status == 'completed']
+        
+        # Check if all tasks are completed
+        all_tasks_completed = (len(incomplete_training) == 0 and len(user_tasks) == 0) if (required_videos or all_user_tasks) else False
+        
+        # Calculate progress percentage (training videos + user tasks)
+        total_training_tasks = len(required_videos)
+        completed_training_tasks = len(completed_required_videos)
+        total_user_tasks = len(all_user_tasks)
+        completed_user_tasks_count = len(completed_user_tasks)
+        
+        # Total tasks = training videos + user tasks
+        total_tasks = total_training_tasks + total_user_tasks
+        completed_tasks = completed_training_tasks + completed_user_tasks_count
+        progress_percentage = int((completed_tasks / total_tasks * 100)) if total_tasks > 0 else 0
+        
+        # Build notifications list
+        notifications = []
+        
+        # Add incomplete training videos as notifications
+        for video in incomplete_training:
+            try:
+                # Check if user has viewed this notification
+                notification = UserNotification.query.filter_by(
+                    username=current_user.username,
+                    notification_type='training',
+                    notification_id=str(video.id)
+                ).first()
                 
-                if required_fields:
-                    # Check if all required fields are signed (using helper to handle deleted fields)
-                    all_signed = all(is_signature_field_signed(task.document_id, f, current_user.username) for f in required_fields)
-                    
-                    if all_signed and task.status != 'completed':
-                        # Auto-complete the task
-                        task.status = 'completed'
-                        task.completed_at = datetime.utcnow()
-                        db.session.commit()
-                    
-                    # Update assignment completion status
-                    assignment = DocumentAssignment.query.filter_by(
-                        document_id=task.document_id,
-                        username=current_user.username
-                    ).first()
-                    if assignment:
-                        assignment.is_completed = all_signed
-                        if all_signed and not assignment.completed_at:
-                            assignment.completed_at = datetime.utcnow()
-                        db.session.commit()
-    
-    # Filter out completed tasks for dashboard display
-    user_tasks = [t for t in all_user_tasks if t.status != 'completed']
-    completed_user_tasks = [t for t in all_user_tasks if t.status == 'completed']
-    
-    # Check if all tasks are completed
-    all_tasks_completed = (len(incomplete_training) == 0 and len(user_tasks) == 0) if (required_videos or all_user_tasks) else False
-    
-    # Calculate progress percentage (training videos + user tasks)
-    total_training_tasks = len(required_videos)
-    completed_training_tasks = len(completed_required_videos)
-    total_user_tasks = len(all_user_tasks)
-    completed_user_tasks_count = len(completed_user_tasks)
-    
-    # Total tasks = training videos + user tasks
-    total_tasks = total_training_tasks + total_user_tasks
-    completed_tasks = completed_training_tasks + completed_user_tasks_count
-    progress_percentage = int((completed_tasks / total_tasks * 100)) if total_tasks > 0 else 0
-    
-    # Build notifications list
-    notifications = []
-    
-    # Add incomplete training videos as notifications
-    for video in incomplete_training:
-        # Check if user has viewed this notification
-        notification = UserNotification.query.filter_by(
-            username=current_user.username,
-            notification_type='training',
-            notification_id=str(video.id)
-        ).first()
+                if not notification or not notification.is_read:
+                    notifications.append({
+                        'type': 'training',
+                        'id': video.id,
+                        'title': video.title,
+                        'message': f'Complete required training: {video.title}',
+                        'url': url_for('view_training_video', video_id=video.id),
+                        'is_read': notification.is_read if notification else False
+                    })
+            except Exception as e:
+                # Skip this notification if there's an error
+                continue
         
-        if not notification or not notification.is_read:
-            notifications.append({
-                'type': 'training',
-                'id': video.id,
-                'title': video.title,
-                'message': f'Complete required training: {video.title}',
-                'url': url_for('view_training_video', video_id=video.id),
-                'is_read': notification.is_read if notification else False
-            })
-    
-    # Add incomplete user tasks as notifications
-    for task in user_tasks:
-        notification = UserNotification.query.filter_by(
-            username=current_user.username,
-            notification_type='task',
-            notification_id=str(task.id)
-        ).first()
+        # Add incomplete user tasks as notifications
+        for task in user_tasks:
+            try:
+                notification = UserNotification.query.filter_by(
+                    username=current_user.username,
+                    notification_type='task',
+                    notification_id=str(task.id)
+                ).first()
+                
+                if not notification or not notification.is_read:
+                    task_url = url_for('sign_document', doc_id=task.document_id) if (task.task_type == 'document' and task.document_id) else url_for('user_tasks')
+                    notifications.append({
+                        'type': 'task',
+                        'id': task.id,
+                        'title': task.task_title,
+                        'message': task.task_description or f'Complete task: {task.task_title}',
+                        'url': task_url,
+                        'is_read': notification.is_read if notification else False
+                    })
+            except Exception as e:
+                # Skip this notification if there's an error
+                continue
         
-        if not notification or not notification.is_read:
-            task_url = url_for('sign_document', doc_id=task.document_id) if (task.task_type == 'document' and task.document_id) else url_for('user_tasks')
-            notifications.append({
-                'type': 'task',
-                'id': task.id,
-                'title': task.task_title,
-                'message': task.task_description or f'Complete task: {task.task_title}',
-                'url': task_url,
-                'is_read': notification.is_read if notification else False
-            })
-    
-    # Count unread notifications
-    unread_count = len([n for n in notifications if not n['is_read']])
-    pending_count = unread_count
-    
-    # Get all training videos (for the training videos section)
-    all_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.created_at.desc()).limit(6).all()
-    
-    # Get visible documents
-    # Only show assigned documents to users (not just visible ones)
-    assigned_doc_ids = set()
-    if not is_admin:
-        assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
-        assigned_doc_ids = set(a.document_id for a in assigned_documents)
-        visible_documents = Document.query.filter(Document.id.in_(assigned_doc_ids)).order_by(Document.created_at.desc()).limit(3).all()
-    else:
-        visible_documents = Document.query.filter_by(is_visible=True).order_by(Document.created_at.desc()).limit(3).all()
-    
-    # Get active external links for the dashboard
-    external_links = ExternalLink.query.filter_by(is_active=True).order_by(ExternalLink.order, ExternalLink.created_at).all()
-    
-    return render_template_string('''
+        # Count unread notifications
+        unread_count = len([n for n in notifications if not n['is_read']])
+        pending_count = unread_count
+        
+        # Get all training videos (for the training videos section)
+        try:
+            all_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.created_at.desc()).limit(6).all()
+        except Exception as e:
+            all_videos = []
+        
+        # Get visible documents
+        # Only show assigned documents to users (not just visible ones)
+        assigned_doc_ids = set()
+        try:
+            if not is_admin:
+                assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
+                assigned_doc_ids = set(a.document_id for a in assigned_documents)
+                if assigned_doc_ids:
+                    visible_documents = Document.query.filter(Document.id.in_(assigned_doc_ids)).order_by(Document.created_at.desc()).limit(3).all()
+                else:
+                    visible_documents = []
+            else:
+                visible_documents = Document.query.filter_by(is_visible=True).order_by(Document.created_at.desc()).limit(3).all()
+        except Exception as e:
+            visible_documents = []
+        
+        # Get active external links for the dashboard
+        try:
+            external_links = ExternalLink.query.filter_by(is_active=True).order_by(ExternalLink.order, ExternalLink.created_at).all()
+        except Exception as e:
+            external_links = []
+        
+        return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
@@ -1355,139 +1404,230 @@ def dashboard():
          progress_percentage=progress_percentage, all_videos=all_videos, visible_documents=visible_documents,
          user_tasks=user_tasks, total_tasks=total_tasks, completed_tasks=completed_tasks, 
          pending_count=pending_count, notifications=notifications, external_links=external_links)
+    except Exception as e:
+        # Log the error for debugging
+        import traceback
+        app.logger.error(f'Error in dashboard for {current_user.username if current_user else "unknown"}: {str(e)}')
+        app.logger.error(traceback.format_exc())
+        
+        # Set defaults to prevent template errors
+        is_admin = current_user.is_admin() if current_user else False
+        user_first_name = current_user.username if current_user else "User"
+        user_full_name = current_user.username if current_user else "User"
+        required_videos = []
+        completed_required_videos = []
+        incomplete_training = []
+        all_tasks_completed = False
+        progress_percentage = 0
+        all_videos = []
+        visible_documents = []
+        user_tasks = []
+        total_tasks = 0
+        completed_tasks = 0
+        pending_count = 0
+        notifications = []
+        external_links = []
+        
+        # Return a basic dashboard with error message
+        flash(f'Error loading dashboard: {str(e)}. Some data may be missing.', 'error')
+        
+        return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Dashboard - Onboarding App</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body { font-family: 'URW Form', Arial, sans-serif; padding: 20px; background: #f5f5f5; }
+                .error-box { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+                .error-box strong { color: #856404; }
+            </style>
+        </head>
+        <body>
+            <div class="error-box">
+                <strong>⚠️ Dashboard Error</strong>
+                <p>There was an error loading your dashboard. Please refresh the page or contact support if the problem persists.</p>
+            </div>
+            <p><a href="{{ url_for('dashboard') }}">Refresh Dashboard</a></p>
+        </body>
+        </html>
+        ''')
 
 
 @app.route('/tasks')
 @login_required
 def user_tasks():
     """User tasks page - shows tasks assigned to the current user"""
-    is_admin = current_user.is_admin()
-    
-    # Get tasks assigned to current user
-    user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
-        UserTask.priority.desc(),
-        UserTask.due_date.asc(),
-        UserTask.created_at.desc()
-    ).all()
-    
-    # Get new hire record for current user
-    user_new_hire = NewHire.query.filter_by(username=current_user.username).first()
-    
-    # Ensure tasks exist for incomplete training videos
-    if user_new_hire:
-        required_videos = list(user_new_hire.required_training_videos)
-        for video in required_videos:
-            # Check if video is completed
-            progress = UserTrainingProgress.query.filter_by(
-                username=current_user.username,
-                video_id=video.id,
-                is_completed=True,
-                is_passed=True
-            ).first()
-            
-            # Only create task if video is not completed
-            if not progress:
-                # Check if task already exists for this video
-                existing_task = UserTask.query.filter_by(
-                    username=current_user.username,
-                    task_type='training',
-                    status='pending'
-                ).filter(UserTask.notes.like(f'video_id:{video.id}%')).first()
-                
-                if not existing_task:
-                    # Create task for incomplete training video
-                    task = UserTask(
-                        username=current_user.username,
-                        task_title=f"Complete Training: {video.title}",
-                        task_description=f"Please watch and complete the training video: {video.title}",
-                        task_type='training',
-                        priority='normal',
-                        status='pending',
-                        assigned_by=user_new_hire.created_by or 'system',
-                        notes=f'video_id:{video.id}'
-                    )
-                    db.session.add(task)
-                    db.session.commit()
-    
-    # Refresh tasks list after potential additions
-    user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
-        UserTask.priority.desc(),
-        UserTask.due_date.asc(),
-        UserTask.created_at.desc()
-    ).all()
-    
-    # Check document tasks and update completion status
-    for task in user_tasks:
-        if task.task_type == 'document' and task.document_id:
-            document = Document.query.get(task.document_id)
-            if document:
-                # Check if all required signature fields are signed
-                required_fields = DocumentSignatureField.query.filter_by(
-                    document_id=task.document_id,
-                    is_required=True
-                ).all()
-                
-                if required_fields:
-                    # Check if all required fields are signed (using helper to handle deleted fields)
-                    all_signed = all(is_signature_field_signed(task.document_id, f, current_user.username) for f in required_fields)
-                    
-                    if all_signed and task.status != 'completed':
-                        # Auto-complete the task
-                        task.status = 'completed'
-                        task.completed_at = datetime.utcnow()
-                        db.session.commit()
-                    
-                    # Update assignment completion status
-                    assignment = DocumentAssignment.query.filter_by(
-                        document_id=task.document_id,
-                        username=current_user.username
-                    ).first()
-                    if assignment:
-                        assignment.is_completed = all_signed
-                        if all_signed and not assignment.completed_at:
-                            assignment.completed_at = datetime.utcnow()
-                        db.session.commit()
+    try:
+        is_admin = current_user.is_admin()
         
-        # Check training video tasks and update completion status
-        elif task.task_type == 'training' and task.notes:
-            # Extract video_id from notes (format: "video_id:123")
-            if task.notes.startswith('video_id:'):
-                try:
-                    video_id = int(task.notes.split(':')[1])
-                    # Check if video is completed
-                    progress = UserTrainingProgress.query.filter_by(
-                        username=current_user.username,
-                        video_id=video_id,
-                        is_completed=True,
-                        is_passed=True
-                    ).first()
-                    
-                    if progress and task.status != 'completed':
-                        # Auto-complete the task
-                        task.status = 'completed'
-                        task.completed_at = datetime.utcnow()
-                        db.session.commit()
-                except (ValueError, IndexError):
-                    pass
-    user_first_name = user_new_hire.first_name if user_new_hire else current_user.username
-    user_full_name = f"{user_new_hire.first_name} {user_new_hire.last_name}" if user_new_hire else current_user.username
-    
-    # Count tasks by status
-    pending_tasks = [t for t in user_tasks if t.status == 'pending']
-    in_progress_tasks = [t for t in user_tasks if t.status == 'in_progress']
-    completed_tasks = [t for t in user_tasks if t.status == 'completed']
-    
-    # Extract video_id from training tasks for easier template access
-    for task in user_tasks:
-        if task.task_type == 'training' and task.notes and task.notes.startswith('video_id:'):
+        # Get tasks assigned to current user
+        try:
+            user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+                UserTask.priority.desc(),
+                UserTask.due_date.asc(),
+                UserTask.created_at.desc()
+            ).all()
+        except Exception as e:
+            user_tasks = []
+        
+        # Get new hire record for current user
+        try:
+            user_new_hire = NewHire.query.filter_by(username=current_user.username).first()
+        except Exception as e:
+            user_new_hire = None
+        
+        # Ensure tasks exist for incomplete training videos
+        if user_new_hire:
             try:
-                task.video_id = int(task.notes.split(':')[1])
-            except (ValueError, IndexError):
+                required_videos = list(user_new_hire.required_training_videos)
+                for video in required_videos:
+                    try:
+                        # Check if video is completed
+                        progress = UserTrainingProgress.query.filter_by(
+                            username=current_user.username,
+                            video_id=video.id,
+                            is_completed=True,
+                            is_passed=True
+                        ).first()
+                        
+                        # Only create task if video is not completed
+                        if not progress:
+                            # Check if task already exists for this video
+                            existing_task = UserTask.query.filter_by(
+                                username=current_user.username,
+                                task_type='training',
+                                status='pending'
+                            ).filter(UserTask.notes.like(f'video_id:{video.id}%')).first()
+                            
+                            if not existing_task:
+                                # Create task for incomplete training video
+                                task = UserTask(
+                                    username=current_user.username,
+                                    task_title=f"Complete Training: {video.title}",
+                                    task_description=f"Please watch and complete the training video: {video.title}",
+                                    task_type='training',
+                                    priority='normal',
+                                    status='pending',
+                                    assigned_by=user_new_hire.created_by or 'system',
+                                    notes=f'video_id:{video.id}'
+                                )
+                                db.session.add(task)
+                                db.session.commit()
+                    except Exception as e:
+                        # Skip this video if there's an error
+                        continue
+            except Exception as e:
+                # If there's an error getting videos, continue without creating tasks
+                pass
+        
+        # Refresh tasks list after potential additions
+        try:
+            user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+                UserTask.priority.desc(),
+                UserTask.due_date.asc(),
+                UserTask.created_at.desc()
+            ).all()
+        except Exception as e:
+            user_tasks = []
+        
+        # Check document tasks and update completion status
+        for task in user_tasks:
+            try:
+                if task.task_type == 'document' and task.document_id:
+                    try:
+                        document = Document.query.get(task.document_id)
+                        if document:
+                            # Check if all required signature fields are signed
+                            try:
+                                required_fields = DocumentSignatureField.query.filter_by(
+                                    document_id=task.document_id,
+                                    is_required=True
+                                ).all()
+                                
+                                if required_fields:
+                                    # Check if all required fields are signed (using helper to handle deleted fields)
+                                    try:
+                                        all_signed = all(is_signature_field_signed(task.document_id, f, current_user.username) for f in required_fields)
+                                        
+                                        if all_signed and task.status != 'completed':
+                                            # Auto-complete the task
+                                            task.status = 'completed'
+                                            task.completed_at = datetime.utcnow()
+                                            db.session.commit()
+                                        
+                                        # Update assignment completion status
+                                        assignment = DocumentAssignment.query.filter_by(
+                                            document_id=task.document_id,
+                                            username=current_user.username
+                                        ).first()
+                                        if assignment:
+                                            assignment.is_completed = all_signed
+                                            if all_signed and not assignment.completed_at:
+                                                assignment.completed_at = datetime.utcnow()
+                                            db.session.commit()
+                                    except Exception as e:
+                                        # If checking signatures fails, skip this task
+                                        continue
+                            except Exception as e:
+                                # If getting required fields fails, skip this task
+                                continue
+                    except Exception as e:
+                        # If getting document fails, skip this task
+                        continue
+                
+                # Check training video tasks and update completion status
+                elif task.task_type == 'training' and task.notes:
+                    # Extract video_id from notes (format: "video_id:123")
+                    if task.notes.startswith('video_id:'):
+                        try:
+                            video_id = int(task.notes.split(':')[1])
+                            # Check if video is completed
+                            progress = UserTrainingProgress.query.filter_by(
+                                username=current_user.username,
+                                video_id=video_id,
+                                is_completed=True,
+                                is_passed=True
+                            ).first()
+                            
+                            if progress and task.status != 'completed':
+                                # Auto-complete the task
+                                task.status = 'completed'
+                                task.completed_at = datetime.utcnow()
+                                db.session.commit()
+                        except (ValueError, IndexError, Exception):
+                            # Skip if there's an error parsing or querying
+                            pass
+            except Exception as e:
+                # If processing this task fails, skip it
+                continue
+        
+        try:
+            user_first_name = user_new_hire.first_name if user_new_hire else current_user.username
+            user_full_name = f"{user_new_hire.first_name} {user_new_hire.last_name}" if user_new_hire else current_user.username
+        except Exception as e:
+            user_first_name = current_user.username
+            user_full_name = current_user.username
+        
+        # Count tasks by status
+        pending_tasks = [t for t in user_tasks if t.status == 'pending']
+        in_progress_tasks = [t for t in user_tasks if t.status == 'in_progress']
+        completed_tasks = [t for t in user_tasks if t.status == 'completed']
+        
+        # Extract video_id from training tasks for easier template access
+        for task in user_tasks:
+            try:
+                if task.task_type == 'training' and task.notes and task.notes.startswith('video_id:'):
+                    try:
+                        task.video_id = int(task.notes.split(':')[1])
+                    except (ValueError, IndexError):
+                        task.video_id = None
+                else:
+                    task.video_id = None
+            except Exception as e:
                 task.video_id = None
-        else:
-            task.video_id = None
-    
-    return render_template_string('''
+        
+        return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
@@ -2144,6 +2284,45 @@ def user_tasks():
     </html>
     ''', is_admin=is_admin, user_first_name=user_first_name, user_full_name=user_full_name,
          user_tasks=user_tasks, pending_tasks=pending_tasks, in_progress_tasks=in_progress_tasks, completed_tasks=completed_tasks)
+    except Exception as e:
+        # Log the error for debugging
+        import traceback
+        app.logger.error(f'Error in user_tasks for {current_user.username if current_user else "unknown"}: {str(e)}')
+        app.logger.error(traceback.format_exc())
+        
+        # Set defaults to prevent template errors
+        is_admin = current_user.is_admin() if current_user else False
+        user_first_name = current_user.username if current_user else "User"
+        user_full_name = current_user.username if current_user else "User"
+        user_tasks = []
+        pending_tasks = []
+        in_progress_tasks = []
+        completed_tasks = []
+        
+        # Return a basic tasks page with error message
+        flash(f'Error loading tasks: {str(e)}. Some data may be missing.', 'error')
+        
+        return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>My Tasks - Onboarding App</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body { font-family: 'URW Form', Arial, sans-serif; padding: 20px; background: #f5f5f5; }
+                .error-box { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+                .error-box strong { color: #856404; }
+            </style>
+        </head>
+        <body>
+            <div class="error-box">
+                <strong>⚠️ Tasks Page Error</strong>
+                <p>There was an error loading your tasks. Please refresh the page or contact support if the problem persists.</p>
+            </div>
+            <p><a href="{{ url_for('user_tasks') }}">Refresh Tasks</a> | <a href="{{ url_for('dashboard') }}">Back to Dashboard</a></p>
+        </body>
+        </html>
+        ''')
 
 
 
@@ -3881,47 +4060,78 @@ def admin_dashboard():
         new_hires_with_progress = []
         
         for new_hire in all_new_hires:
-            # Training videos progress
-            required_videos = list(new_hire.required_training_videos)
-            total_videos = len(required_videos)
-            completed_videos = 0
-            
-            for video in required_videos:
-                progress = UserTrainingProgress.query.filter_by(
-                    username=new_hire.username,
-                    video_id=video.id,
-                    is_completed=True,
-                    is_passed=True
-                ).first()
-                if progress:
-                    completed_videos += 1
-            
-            # User tasks progress
-            all_user_tasks = UserTask.query.filter_by(username=new_hire.username).all()
-            total_user_tasks = len(all_user_tasks)
-            completed_user_tasks = len([t for t in all_user_tasks if t.status == 'completed'])
-            
-            # Checklist progress
-            checklist_completed = NewHireChecklist.query.filter_by(
-                new_hire_id=new_hire.id,
-                is_completed=True
-            ).count()
-            checklist_total = ChecklistItem.query.filter_by(is_active=True).count()
-            
-            # Calculate overall progress (training videos + user tasks + checklist items)
-            total_items = total_videos + total_user_tasks + checklist_total
-            completed_items = completed_videos + completed_user_tasks + checklist_completed
-            progress_percentage = int((completed_items / total_items * 100)) if total_items > 0 else 0
-            
-            new_hires_with_progress.append({
-                'new_hire': new_hire,
-                'progress': progress_percentage,
-                'completed': completed_items,
-                'total': total_items,
-                'training': {'completed': completed_videos, 'total': total_videos},
-                'tasks': {'completed': completed_user_tasks, 'total': total_user_tasks},
-                'checklist': {'completed': checklist_completed, 'total': checklist_total}
-            })
+            try:
+                # Training videos progress
+                required_videos = list(new_hire.required_training_videos)
+                total_videos = len(required_videos)
+                completed_videos = 0
+                
+                for video in required_videos:
+                    try:
+                        progress = UserTrainingProgress.query.filter_by(
+                            username=new_hire.username,
+                            video_id=video.id,
+                            is_completed=True,
+                            is_passed=True
+                        ).first()
+                        if progress:
+                            completed_videos += 1
+                    except Exception as e:
+                        # Skip this video if there's an error
+                        continue
+                
+                # User tasks progress
+                try:
+                    all_user_tasks = UserTask.query.filter_by(username=new_hire.username).all()
+                    total_user_tasks = len(all_user_tasks)
+                    completed_user_tasks = len([t for t in all_user_tasks if t.status == 'completed'])
+                except Exception as e:
+                    # If there's an error getting tasks, use defaults
+                    all_user_tasks = []
+                    total_user_tasks = 0
+                    completed_user_tasks = 0
+                
+                # Checklist progress
+                try:
+                    checklist_completed = NewHireChecklist.query.filter_by(
+                        new_hire_id=new_hire.id,
+                        is_completed=True
+                    ).count()
+                    checklist_total = ChecklistItem.query.filter_by(is_active=True).count()
+                except Exception as e:
+                    # If there's an error getting checklist, use defaults
+                    checklist_completed = 0
+                    checklist_total = 0
+                
+                # Calculate overall progress (training videos + user tasks + checklist items)
+                total_items = total_videos + total_user_tasks + checklist_total
+                completed_items = completed_videos + completed_user_tasks + checklist_completed
+                progress_percentage = int((completed_items / total_items * 100)) if total_items > 0 else 0
+                
+                new_hires_with_progress.append({
+                    'new_hire': new_hire,
+                    'progress': progress_percentage,
+                    'completed': completed_items,
+                    'total': total_items,
+                    'training': {'completed': completed_videos, 'total': total_videos},
+                    'tasks': {'completed': completed_user_tasks, 'total': total_user_tasks},
+                    'checklist': {'completed': checklist_completed, 'total': checklist_total}
+                })
+            except Exception as e:
+                # If there's an error processing this new hire, skip it or use defaults
+                import traceback
+                app.logger.error(f'Error processing new hire {new_hire.username}: {str(e)}')
+                app.logger.error(traceback.format_exc())
+                # Add with default values so the dashboard still shows
+                new_hires_with_progress.append({
+                    'new_hire': new_hire,
+                    'progress': 0,
+                    'completed': 0,
+                    'total': 0,
+                    'training': {'completed': 0, 'total': 0},
+                    'tasks': {'completed': 0, 'total': 0},
+                    'checklist': {'completed': 0, 'total': 0}
+                })
         
         # Get recent activity (new hires ordered by creation date)
         recent_activity = all_new_hires[:10]
@@ -15885,154 +16095,229 @@ def delete_external_link(link_id):
 @admin_required
 def admin_reports():
     """Admin reports page with comprehensive statistics"""
-    # Overall statistics
-    total_new_hires = NewHire.query.count()
-    total_users = UserModel.query.count()
-    total_documents = Document.query.count()
-    total_training_videos = TrainingVideo.query.filter_by(is_active=True).count()
-    total_checklist_items = ChecklistItem.query.filter_by(is_active=True).count()
-    
-    # Training statistics
-    total_training_progress = UserTrainingProgress.query.count()
-    completed_trainings = UserTrainingProgress.query.filter_by(is_completed=True, is_passed=True).count()
-    failed_trainings = UserTrainingProgress.query.filter_by(is_completed=True, is_passed=False).count()
-    in_progress_trainings = UserTrainingProgress.query.filter_by(is_completed=False).count()
-    
-    # Document statistics
-    visible_documents = Document.query.filter_by(is_visible=True).count()
-    documents_with_signatures = Document.query.join(DocumentSignatureField).distinct().count()
-    total_signatures = DocumentSignature.query.count()
-    unique_signed_users = db.session.query(DocumentSignature.username).distinct().count()
-    
-    # Checklist statistics
-    total_checklist_completions = NewHireChecklist.query.filter_by(is_completed=True).count()
-    
-    # User progress statistics
-    all_new_hires = NewHire.query.all()
-    user_progress_stats = []
-    for new_hire in all_new_hires:
-        # Training progress
-        required_videos = list(new_hire.required_training_videos)
-        completed_videos = 0
-        for video in required_videos:
-            progress = UserTrainingProgress.query.filter_by(
-                username=new_hire.username,
-                video_id=video.id,
-                is_completed=True,
-                is_passed=True
-            ).first()
-            if progress:
-                completed_videos += 1
+    try:
+        # Overall statistics
+        try:
+            total_new_hires = NewHire.query.count()
+            total_users = UserModel.query.count()
+            total_documents = Document.query.count()
+            total_training_videos = TrainingVideo.query.filter_by(is_active=True).count()
+            total_checklist_items = ChecklistItem.query.filter_by(is_active=True).count()
+        except Exception as e:
+            total_new_hires = 0
+            total_users = 0
+            total_documents = 0
+            total_training_videos = 0
+            total_checklist_items = 0
         
-        # Task progress
-        user_tasks = UserTask.query.filter_by(username=new_hire.username).all()
-        completed_tasks = len([t for t in user_tasks if t.status == 'completed'])
-        total_tasks = len(user_tasks)
+        # Training statistics
+        try:
+            total_training_progress = UserTrainingProgress.query.count()
+            completed_trainings = UserTrainingProgress.query.filter_by(is_completed=True, is_passed=True).count()
+            failed_trainings = UserTrainingProgress.query.filter_by(is_completed=True, is_passed=False).count()
+            in_progress_trainings = UserTrainingProgress.query.filter_by(is_completed=False).count()
+        except Exception as e:
+            total_training_progress = 0
+            completed_trainings = 0
+            failed_trainings = 0
+            in_progress_trainings = 0
         
-        # Checklist progress
-        checklist_completed = NewHireChecklist.query.filter_by(
-            new_hire_id=new_hire.id,
-            is_completed=True
-        ).count()
-        checklist_total = ChecklistItem.query.filter_by(is_active=True).count()
+        # Document statistics
+        try:
+            visible_documents = Document.query.filter_by(is_visible=True).count()
+            documents_with_signatures = Document.query.join(DocumentSignatureField).distinct().count()
+            total_signatures = DocumentSignature.query.count()
+            unique_signed_users = db.session.query(DocumentSignature.username).distinct().count()
+        except Exception as e:
+            visible_documents = 0
+            documents_with_signatures = 0
+            total_signatures = 0
+            unique_signed_users = 0
         
-        # Calculate overall progress
-        total_items = len(required_videos) + total_tasks + checklist_total
-        completed_items = completed_videos + completed_tasks + checklist_completed
-        overall_progress = int((completed_items / total_items * 100)) if total_items > 0 else 0
+        # Checklist statistics
+        try:
+            total_checklist_completions = NewHireChecklist.query.filter_by(is_completed=True).count()
+        except Exception as e:
+            total_checklist_completions = 0
         
-        user_progress_stats.append({
-            'new_hire': new_hire,
-            'training': {'completed': completed_videos, 'total': len(required_videos)},
-            'tasks': {'completed': completed_tasks, 'total': total_tasks},
-            'checklist': {'completed': checklist_completed, 'total': checklist_total},
-            'overall_progress': overall_progress
-        })
-    
-    # Sort by overall progress
-    user_progress_stats.sort(key=lambda x: x['overall_progress'], reverse=True)
-    
-    # Department statistics
-    department_stats = {}
-    for new_hire in all_new_hires:
-        dept = new_hire.department or 'Unassigned'
-        if dept not in department_stats:
-            department_stats[dept] = {'count': 0, 'completed': 0}
-        department_stats[dept]['count'] += 1
-        # Count completed users in this department
-        user_stats = next((s for s in user_progress_stats if s['new_hire'].id == new_hire.id), None)
-        if user_stats and user_stats['overall_progress'] == 100:
-            department_stats[dept]['completed'] += 1
-    
-    # Detailed Training Information - per user and video
-    training_details = []
-    all_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.title).all()
-    
-    for new_hire in all_new_hires:
-        for video in all_videos:
-            # Get the latest progress record for this user and video
-            progress = UserTrainingProgress.query.filter_by(
-                username=new_hire.username,
-                video_id=video.id
-            ).order_by(UserTrainingProgress.attempt_number.desc()).first()
-            
-            if progress:
-                # Calculate watch percentage if video has duration
-                watch_percentage = 0
-                if video.duration and video.duration > 0:
-                    watch_percentage = min(100, (progress.time_watched / video.duration) * 100)
+        # User progress statistics
+        try:
+            all_new_hires = NewHire.query.all()
+        except Exception as e:
+            all_new_hires = []
+        
+        user_progress_stats = []
+        for new_hire in all_new_hires:
+            try:
+                # Training progress
+                try:
+                    required_videos = list(new_hire.required_training_videos)
+                    completed_videos = 0
+                    for video in required_videos:
+                        try:
+                            progress = UserTrainingProgress.query.filter_by(
+                                username=new_hire.username,
+                                video_id=video.id,
+                                is_completed=True,
+                                is_passed=True
+                            ).first()
+                            if progress:
+                                completed_videos += 1
+                        except Exception as e:
+                            continue
+                except Exception as e:
+                    required_videos = []
+                    completed_videos = 0
                 
-                # Format time watched
-                time_watched_min = int(progress.time_watched // 60)
-                time_watched_sec = int(progress.time_watched % 60)
-                time_watched_str = f"{time_watched_min}m {time_watched_sec}s"
+                # Task progress
+                try:
+                    user_tasks = UserTask.query.filter_by(username=new_hire.username).all()
+                    completed_tasks = len([t for t in user_tasks if t.status == 'completed'])
+                    total_tasks = len(user_tasks)
+                except Exception as e:
+                    completed_tasks = 0
+                    total_tasks = 0
                 
-                # Format video duration
-                video_duration_min = int(video.duration // 60) if video.duration else 0
-                video_duration_sec = int(video.duration % 60) if video.duration else 0
-                video_duration_str = f"{video_duration_min}m {video_duration_sec}s" if video.duration else "N/A"
+                # Checklist progress
+                try:
+                    checklist_completed = NewHireChecklist.query.filter_by(
+                        new_hire_id=new_hire.id,
+                        is_completed=True
+                    ).count()
+                    checklist_total = ChecklistItem.query.filter_by(is_active=True).count()
+                except Exception as e:
+                    checklist_completed = 0
+                    checklist_total = 0
                 
-                training_details.append({
-                    'user': new_hire,
-                    'video': video,
-                    'progress': progress,
-                    'watched': True,
-                    'score': progress.score,
-                    'watch_percentage': watch_percentage,
-                    'time_watched': time_watched_str,
-                    'video_duration': video_duration_str,
-                    'is_passed': progress.is_passed,
-                    'is_completed': progress.is_completed,
-                    'attempt_number': progress.attempt_number,
-                    'started_at': progress.started_at,
-                    'completed_at': progress.completed_at
+                # Calculate overall progress
+                total_items = len(required_videos) + total_tasks + checklist_total
+                completed_items = completed_videos + completed_tasks + checklist_completed
+                overall_progress = int((completed_items / total_items * 100)) if total_items > 0 else 0
+                
+                user_progress_stats.append({
+                    'new_hire': new_hire,
+                    'training': {'completed': completed_videos, 'total': len(required_videos)},
+                    'tasks': {'completed': completed_tasks, 'total': total_tasks},
+                    'checklist': {'completed': checklist_completed, 'total': checklist_total},
+                    'overall_progress': overall_progress
                 })
-            else:
-                # User hasn't watched this video yet
-                video_duration_min = int(video.duration // 60) if video.duration else 0
-                video_duration_sec = int(video.duration % 60) if video.duration else 0
-                video_duration_str = f"{video_duration_min}m {video_duration_sec}s" if video.duration else "N/A"
-                
-                training_details.append({
-                    'user': new_hire,
-                    'video': video,
-                    'progress': None,
-                    'watched': False,
-                    'score': None,
-                    'watch_percentage': 0,
-                    'time_watched': '0m 0s',
-                    'video_duration': video_duration_str,
-                    'is_passed': False,
-                    'is_completed': False,
-                    'attempt_number': 0,
-                    'started_at': None,
-                    'completed_at': None
-                })
-    
-    # Sort training details by user name, then video title
-    training_details.sort(key=lambda x: (x['user'].last_name, x['user'].first_name, x['video'].title))
-    
-    return render_template_string('''
+            except Exception as e:
+                # If there's an error processing this new hire, skip it
+                continue
+        
+        # Sort by overall progress
+        try:
+            user_progress_stats.sort(key=lambda x: x['overall_progress'], reverse=True)
+        except Exception as e:
+            pass
+        
+        # Department statistics
+        department_stats = {}
+        try:
+            for new_hire in all_new_hires:
+                try:
+                    dept = new_hire.department or 'Unassigned'
+                    if dept not in department_stats:
+                        department_stats[dept] = {'count': 0, 'completed': 0}
+                    department_stats[dept]['count'] += 1
+                    # Count completed users in this department
+                    user_stats = next((s for s in user_progress_stats if s['new_hire'].id == new_hire.id), None)
+                    if user_stats and user_stats['overall_progress'] == 100:
+                        department_stats[dept]['completed'] += 1
+                except Exception as e:
+                    continue
+        except Exception as e:
+            department_stats = {}
+        
+        # Detailed Training Information - per user and video
+        training_details = []
+        try:
+            all_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.title).all()
+        except Exception as e:
+            all_videos = []
+        
+        for new_hire in all_new_hires:
+            for video in all_videos:
+                try:
+                    # Get the latest progress record for this user and video
+                    try:
+                        progress = UserTrainingProgress.query.filter_by(
+                            username=new_hire.username,
+                            video_id=video.id
+                        ).order_by(UserTrainingProgress.attempt_number.desc()).first()
+                    except Exception as e:
+                        progress = None
+                    
+                    if progress:
+                        try:
+                            # Calculate watch percentage if video has duration
+                            watch_percentage = 0
+                            if video.duration and video.duration > 0:
+                                watch_percentage = min(100, (progress.time_watched / video.duration) * 100)
+                            
+                            # Format time watched
+                            time_watched_min = int(progress.time_watched // 60)
+                            time_watched_sec = int(progress.time_watched % 60)
+                            time_watched_str = f"{time_watched_min}m {time_watched_sec}s"
+                            
+                            # Format video duration
+                            video_duration_min = int(video.duration // 60) if video.duration else 0
+                            video_duration_sec = int(video.duration % 60) if video.duration else 0
+                            video_duration_str = f"{video_duration_min}m {video_duration_sec}s" if video.duration else "N/A"
+                            
+                            training_details.append({
+                                'user': new_hire,
+                                'video': video,
+                                'progress': progress,
+                                'watched': True,
+                                'score': progress.score,
+                                'watch_percentage': watch_percentage,
+                                'time_watched': time_watched_str,
+                                'video_duration': video_duration_str,
+                                'is_passed': progress.is_passed,
+                                'is_completed': progress.is_completed,
+                                'attempt_number': progress.attempt_number,
+                                'started_at': progress.started_at,
+                                'completed_at': progress.completed_at
+                            })
+                        except Exception as e:
+                            # If there's an error processing progress, skip it
+                            continue
+                    else:
+                        # User hasn't watched this video yet
+                        try:
+                            video_duration_min = int(video.duration // 60) if video.duration else 0
+                            video_duration_sec = int(video.duration % 60) if video.duration else 0
+                            video_duration_str = f"{video_duration_min}m {video_duration_sec}s" if video.duration else "N/A"
+                            
+                            training_details.append({
+                                'user': new_hire,
+                                'video': video,
+                                'progress': None,
+                                'watched': False,
+                                'score': None,
+                                'watch_percentage': 0,
+                                'time_watched': '0m 0s',
+                                'video_duration': video_duration_str,
+                                'is_passed': False,
+                                'is_completed': False,
+                                'attempt_number': 0,
+                                'started_at': None,
+                                'completed_at': None
+                            })
+                        except Exception as e:
+                            continue
+                except Exception as e:
+                    # If there's an error processing this user/video combination, skip it
+                    continue
+        
+        # Sort training details by user name, then video title
+        try:
+            training_details.sort(key=lambda x: (x['user'].last_name, x['user'].first_name, x['video'].title))
+        except Exception as e:
+            pass
+        
+        return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
@@ -16638,6 +16923,55 @@ def admin_reports():
          total_checklist_completions=total_checklist_completions,
          user_progress_stats=user_progress_stats, department_stats=department_stats,
          training_details=training_details)
+    except Exception as e:
+        # Log the error for debugging
+        import traceback
+        app.logger.error(f'Error in admin_reports: {str(e)}')
+        app.logger.error(traceback.format_exc())
+        
+        # Set defaults to prevent template errors
+        total_new_hires = 0
+        total_users = 0
+        total_documents = 0
+        total_training_videos = 0
+        total_checklist_items = 0
+        total_training_progress = 0
+        completed_trainings = 0
+        failed_trainings = 0
+        in_progress_trainings = 0
+        visible_documents = 0
+        documents_with_signatures = 0
+        total_signatures = 0
+        unique_signed_users = 0
+        total_checklist_completions = 0
+        user_progress_stats = []
+        department_stats = {}
+        training_details = []
+        
+        # Return a basic reports page with error message
+        flash(f'Error loading reports: {str(e)}. Some data may be missing.', 'error')
+        
+        return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Reports - Onboarding App</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body { font-family: 'URW Form', Arial, sans-serif; padding: 20px; background: #f5f5f5; }
+                .error-box { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+                .error-box strong { color: #856404; }
+            </style>
+        </head>
+        <body>
+            <div class="error-box">
+                <strong>⚠️ Reports Page Error</strong>
+                <p>There was an error loading the reports. Please refresh the page or contact support if the problem persists.</p>
+            </div>
+            <p><a href="{{ url_for('admin_reports') }}">Refresh Reports</a> | <a href="{{ url_for('admin_dashboard') }}">Back to Dashboard</a></p>
+        </body>
+        </html>
+        ''')
 
 
 @app.route('/admin/training')
