@@ -2807,6 +2807,7 @@ def view_all_new_hires():
     new_hires_with_progress = []
     
     for new_hire in all_new_hires:
+        # Training videos progress
         required_videos = list(new_hire.required_training_videos)
         total_videos = len(required_videos)
         completed_videos = 0
@@ -2821,12 +2822,31 @@ def view_all_new_hires():
             if progress:
                 completed_videos += 1
         
-        progress_percentage = int((completed_videos / total_videos * 100)) if total_videos > 0 else 0
+        # User tasks progress
+        all_user_tasks = UserTask.query.filter_by(username=new_hire.username).all()
+        total_user_tasks = len(all_user_tasks)
+        completed_user_tasks = len([t for t in all_user_tasks if t.status == 'completed'])
+        
+        # Checklist progress
+        checklist_completed = NewHireChecklist.query.filter_by(
+            new_hire_id=new_hire.id,
+            is_completed=True
+        ).count()
+        checklist_total = ChecklistItem.query.filter_by(is_active=True).count()
+        
+        # Calculate overall progress (training videos + user tasks + checklist items)
+        total_items = total_videos + total_user_tasks + checklist_total
+        completed_items = completed_videos + completed_user_tasks + checklist_completed
+        progress_percentage = int((completed_items / total_items * 100)) if total_items > 0 else 0
+        
         new_hires_with_progress.append({
             'new_hire': new_hire,
             'progress': progress_percentage,
-            'completed': completed_videos,
-            'total': total_videos
+            'completed': completed_items,
+            'total': total_items,
+            'training': {'completed': completed_videos, 'total': total_videos},
+            'tasks': {'completed': completed_user_tasks, 'total': total_user_tasks},
+            'checklist': {'completed': checklist_completed, 'total': checklist_total}
         })
     
     admin_name = current_user.username
@@ -3861,6 +3881,7 @@ def admin_dashboard():
         new_hires_with_progress = []
         
         for new_hire in all_new_hires:
+            # Training videos progress
             required_videos = list(new_hire.required_training_videos)
             total_videos = len(required_videos)
             completed_videos = 0
@@ -3875,12 +3896,31 @@ def admin_dashboard():
                 if progress:
                     completed_videos += 1
             
-            progress_percentage = int((completed_videos / total_videos * 100)) if total_videos > 0 else 0
+            # User tasks progress
+            all_user_tasks = UserTask.query.filter_by(username=new_hire.username).all()
+            total_user_tasks = len(all_user_tasks)
+            completed_user_tasks = len([t for t in all_user_tasks if t.status == 'completed'])
+            
+            # Checklist progress
+            checklist_completed = NewHireChecklist.query.filter_by(
+                new_hire_id=new_hire.id,
+                is_completed=True
+            ).count()
+            checklist_total = ChecklistItem.query.filter_by(is_active=True).count()
+            
+            # Calculate overall progress (training videos + user tasks + checklist items)
+            total_items = total_videos + total_user_tasks + checklist_total
+            completed_items = completed_videos + completed_user_tasks + checklist_completed
+            progress_percentage = int((completed_items / total_items * 100)) if total_items > 0 else 0
+            
             new_hires_with_progress.append({
                 'new_hire': new_hire,
                 'progress': progress_percentage,
-                'completed': completed_videos,
-                'total': total_videos
+                'completed': completed_items,
+                'total': total_items,
+                'training': {'completed': completed_videos, 'total': total_videos},
+                'tasks': {'completed': completed_user_tasks, 'total': total_user_tasks},
+                'checklist': {'completed': checklist_completed, 'total': checklist_total}
             })
         
         # Get recent activity (new hires ordered by creation date)
@@ -12111,58 +12151,81 @@ def download_signed_document(doc_id, username):
 @admin_required
 def view_new_hire_details(username):
     """View detailed information about a new hire including quiz results and signed forms"""
-    new_hire = NewHire.query.filter_by(username=username).first()
-    if not new_hire:
-        flash('New hire not found.', 'error')
-        return redirect(url_for('admin_dashboard'))
-    
-    # Get training video progress and quiz results
-    required_videos = list(new_hire.required_training_videos)
-    video_progress = []
-    
-    for video in required_videos:
-        progress = UserTrainingProgress.query.filter_by(
-            username=username,
-            video_id=video.id
-        ).order_by(UserTrainingProgress.attempt_number.desc()).first()
+    try:
+        new_hire = NewHire.query.filter_by(username=username).first()
+        if not new_hire:
+            flash('New hire not found.', 'error')
+            return redirect(url_for('admin_dashboard'))
         
-        # Get quiz responses for this video
-        quiz_responses = []
-        if progress:
-            responses = UserQuizResponse.query.filter_by(
-                progress_id=progress.id
-            ).all()
-            quiz_responses = responses
+        # Get training video progress and quiz results
+        required_videos = list(new_hire.required_training_videos)
+        video_progress = []
         
-        video_progress.append({
-            'video': video,
-            'progress': progress,
-            'quiz_responses': quiz_responses
-        })
-    
-    # Get signed documents
-    signed_documents = []
-    all_signatures = DocumentSignature.query.filter_by(username=username).all()
-    
-    # Group signatures by document
-    doc_signatures = {}
-    for sig in all_signatures:
-        doc_id = sig.document_id
-        if doc_id not in doc_signatures:
-            doc = Document.query.get(doc_id)
-            if doc:
-                doc_signatures[doc_id] = {
-                    'document': doc,
-                    'signatures': []
-                }
-        doc_signatures[doc_id]['signatures'].append(sig)
-    
-    signed_documents = list(doc_signatures.values())
-    
-    # Get user tasks
-    user_tasks = UserTask.query.filter_by(username=username).all()
-    
-    return render_template_string('''
+        for video in required_videos:
+            try:
+                progress = UserTrainingProgress.query.filter_by(
+                    username=username,
+                    video_id=video.id
+                ).order_by(UserTrainingProgress.attempt_number.desc()).first()
+                
+                # Get quiz responses for this video
+                quiz_responses = []
+                if progress:
+                    responses = UserQuizResponse.query.filter_by(
+                        progress_id=progress.id
+                    ).all()
+                    quiz_responses = responses
+                
+                video_progress.append({
+                    'video': video,
+                    'progress': progress,
+                    'quiz_responses': quiz_responses
+                })
+            except Exception as e:
+                # If there's an error with a specific video, skip it
+                video_progress.append({
+                    'video': video,
+                    'progress': None,
+                    'quiz_responses': []
+                })
+        
+        # Get signed documents
+        signed_documents = []
+        try:
+            all_signatures = DocumentSignature.query.filter_by(username=username).all()
+            
+            # Group signatures by document
+            doc_signatures = {}
+            for sig in all_signatures:
+                try:
+                    doc_id = sig.document_id
+                    if doc_id not in doc_signatures:
+                        doc = Document.query.get(doc_id)
+                        if doc:
+                            doc_signatures[doc_id] = {
+                                'document': doc,
+                                'signatures': []
+                            }
+                    # Only append if document exists in doc_signatures
+                    if doc_id in doc_signatures:
+                        doc_signatures[doc_id]['signatures'].append(sig)
+                except Exception as e:
+                    # Skip signatures that cause errors
+                    continue
+            
+            signed_documents = list(doc_signatures.values())
+        except Exception as e:
+            # If there's an error getting signatures, use empty list
+            signed_documents = []
+        
+        # Get user tasks
+        try:
+            user_tasks = UserTask.query.filter_by(username=username).all()
+        except Exception as e:
+            # If there's an error getting tasks, use empty list
+            user_tasks = []
+        
+        return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
@@ -12625,14 +12688,18 @@ def view_new_hire_details(username):
                     <div class="document-item">
                         <h3 style="margin-bottom: 10px;">{{ doc_data.document.original_filename }}</h3>
                         <p style="color: #666; margin-bottom: 10px;">Signed {{ doc_data.signatures|length }} field(s)</p>
+                        {% if doc_data.signatures %}
                         <div class="signature-preview">
                             {% for sig in doc_data.signatures %}
+                            {% if sig.signature_image %}
                             <img src="data:image/png;base64,{{ sig.signature_image }}" alt="Signature">
+                            {% endif %}
                             {% endfor %}
                         </div>
                         <p style="color: #666; font-size: 0.9em; margin-top: 10px;">
-                            Signed on: {{ doc_data.signatures[0].signed_at.strftime('%B %d, %Y at %I:%M %p') if doc_data.signatures[0].signed_at else 'Unknown date' }}
+                            Signed on: {{ doc_data.signatures[0].signed_at.strftime('%B %d, %Y at %I:%M %p') if doc_data.signatures and doc_data.signatures[0] and doc_data.signatures[0].signed_at else 'Unknown date' }}
                         </p>
+                        {% endif %}
                         <a href="{{ url_for('download_signed_document', doc_id=doc_data.document.id, username=username) }}" class="btn" style="margin-top: 10px;">📥 Download Signed Copy</a>
                     </div>
                     {% endfor %}
@@ -12679,6 +12746,13 @@ def view_new_hire_details(username):
     </html>
     ''', new_hire=new_hire, video_progress=video_progress, signed_documents=signed_documents, 
          user_tasks=user_tasks, username=username)
+    except Exception as e:
+        # Log the error for debugging
+        import traceback
+        app.logger.error(f'Error in view_new_hire_details for {username}: {str(e)}')
+        app.logger.error(traceback.format_exc())
+        flash(f'Error loading new hire details: {str(e)}', 'error')
+        return redirect(url_for('admin_dashboard'))
 
 
 @app.route('/admin/new-hire/<username>/update', methods=['POST'])
