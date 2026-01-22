@@ -57,10 +57,17 @@ SQLALCHEMY_ENGINE_OPTIONS = {
 }
 
 # Session Configuration
-SESSION_COOKIE_SECURE = False  # Set to True in production with HTTPS
+# SESSION_COOKIE_SECURE will be set dynamically based on request scheme
+# When HTTPS is enabled, set this to True in app.py after checking request
+SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
 PERMANENT_SESSION_LIFETIME = 3600  # 1 hour
+
+# HTTPS/Proxy Configuration
+# When behind IIS with HTTPS, Flask needs to trust proxy headers
+PREFERRED_URL_SCHEME = os.environ.get('PREFERRED_URL_SCHEME', 'http')  # Change to 'https' when HTTPS is enabled
+PROXY_FIX = os.environ.get('PROXY_FIX', 'False').lower() == 'true'  # Enable if behind reverse proxy
 
 # IIS Windows Authentication Headers
 # IIS passes authenticated user info in these headers

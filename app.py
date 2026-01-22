@@ -4,6 +4,7 @@ Windows Domain Authentication with Admin and User roles
 """
 from flask import Flask, render_template_string, redirect, url_for, request, flash, jsonify, send_file, send_from_directory
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
+from sqlalchemy import exists
 from auth import authenticate_user, login_required, admin_required, User, get_windows_user, check_user_can_login_as_admin
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
@@ -50,6 +51,27 @@ app.config['VIDEO_UPLOAD_FOLDER'] = BASE_DIR / 'uploads' / 'videos'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size (for videos)
 app.config['ALLOWED_EXTENSIONS'] = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'svg'}
 app.config['ALLOWED_VIDEO_EXTENSIONS'] = {'mp4', 'webm', 'ogg', 'mov', 'avi'}
+
+# HTTPS/Security Configuration
+# Enable secure cookies when HTTPS is available (detected via request headers)
+# IIS passes X-Forwarded-Proto header when HTTPS is enabled
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour
+
+# Configure secure cookies based on request scheme
+# This will be set dynamically in a before_request handler
+@app.before_request
+def configure_secure_cookies():
+    """Configure secure cookies based on request scheme"""
+    # Check if request is HTTPS (via IIS X-Forwarded-Proto header or direct HTTPS)
+    is_https = (
+        request.headers.get('X-Forwarded-Proto', '').lower() == 'https' or
+        request.scheme == 'https' or
+        request.is_secure
+    )
+    app.config['SESSION_COOKIE_SECURE'] = is_https
+    app.config['PREFERRED_URL_SCHEME'] = 'https' if is_https else 'http'
 
 # Initialize extensions
 db.init_app(app)
@@ -161,6 +183,7 @@ def index():
     <html>
     <head>
         <title>Onboarding App - Authentication Error</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             body {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -178,6 +201,12 @@ def index():
                 box-shadow: 0 10px 25px rgba(0,0,0,0.2);
                 max-width: 500px;
                 text-align: center;
+            }
+            @media (max-width: 768px) {
+                .error-container {
+                    padding: 20px;
+                    margin: 20px;
+                }
             }
             h1, h2, h3, h4, h5, h6 { 
                 color: #000000; 
@@ -800,21 +829,154 @@ def dashboard():
                 color: #808080;
                 text-align: left;
             }
+            /* Mobile Menu Toggle */
+            .mobile-menu-toggle {
+                display: none;
+                background: none;
+                border: none;
+                color: #ffffff;
+                font-size: 1.5em;
+                cursor: pointer;
+                padding: 8px;
+            }
+            .mobile-nav {
+                display: none;
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                background: #000000;
+                flex-direction: column;
+                padding: 20px;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            }
+            .mobile-nav.show {
+                display: flex;
+            }
+            .mobile-nav a {
+                color: #ffffff;
+                text-decoration: none;
+                padding: 12px 0;
+                font-size: 1.1em;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            .mobile-nav a:last-child {
+                border-bottom: none;
+            }
+            .mobile-nav a:hover {
+                color: #FE0100;
+            }
+            
             @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
                 .nav-links {
                     display: none;
+                }
+                .mobile-menu-toggle {
+                    display: block;
+                }
+                .user-section {
+                    gap: 10px;
+                }
+                .user-dropdown span:not(.user-icon) {
+                    display: none;
+                }
+                .notification-icon {
+                    font-size: 1.2em;
+                }
+                .notification-dropdown {
+                    min-width: 280px;
+                    max-width: 90vw;
+                    right: -10px;
+                }
+                .main-content {
+                    grid-template-columns: 1fr;
+                    padding: 20px 15px;
+                    gap: 20px;
+                }
+                .sidebar-right {
+                    order: -1;
                 }
                 .welcome-section h1 {
                     font-size: 2em;
                 }
+                .welcome-section p {
+                    font-size: 1em;
+                }
+                .section {
+                    padding: 1.5rem;
+                    margin-bottom: 20px;
+                }
+                .section-title {
+                    font-size: 1.3em;
+                }
                 .videos-grid {
                     grid-template-columns: 1fr;
+                    gap: 15px;
                 }
-                .main-content {
-                    grid-template-columns: 1fr;
+                .task-card {
+                    flex-direction: column;
+                    align-items: stretch;
+                    gap: 15px;
                 }
-                .sidebar-right {
-                    order: -1;
+                .task-btn {
+                    width: 100%;
+                    text-align: center;
+                }
+                .quick-link {
+                    padding: 12px;
+                }
+                .quick-link-icon {
+                    width: 60px;
+                    height: 60px;
+                    font-size: 2em;
+                }
+                .quick-link-text {
+                    font-size: 1em;
+                }
+                .quick-link-description {
+                    font-size: 0.85em;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .welcome-section h1 {
+                    font-size: 1.5em;
+                }
+                .section {
+                    padding: 1rem;
+                }
+                .section-title {
+                    font-size: 1.2em;
+                }
+                .task-card {
+                    padding: 15px;
+                }
+                .btn, .task-btn, .video-btn {
+                    padding: 12px 16px;
+                    font-size: 0.95em;
+                    min-height: 44px;
                 }
             }
         </style>
@@ -825,6 +987,7 @@ def dashboard():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
+            <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
@@ -832,6 +995,15 @@ def dashboard():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% endif %}
+            </div>
+            <div class="mobile-nav" id="mobileNav">
+                <a href="{{ url_for('dashboard') }}">Home</a>
+                <a href="{{ url_for('user_tasks') }}">Tasks</a>
+                <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('profile') }}">Profile</a>
+                {% if is_admin %}
+                <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -1019,21 +1191,36 @@ def dashboard():
                         // Also remove the notification item from the dropdown
                         var clickedElement = event ? event.currentTarget : null;
                         if (clickedElement) {
-                            clickedElement.remove();
-                        }
-                        // Check if there are any notifications left
-                        var notificationList = document.querySelector('.notification-list');
-                        if (notificationList && notificationList.querySelectorAll('.notification-item').length === 0) {
-                            notificationList.innerHTML = '<div class="notification-empty"><p>No new notifications</p></div>';
+                            clickedElement.classList.remove('unread');
+                            // Remove after a short delay to show visual feedback
+                            setTimeout(function() {
+                                clickedElement.remove();
+                                // Check if there are any notifications left
+                                var notificationList = document.querySelector('.notification-list');
+                                if (notificationList && notificationList.querySelectorAll('.notification-item').length === 0) {
+                                    notificationList.innerHTML = '<div class="notification-empty"><p>No new notifications</p></div>';
+                                }
+                            }, 100);
                         }
                     }
-                    // Navigate to the notification URL
-                    window.location.href = url;
+                    // Navigate to the notification URL (only if it's not the same page)
+                    if (url && url !== window.location.pathname) {
+                        window.location.href = url;
+                    } else {
+                        // If same page, just reload to refresh the notification count
+                        setTimeout(function() {
+                            window.location.reload();
+                        }, 200);
+                    }
                 })
                 .catch(error => {
                     console.error('Error:', error);
                     // Still navigate even if marking as read fails
-                    window.location.href = url;
+                    if (url && url !== window.location.pathname) {
+                        window.location.href = url;
+                    } else {
+                        window.location.reload();
+                    }
                 });
             }
             
@@ -1099,6 +1286,13 @@ def dashboard():
                 });
             }
             
+            function toggleMobileMenu() {
+                var mobileNav = document.getElementById('mobileNav');
+                if (mobileNav) {
+                    mobileNav.classList.toggle('show');
+                }
+            }
+            
             window.onclick = function(event) {
                 if (!event.target.closest('.user-dropdown')) {
                     var dropdown = document.getElementById('userDropdown');
@@ -1110,6 +1304,12 @@ def dashboard():
                     var notifDropdown = document.getElementById('notificationDropdown');
                     if (notifDropdown && notifDropdown.classList.contains('show')) {
                         notifDropdown.classList.remove('show');
+                    }
+                }
+                if (!event.target.closest('.mobile-menu-toggle') && !event.target.closest('.mobile-nav')) {
+                    var mobileNav = document.getElementById('mobileNav');
+                    if (mobileNav && mobileNav.classList.contains('show')) {
+                        mobileNav.classList.remove('show');
                     }
                 }
             }
@@ -1514,13 +1714,122 @@ def user_tasks():
                 font-size: 4em;
                 margin-bottom: 20px;
             }
+            /* Mobile Menu */
+            .mobile-menu-toggle {
+                display: none;
+                background: none;
+                border: none;
+                color: #ffffff;
+                font-size: 1.5em;
+                cursor: pointer;
+                padding: 8px;
+            }
+            .mobile-nav {
+                display: none;
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                background: #000000;
+                flex-direction: column;
+                padding: 20px;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            }
+            .mobile-nav.show {
+                display: flex;
+            }
+            .mobile-nav a {
+                color: #ffffff;
+                text-decoration: none;
+                padding: 12px 0;
+                font-size: 1.1em;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            .mobile-nav a:last-child {
+                border-bottom: none;
+            }
+            .mobile-nav a:hover {
+                color: #FE0100;
+            }
+            
             @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
+                .nav-links {
+                    display: none;
+                }
+                .mobile-menu-toggle {
+                    display: block;
+                }
+                .user-section {
+                    gap: 10px;
+                }
+                .user-dropdown span:not(.user-icon) {
+                    display: none;
+                }
+                .main-content {
+                    padding: 20px 15px;
+                }
+                .page-title {
+                    font-size: 2em;
+                }
+                .page-subtitle {
+                    font-size: 1em;
+                }
+                .stats-grid {
+                    grid-template-columns: repeat(2, 1fr);
+                    gap: 15px;
+                }
                 .task-header {
                     flex-direction: column;
                     gap: 10px;
                 }
                 .task-badges {
                     width: 100%;
+                }
+                .task-actions {
+                    flex-direction: column;
+                    width: 100%;
+                }
+                .task-actions .btn {
+                    width: 100%;
+                    text-align: center;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .page-title {
+                    font-size: 1.5em;
+                }
+                .stats-grid {
+                    grid-template-columns: 1fr;
+                }
+                .task-item {
+                    padding: 15px;
                 }
             }
         </style>
@@ -1531,6 +1840,7 @@ def user_tasks():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
+            <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}" class="active">Tasks</a>
@@ -1538,6 +1848,15 @@ def user_tasks():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% endif %}
+            </div>
+            <div class="mobile-nav" id="mobileNav">
+                <a href="{{ url_for('dashboard') }}">Home</a>
+                <a href="{{ url_for('user_tasks') }}">Tasks</a>
+                <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('profile') }}">Profile</a>
+                {% if is_admin %}
+                <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -1649,11 +1968,24 @@ def user_tasks():
                 dropdown.classList.toggle('show');
             }
             
+            function toggleMobileMenu() {
+                var mobileNav = document.getElementById('mobileNav');
+                if (mobileNav) {
+                    mobileNav.classList.toggle('show');
+                }
+            }
+            
             window.onclick = function(event) {
                 if (!event.target.closest('.user-dropdown')) {
                     var dropdown = document.getElementById('userDropdown');
                     if (dropdown.classList.contains('show')) {
                         dropdown.classList.remove('show');
+                    }
+                }
+                if (!event.target.closest('.mobile-menu-toggle') && !event.target.closest('.mobile-nav')) {
+                    var mobileNav = document.getElementById('mobileNav');
+                    if (mobileNav && mobileNav.classList.contains('show')) {
+                        mobileNav.classList.remove('show');
                     }
                 }
             }
@@ -2146,15 +2478,106 @@ def profile():
                 font-style: italic;
                 margin-top: 15px;
             }
+            /* Mobile Menu */
+            .mobile-menu-toggle {
+                display: none;
+                background: none;
+                border: none;
+                color: #ffffff;
+                font-size: 1.5em;
+                cursor: pointer;
+                padding: 8px;
+            }
+            .mobile-nav {
+                display: none;
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                background: #000000;
+                flex-direction: column;
+                padding: 20px;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            }
+            .mobile-nav.show {
+                display: flex;
+            }
+            .mobile-nav a {
+                color: #ffffff;
+                text-decoration: none;
+                padding: 12px 0;
+                font-size: 1.1em;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            .mobile-nav a:last-child {
+                border-bottom: none;
+            }
+            .mobile-nav a:hover {
+                color: #FE0100;
+            }
+            
             @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
                 .nav-links {
                     display: none;
+                }
+                .mobile-menu-toggle {
+                    display: block;
+                }
+                .user-section {
+                    gap: 10px;
+                }
+                .user-dropdown span:not(.user-icon) {
+                    display: none;
+                }
+                .main-content {
+                    padding: 20px 15px;
                 }
                 .profile-header {
                     padding: 30px 20px;
                 }
                 .profile-name {
                     font-size: 1.5em;
+                }
+                .info-section {
+                    padding: 20px;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .profile-header {
+                    padding: 20px 15px;
+                }
+                .profile-name {
+                    font-size: 1.3em;
+                }
+                .info-section {
+                    padding: 15px;
                 }
             }
         </style>
@@ -2165,6 +2588,7 @@ def profile():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
+            <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
@@ -2172,6 +2596,15 @@ def profile():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% endif %}
+            </div>
+            <div class="mobile-nav" id="mobileNav">
+                <a href="{{ url_for('dashboard') }}">Home</a>
+                <a href="{{ url_for('user_tasks') }}">Tasks</a>
+                <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('profile') }}">Profile</a>
+                {% if is_admin %}
+                <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -2268,6 +2701,7 @@ def new_hire_list():
     <html>
     <head>
         <title>New Hires - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -2380,6 +2814,57 @@ def new_hire_list():
                 background: #eee;
                 margin: 5px 0;
             }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .header-content {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 10px;
+                }
+                .header-content h1 {
+                    font-size: 1.2em;
+                }
+                .user-info {
+                    flex-wrap: wrap;
+                    gap: 10px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                table {
+                    display: block;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                    font-size: 0.85em;
+                }
+                th, td {
+                    padding: 10px 8px;
+                    white-space: nowrap;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header {
+                    padding: 10px 12px;
+                }
+                .header-content h1 {
+                    font-size: 1em;
+                }
+                th, td {
+                    padding: 8px 6px;
+                    font-size: 0.8em;
+                }
+            }
         </style>
     </head>
     <body>
@@ -2464,14 +2949,22 @@ def new_hire_list():
 @app.route('/admin/new-hire/add')
 @admin_required
 def add_new_hire():
-    """Add a new hire with username and required training"""
+    """Add a new hire with step-by-step onboarding wizard"""
     videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.title).all()
+    # Get documents that are visible and have signature fields
+    # Use exists() subquery for better performance and to handle empty results
+    documents = Document.query.filter(
+        Document.is_visible == True,
+        exists().where(DocumentSignatureField.document_id == Document.id)
+    ).order_by(Document.original_filename).all()
+    checklist_items = ChecklistItem.query.filter_by(is_active=True).order_by(ChecklistItem.order).all()
     
     return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Start Onboarding Process - Onboarding App</title>
+        <title>New Hire Onboarding Wizard - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -2525,143 +3018,607 @@ def add_new_hire():
                 margin: 30px auto;
                 padding: 0 20px;
             }
-            .admin-panel {
+            .wizard-container {
                 background: white;
-                padding: 25px;
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                margin-bottom: 20px;
+                overflow: hidden;
             }
-            .admin-panel h2 {
+            .wizard-steps {
+                display: flex;
+                background: #f8f9fa;
+                border-bottom: 2px solid #e0e0e0;
+                overflow-x: auto;
+            }
+            .wizard-step {
+                flex: 1;
+                padding: 15px 20px;
+                text-align: center;
+                position: relative;
+                min-width: 150px;
+                cursor: pointer;
+                transition: all 0.3s;
+            }
+            .wizard-step.active {
+                background: #FE0100;
+                color: white;
+            }
+            .wizard-step.completed {
+                background: #28a745;
+                color: white;
+            }
+            .wizard-step-number {
+                display: inline-block;
+                width: 30px;
+                height: 30px;
+                border-radius: 50%;
+                background: rgba(255,255,255,0.3);
+                line-height: 30px;
+                margin-right: 8px;
+                font-weight: bold;
+            }
+            .wizard-step.active .wizard-step-number,
+            .wizard-step.completed .wizard-step-number {
+                background: rgba(255,255,255,0.9);
+                color: #FE0100;
+            }
+            .wizard-step.completed .wizard-step-number {
+                background: rgba(255,255,255,0.9);
+                color: #28a745;
+            }
+            .wizard-step-title {
+                font-weight: 600;
+                font-size: 0.9em;
+            }
+            .wizard-content {
+                padding: 30px;
+            }
+            .wizard-step-panel {
+                display: none;
+            }
+            .wizard-step-panel.active {
+                display: block;
+            }
+            .step-header {
+                margin-bottom: 25px;
+            }
+            .step-header h2 {
                 font-family: 'URW Form', Arial, sans-serif;
                 font-weight: 800;
                 color: #000000;
+                font-size: 1.8em;
+                margin-bottom: 10px;
             }
-            .btn {
-                display: inline-block;
-                padding: 10px 20px;
-                background: #FE0100;
-                color: white;
-                text-decoration: none;
-                border-radius: 5px;
-                margin: 5px;
-            }
-            .btn-success {
-                background: #28a745;
+            .step-header p {
+                color: #808080;
+                font-size: 1em;
             }
             .form-group {
-                margin-bottom: 15px;
+                margin-bottom: 20px;
             }
             .form-group label {
                 display: block;
-                margin-bottom: 5px;
+                margin-bottom: 8px;
                 font-weight: 800;
                 font-family: 'URW Form', Arial, sans-serif;
+                color: #000000;
             }
             .form-group input,
             .form-group textarea,
             .form-group select {
                 width: 100%;
-                padding: 10px;
+                padding: 12px;
                 border: 1px solid #ddd;
                 border-radius: 0.5rem;
-                font-size: 14px;
+                font-size: 16px;
+                min-height: 44px;
+                font-family: 'URW Form', Arial, sans-serif;
             }
             .form-group textarea {
-                min-height: 80px;
+                min-height: 100px;
                 resize: vertical;
+            }
+            .form-group small {
+                color: #666;
+                font-size: 0.85em;
+                display: block;
+                margin-top: 5px;
             }
             .form-row {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
                 gap: 15px;
             }
-            .checkbox-group {
-                max-height: 300px;
+            .checkbox-group, .document-group {
+                max-height: 400px;
                 overflow-y: auto;
                 border: 1px solid #ddd;
                 padding: 15px;
                 border-radius: 0.5rem;
                 background: #f8f9fa;
+                margin-top: 10px;
             }
-            .checkbox-item {
-                padding: 10px;
-                margin: 5px 0;
+            .checkbox-item, .document-item {
+                padding: 12px;
+                margin: 8px 0;
                 background: white;
                 border-radius: 0.5rem;
                 display: flex;
                 align-items: center;
-                gap: 10px;
+                gap: 12px;
+                border: 2px solid transparent;
+                transition: all 0.2s;
             }
-            .checkbox-item input[type="checkbox"] {
-                width: auto;
+            .checkbox-item:hover, .document-item:hover {
+                border-color: #FE0100;
+                box-shadow: 0 2px 8px rgba(254,1,0,0.1);
+            }
+            .checkbox-item input[type="checkbox"],
+            .document-item input[type="checkbox"] {
+                width: 20px;
+                height: 20px;
+                cursor: pointer;
+            }
+            .checkbox-item label,
+            .document-item label {
+                flex: 1;
+                cursor: pointer;
+                margin: 0;
+                font-weight: 500;
+            }
+            .review-summary {
+                background: #f8f9fa;
+                padding: 20px;
+                border-radius: 0.5rem;
+                margin-bottom: 20px;
+            }
+            .review-section {
+                margin-bottom: 20px;
+                padding-bottom: 20px;
+                border-bottom: 1px solid #e0e0e0;
+            }
+            .review-section:last-child {
+                border-bottom: none;
+            }
+            .review-section h3 {
+                font-weight: 800;
+                color: #000000;
+                margin-bottom: 10px;
+            }
+            .review-item {
+                padding: 8px 0;
+                color: #333;
+            }
+            .wizard-actions {
+                display: flex;
+                justify-content: space-between;
+                margin-top: 30px;
+                padding-top: 20px;
+                border-top: 1px solid #e0e0e0;
+            }
+            .btn {
+                display: inline-block;
+                padding: 12px 24px;
+                background: #FE0100;
+                color: white;
+                text-decoration: none;
+                border-radius: 0.5rem;
+                border: none;
+                cursor: pointer;
+                font-size: 1em;
+                font-weight: 600;
+                font-family: 'URW Form', Arial, sans-serif;
+                transition: all 0.2s;
+                min-height: 44px;
+            }
+            .btn:hover {
+                background: #d60000;
+            }
+            .btn-secondary {
+                background: #6c757d;
+            }
+            .btn-secondary:hover {
+                background: #5a6268;
+            }
+            .btn-success {
+                background: #28a745;
+            }
+            .btn-success:hover {
+                background: #218838;
+            }
+            .btn:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+            }
+            .step-indicator {
+                text-align: center;
+                color: #808080;
+                margin-bottom: 20px;
+                font-size: 0.9em;
+            }
+            
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .header-content h1 {
+                    font-size: 1.2em;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .wizard-content {
+                    padding: 20px;
+                }
+                .wizard-step {
+                    min-width: 120px;
+                    padding: 12px 10px;
+                }
+                .wizard-step-title {
+                    font-size: 0.8em;
+                }
+                .step-header h2 {
+                    font-size: 1.5em;
+                }
+                .form-row {
+                    grid-template-columns: 1fr;
+                }
+                .checkbox-group, .document-group {
+                    max-height: 300px;
+                }
+                .wizard-actions {
+                    flex-direction: column;
+                    gap: 10px;
+                }
+                .btn {
+                    width: 100%;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header-content h1 {
+                    font-size: 1em;
+                }
+                .wizard-step {
+                    min-width: 100px;
+                    padding: 10px 8px;
+                }
+                .wizard-step-title {
+                    display: none;
+                }
+                .wizard-content {
+                    padding: 15px;
+                }
+                .step-header h2 {
+                    font-size: 1.3em;
+                }
             }
         </style>
     </head>
     <body>
         <div class="header">
             <div class="header-content">
-                <h1>🚀 Start Onboarding Process</h1>
+                <h1>🚀 New Hire Onboarding Wizard</h1>
             </div>
             <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            
-            <div class="admin-panel">
-                <h2>New Hire Onboarding</h2>
-                        <p style="color: #808080; margin-bottom: 20px;">Enter the new hire's information and select the required training videos they need to complete.</p>
-                <form method="POST" action="{{ url_for('create_new_hire') }}">
-                    <div class="form-group">
-                        <label for="username">Username (Domain Username) *</label>
-                        <input type="text" name="username" id="username" required placeholder="e.g., jdoe (without domain)">
-                        <small style="color: #666;">The username the new hire will use to login</small>
+            <div class="wizard-container">
+                <div class="wizard-steps">
+                    <div class="wizard-step active" data-step="1">
+                        <span class="wizard-step-number">1</span>
+                        <span class="wizard-step-title">Basic Info</span>
                     </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="first_name">First Name *</label>
-                            <input type="text" name="first_name" id="first_name" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="last_name">Last Name *</label>
-                            <input type="text" name="last_name" id="last_name" required>
-                        </div>
+                    <div class="wizard-step" data-step="2">
+                        <span class="wizard-step-number">2</span>
+                        <span class="wizard-step-title">Training</span>
                     </div>
-                    
-                    <div class="form-group">
-                        <label>Required Training Videos *</label>
-                        <div class="checkbox-group">
-                            {% if videos %}
-                                {% for video in videos %}
-                                <div class="checkbox-item">
-                                    <input type="checkbox" name="required_videos" value="{{ video.id }}" id="video_{{ video.id }}">
-                                    <label for="video_{{ video.id }}">{{ video.title }}</label>
+                    <div class="wizard-step" data-step="3">
+                        <span class="wizard-step-number">3</span>
+                        <span class="wizard-step-title">Documents</span>
+                    </div>
+                    <div class="wizard-step" data-step="4">
+                        <span class="wizard-step-number">4</span>
+                        <span class="wizard-step-title">Review</span>
+                    </div>
+                </div>
+                
+                <form method="POST" action="{{ url_for('create_new_hire') }}" id="onboardingForm">
+                    <div class="wizard-content">
+                        <!-- Step 1: Basic Information -->
+                        <div class="wizard-step-panel active" id="step1">
+                            <div class="step-header">
+                                <h2>Step 1: Basic Information</h2>
+                                <p>Enter the new hire's basic information. All fields marked with * are required.</p>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="username">Username (Domain Username) *</label>
+                                <input type="text" name="username" id="username" required placeholder="e.g., jdoe (without domain)">
+                                <small>The username the new hire will use to login to the system</small>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="first_name">First Name *</label>
+                                    <input type="text" name="first_name" id="first_name" required>
                                 </div>
-                                {% endfor %}
-                            {% else %}
-                                <p>No training videos available. <a href="{{ url_for('manage_training') }}">Upload videos first</a>.</p>
-                            {% endif %}
+                                <div class="form-group">
+                                    <label for="last_name">Last Name *</label>
+                                    <input type="text" name="last_name" id="last_name" required>
+                                </div>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="email">Email Address</label>
+                                    <input type="email" name="email" id="email" placeholder="Will auto-generate if left blank">
+                                    <small>If left blank, will be generated as username@ziebart.com</small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="start_date">Start Date</label>
+                                    <input type="date" name="start_date" id="start_date">
+                                </div>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="department">Department</label>
+                                    <input type="text" name="department" id="department" placeholder="e.g., Sales, IT, HR">
+                                </div>
+                                <div class="form-group">
+                                    <label for="position">Position/Title</label>
+                                    <input type="text" name="position" id="position" placeholder="e.g., Sales Associate, Developer">
+                                </div>
+                            </div>
+                            
+                            <div class="wizard-actions">
+                                <div></div>
+                                <button type="button" class="btn" onclick="nextStep()">Next: Training Videos →</button>
+                            </div>
                         </div>
-                        <small style="color: #808080;">Select which training videos this new hire must complete</small>
+                        
+                        <!-- Step 2: Training Videos -->
+                        <div class="wizard-step-panel" id="step2">
+                            <div class="step-header">
+                                <h2>Step 2: Required Training Videos</h2>
+                                <p>Select which training videos this new hire must complete. At least one video is required.</p>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Training Videos *</label>
+                                <div class="checkbox-group">
+                                    {% if videos %}
+                                        {% for video in videos %}
+                                        <div class="checkbox-item">
+                                            <input type="checkbox" name="required_videos" value="{{ video.id }}" id="video_{{ video.id }}">
+                                            <label for="video_{{ video.id }}">{{ video.title }}</label>
+                                        </div>
+                                        {% endfor %}
+                                    {% else %}
+                                        <p style="padding: 20px; text-align: center; color: #666;">
+                                            No training videos available. 
+                                            <a href="{{ url_for('manage_training') }}" style="color: #FE0100;">Upload videos first</a>.
+                                        </p>
+                                    {% endif %}
+                                </div>
+                                <small>Check all training videos that are required for this new hire</small>
+                            </div>
+                            
+                            <div class="wizard-actions">
+                                <button type="button" class="btn btn-secondary" onclick="prevStep()">← Previous</button>
+                                <button type="button" class="btn" onclick="nextStep()">Next: Documents →</button>
+                            </div>
+                        </div>
+                        
+                        <!-- Step 3: Documents -->
+                        <div class="wizard-step-panel" id="step3">
+                            <div class="step-header">
+                                <h2>Step 3: Documents to Sign</h2>
+                                <p>Select which documents this new hire needs to sign. This step is optional - you can assign documents later.</p>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Documents with Signature Fields</label>
+                                {% if documents %}
+                                <div class="document-group">
+                                    {% for doc in documents %}
+                                    <div class="document-item">
+                                        <input type="checkbox" name="required_documents" value="{{ doc.id }}" id="doc_{{ doc.id }}">
+                                        <label for="doc_{{ doc.id }}">
+                                            <strong>{{ doc.original_filename }}</strong>
+                                            {% if doc.description %}
+                                            <br><span style="color: #666; font-size: 0.9em;">{{ doc.description }}</span>
+                                            {% endif %}
+                                        </label>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <p style="padding: 20px; text-align: center; color: #666;">
+                                    No documents with signature fields available. 
+                                    <a href="{{ url_for('manage_documents') }}" style="color: #FE0100;">Upload documents first</a>.
+                                </p>
+                                {% endif %}
+                                <small>Optional: Select documents that need to be signed during onboarding</small>
+                            </div>
+                            
+                            <div class="wizard-actions">
+                                <button type="button" class="btn btn-secondary" onclick="prevStep()">← Previous</button>
+                                <button type="button" class="btn" onclick="nextStep()">Next: Review →</button>
+                            </div>
+                        </div>
+                        
+                        <!-- Step 4: Review -->
+                        <div class="wizard-step-panel" id="step4">
+                            <div class="step-header">
+                                <h2>Step 4: Review & Complete</h2>
+                                <p>Review all the information below. Click "Complete Onboarding" to finish setting up this new hire.</p>
+                            </div>
+                            
+                            <div class="review-summary">
+                                <div class="review-section">
+                                    <h3>👤 Basic Information</h3>
+                                    <div class="review-item"><strong>Username:</strong> <span id="review-username">-</span></div>
+                                    <div class="review-item"><strong>Name:</strong> <span id="review-name">-</span></div>
+                                    <div class="review-item"><strong>Email:</strong> <span id="review-email">-</span></div>
+                                    <div class="review-item"><strong>Department:</strong> <span id="review-department">-</span></div>
+                                    <div class="review-item"><strong>Position:</strong> <span id="review-position">-</span></div>
+                                    <div class="review-item"><strong>Start Date:</strong> <span id="review-start-date">-</span></div>
+                                </div>
+                                
+                                <div class="review-section">
+                                    <h3>🎥 Training Videos</h3>
+                                    <div id="review-videos">None selected</div>
+                                </div>
+                                
+                                <div class="review-section">
+                                    <h3>📄 Documents to Sign</h3>
+                                    <div id="review-documents">None selected</div>
+                                </div>
+                            </div>
+                            
+                            <div class="wizard-actions">
+                                <button type="button" class="btn btn-secondary" onclick="prevStep()">← Previous</button>
+                                <button type="submit" class="btn btn-success">✓ Complete Onboarding</button>
+                            </div>
+                        </div>
                     </div>
-                    
-                    <button type="submit" class="btn btn-success">Start Onboarding</button>
                 </form>
             </div>
         </div>
+        
+        <script>
+            let currentStep = 1;
+            const totalSteps = 4;
+            
+            function updateStepIndicator() {
+                document.querySelectorAll('.wizard-step').forEach((step, index) => {
+                    step.classList.remove('active', 'completed');
+                    if (index + 1 < currentStep) {
+                        step.classList.add('completed');
+                    } else if (index + 1 === currentStep) {
+                        step.classList.add('active');
+                    }
+                });
+            }
+            
+            function showStep(step) {
+                document.querySelectorAll('.wizard-step-panel').forEach(panel => {
+                    panel.classList.remove('active');
+                });
+                document.getElementById('step' + step).classList.add('active');
+                currentStep = step;
+                updateStepIndicator();
+                
+                if (step === 4) {
+                    updateReview();
+                }
+            }
+            
+            function nextStep() {
+                if (validateCurrentStep()) {
+                    if (currentStep < totalSteps) {
+                        showStep(currentStep + 1);
+                    }
+                }
+            }
+            
+            function prevStep() {
+                if (currentStep > 1) {
+                    showStep(currentStep - 1);
+                }
+            }
+            
+            function validateCurrentStep() {
+                if (currentStep === 1) {
+                    const username = document.getElementById('username').value.trim();
+                    const firstName = document.getElementById('first_name').value.trim();
+                    const lastName = document.getElementById('last_name').value.trim();
+                    
+                    if (!username || !firstName || !lastName) {
+                        alert('Please fill in all required fields: Username, First Name, and Last Name');
+                        return false;
+                    }
+                } else if (currentStep === 2) {
+                    const videos = document.querySelectorAll('input[name="required_videos"]:checked');
+                    if (videos.length === 0) {
+                        alert('Please select at least one training video');
+                        return false;
+                    }
+                }
+                return true;
+            }
+            
+            function updateReview() {
+                // Basic Info
+                document.getElementById('review-username').textContent = document.getElementById('username').value || '-';
+                const firstName = document.getElementById('first_name').value || '';
+                const lastName = document.getElementById('last_name').value || '';
+                document.getElementById('review-name').textContent = (firstName + ' ' + lastName).trim() || '-';
+                document.getElementById('review-email').textContent = document.getElementById('email').value || 'Will be auto-generated';
+                document.getElementById('review-department').textContent = document.getElementById('department').value || '-';
+                document.getElementById('review-position').textContent = document.getElementById('position').value || '-';
+                const startDate = document.getElementById('start_date').value;
+                document.getElementById('review-start-date').textContent = startDate || '-';
+                
+                // Training Videos
+                const selectedVideos = Array.from(document.querySelectorAll('input[name="required_videos"]:checked'))
+                    .map(cb => {
+                        const label = document.querySelector('label[for="' + cb.id + '"]');
+                        return label ? label.textContent.trim() : '';
+                    })
+                    .filter(v => v);
+                document.getElementById('review-videos').innerHTML = selectedVideos.length > 0 
+                    ? '<ul style="margin-left: 20px; margin-top: 5px;">' + selectedVideos.map(v => '<li>' + v + '</li>').join('') + '</ul>'
+                    : 'None selected';
+                
+                // Documents
+                const selectedDocs = Array.from(document.querySelectorAll('input[name="required_documents"]:checked'))
+                    .map(cb => {
+                        const label = document.querySelector('label[for="' + cb.id + '"]');
+                        return label ? label.querySelector('strong').textContent : '';
+                    })
+                    .filter(d => d);
+                document.getElementById('review-documents').innerHTML = selectedDocs.length > 0
+                    ? '<ul style="margin-left: 20px; margin-top: 5px;">' + selectedDocs.map(d => '<li>' + d + '</li>').join('') + '</ul>'
+                    : 'None selected';
+            }
+            
+            // Allow clicking on step indicators to navigate (only to completed steps)
+            document.querySelectorAll('.wizard-step').forEach((step, index) => {
+                step.addEventListener('click', function() {
+                    const stepNum = index + 1;
+                    if (stepNum < currentStep) {
+                        showStep(stepNum);
+                    }
+                });
+            });
+        </script>
     </body>
     </html>
-    ''', videos=videos)
+    ''', videos=videos, documents=documents, checklist_items=checklist_items)
 
 
 @app.route('/admin/new-hire/create', methods=['POST'])
 @admin_required
 def create_new_hire():
-    """Create a new hire with required training videos"""
+    """Create a new hire with required training videos and documents"""
     username = request.form.get('username', '').strip()
     first_name = request.form.get('first_name', '').strip()
     last_name = request.form.get('last_name', '').strip()
+    email = request.form.get('email', '').strip()
+    department = request.form.get('department', '').strip()
+    position = request.form.get('position', '').strip()
+    start_date_str = request.form.get('start_date', '').strip()
     required_videos = request.form.getlist('required_videos')
+    required_documents = request.form.getlist('required_documents')
     
     if not username or not first_name or not last_name:
         flash('Username, first name, and last name are required.', 'error')
@@ -2673,9 +3630,19 @@ def create_new_hire():
     
     try:
         # Generate a default email if not provided (model requires email)
-        import config
-        email_domain = config.EMAIL_DOMAIN if hasattr(config, 'EMAIL_DOMAIN') else 'ziebart.com'
-        email = f"{username}@{email_domain}"
+        if not email:
+            import config
+            email_domain = config.EMAIL_DOMAIN if hasattr(config, 'EMAIL_DOMAIN') else 'ziebart.com'
+            email = f"{username}@{email_domain}"
+        
+        # Parse start date
+        start_date = None
+        if start_date_str:
+            try:
+                from datetime import datetime
+                start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+            except:
+                pass
         
         # Create new hire
         new_hire = NewHire(
@@ -2683,6 +3650,9 @@ def create_new_hire():
             first_name=first_name,
             last_name=last_name,
             email=email,
+            department=department if department else None,
+            position=position if position else None,
+            start_date=start_date,
             created_by=current_user.username
         )
         db.session.add(new_hire)
@@ -2694,8 +3664,47 @@ def create_new_hire():
             if video:
                 new_hire.required_training_videos.append(video)
         
+        # Assign documents if selected
+        for doc_id in required_documents:
+            document = Document.query.get(int(doc_id))
+            if document:
+                # Check if assignment already exists
+                existing = DocumentAssignment.query.filter_by(
+                    document_id=doc_id,
+                    username=username
+                ).first()
+                
+                if not existing:
+                    assignment = DocumentAssignment(
+                        document_id=doc_id,
+                        username=username,
+                        assigned_by=current_user.username
+                    )
+                    db.session.add(assignment)
+                    
+                    # Create a UserTask for this document assignment
+                    task = UserTask(
+                        username=username,
+                        task_title=f"Sign Document: {document.original_filename}",
+                        task_description=f"Please review and sign the document: {document.description or document.original_filename}",
+                        task_type='document',
+                        document_id=doc_id,
+                        priority='normal',
+                        status='pending',
+                        assigned_by=current_user.username
+                    )
+                    db.session.add(task)
+        
         db.session.commit()
-        flash(f'Onboarding started for "{first_name} {last_name}" ({username}) with {len(required_videos)} required training video(s).', 'success')
+        
+        # Build success message
+        msg_parts = [f'Onboarding started for "{first_name} {last_name}" ({username})']
+        msg_parts.append(f'with {len(required_videos)} training video(s)')
+        if required_documents:
+            msg_parts.append(f'and {len(required_documents)} document(s) to sign')
+        msg_parts.append('.')
+        
+        flash(' '.join(msg_parts), 'success')
         return redirect(url_for('admin_dashboard'))
     except Exception as e:
         db.session.rollback()
@@ -2803,14 +3812,24 @@ def admin_dashboard():
     
     # Add test notification for "aka" user
     if admin_user.username.lower() == 'aka':
-        notifications.append({
-            'type': 'test',
-            'id': 999,
-            'title': 'Test Notification',
-            'message': 'This is a test notification to verify the notification system is working correctly.',
-            'url': url_for('admin_dashboard'),
-            'is_read': False
-        })
+        # Check if test notification has been read
+        test_notification = UserNotification.query.filter_by(
+            username=admin_user.username,
+            notification_type='test',
+            notification_id='999'
+        ).first()
+        
+        is_read = test_notification.is_read if test_notification else False
+        
+        if not is_read:
+            notifications.append({
+                'type': 'test',
+                'id': 999,
+                'title': 'Test Notification',
+                'message': 'This is a test notification to verify the notification system is working correctly.',
+                'url': url_for('admin_dashboard'),
+                'is_read': False
+            })
     
     pending_count = len([n for n in notifications if not n['is_read']])
     
@@ -3333,12 +4352,158 @@ def admin_dashboard():
             .new-hire-item:last-child {
                 border-bottom: none;
             }
+            /* Mobile Menu */
+            .mobile-menu-toggle {
+                display: none;
+                background: none;
+                border: none;
+                color: #ffffff;
+                font-size: 1.5em;
+                cursor: pointer;
+                padding: 8px;
+            }
+            .mobile-nav {
+                display: none;
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                background: #000000;
+                flex-direction: column;
+                padding: 20px;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            }
+            .mobile-nav.show {
+                display: flex;
+            }
+            .mobile-nav a {
+                color: #ffffff;
+                text-decoration: none;
+                padding: 12px 0;
+                font-size: 1.1em;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            .mobile-nav a:last-child {
+                border-bottom: none;
+            }
+            .mobile-nav a:hover {
+                color: #FE0100;
+            }
+            
             @media (max-width: 1200px) {
                 .main-container {
                     grid-template-columns: 1fr;
                 }
                 .summary-cards {
                     grid-template-columns: 1fr;
+                }
+            }
+            
+            @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
+                .nav-links {
+                    display: none;
+                }
+                .mobile-menu-toggle {
+                    display: block;
+                }
+                .user-section {
+                    gap: 10px;
+                }
+                .user-dropdown span:not(.user-icon) {
+                    display: none;
+                }
+                .notification-icon, .search-icon {
+                    font-size: 1.1em;
+                }
+                .notification-dropdown {
+                    min-width: 280px;
+                    max-width: 90vw;
+                    right: -10px;
+                }
+                .main-container {
+                    padding: 15px;
+                }
+                .welcome-banner {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 15px;
+                    padding: 20px;
+                }
+                .welcome-banner h1 {
+                    font-size: 1.8em;
+                }
+                .summary-cards {
+                    grid-template-columns: 1fr;
+                    gap: 15px;
+                }
+                .section {
+                    padding: 20px;
+                }
+                .section-title {
+                    font-size: 1.3em;
+                }
+                .progress-item {
+                    flex-wrap: wrap;
+                    gap: 10px;
+                }
+                table {
+                    display: block;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+                th, td {
+                    padding: 10px 8px;
+                    font-size: 0.85em;
+                    white-space: nowrap;
+                }
+                .sidebar {
+                    margin-top: 20px;
+                }
+                .form-status-progress {
+                    width: 80px;
+                }
+                .form-status-count {
+                    min-width: 40px;
+                    font-size: 0.8em;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .welcome-banner h1 {
+                    font-size: 1.5em;
+                }
+                .section {
+                    padding: 15px;
+                }
+                .section-title {
+                    font-size: 1.2em;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 16px;
+                    font-size: 0.95em;
                 }
             }
         </style>
@@ -3349,8 +4514,12 @@ def admin_dashboard():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
+            <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">User Dashboard</a>
+            </div>
+            <div class="mobile-nav" id="mobileNav">
+                <a href="{{ url_for('dashboard') }}">User Dashboard</a>
             </div>
             <div class="user-section">
                 <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
@@ -3386,7 +4555,7 @@ def admin_dashboard():
                     <span>▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
-                    <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
+                    <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
                     <div class="dropdown-divider"></div>
                     <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
@@ -3631,21 +4800,36 @@ def admin_dashboard():
                         // Also remove the notification item from the dropdown
                         var clickedElement = event ? event.currentTarget : null;
                         if (clickedElement) {
-                            clickedElement.remove();
-                        }
-                        // Check if there are any notifications left
-                        var notificationList = document.querySelector('.notification-list');
-                        if (notificationList && notificationList.querySelectorAll('.notification-item').length === 0) {
-                            notificationList.innerHTML = '<div class="notification-empty"><p>No new notifications</p></div>';
+                            clickedElement.classList.remove('unread');
+                            // Remove after a short delay to show visual feedback
+                            setTimeout(function() {
+                                clickedElement.remove();
+                                // Check if there are any notifications left
+                                var notificationList = document.querySelector('.notification-list');
+                                if (notificationList && notificationList.querySelectorAll('.notification-item').length === 0) {
+                                    notificationList.innerHTML = '<div class="notification-empty"><p>No new notifications</p></div>';
+                                }
+                            }, 100);
                         }
                     }
-                    // Navigate to the notification URL
-                    window.location.href = url;
+                    // Navigate to the notification URL (only if it's not the same page)
+                    if (url && url !== window.location.pathname) {
+                        window.location.href = url;
+                    } else {
+                        // If same page, just reload to refresh the notification count
+                        setTimeout(function() {
+                            window.location.reload();
+                        }, 200);
+                    }
                 })
                 .catch(error => {
                     console.error('Error:', error);
                     // Still navigate even if marking as read fails
-                    window.location.href = url;
+                    if (url && url !== window.location.pathname) {
+                        window.location.href = url;
+                    } else {
+                        window.location.reload();
+                    }
                 });
             }
             
@@ -3722,6 +4906,12 @@ def admin_dashboard():
                     var notifDropdown = document.getElementById('notificationDropdown');
                     if (notifDropdown && notifDropdown.classList.contains('show')) {
                         notifDropdown.classList.remove('show');
+                    }
+                }
+                if (!event.target.closest('.mobile-menu-toggle') && !event.target.closest('.mobile-nav')) {
+                    var mobileNav = document.getElementById('mobileNav');
+                    if (mobileNav && mobileNav.classList.contains('show')) {
+                        mobileNav.classList.remove('show');
                     }
                 }
             }
@@ -4362,6 +5552,107 @@ def manage_documents():
                 justify-content: center;
                 color: white;
             }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .header-content h1 {
+                    font-size: 1.2em;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .admin-panel {
+                    padding: 15px;
+                }
+                .admin-panel h2 {
+                    font-size: 1.3em;
+                }
+                .upload-form {
+                    padding: 15px;
+                }
+                .form-group input[type="text"],
+                .form-group textarea,
+                .form-group input[type="file"] {
+                    font-size: 16px; /* Prevents zoom on iOS */
+                    min-height: 44px;
+                }
+                table {
+                    display: block;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                    font-size: 0.85em;
+                }
+                th, td {
+                    padding: 10px 8px;
+                    white-space: nowrap;
+                }
+                .actions-group {
+                    flex-direction: column;
+                    align-items: stretch;
+                }
+                .actions-primary {
+                    flex-direction: column;
+                    width: 100%;
+                }
+                .actions-primary .action-btn {
+                    width: 100%;
+                    margin: 5px 0;
+                    min-height: 44px;
+                }
+                .actions-secondary {
+                    width: 100%;
+                    margin-left: 0;
+                    margin-top: 10px;
+                }
+                .actions-menu-btn {
+                    width: 100%;
+                    min-height: 44px;
+                }
+                .modal-content {
+                    width: 95%;
+                    max-height: 95vh;
+                }
+                .modal-body iframe {
+                    height: 60vh !important;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header-content h1 {
+                    font-size: 1em;
+                }
+                .admin-panel {
+                    padding: 12px;
+                }
+                .admin-panel h2 {
+                    font-size: 1.2em;
+                }
+                th, td {
+                    padding: 8px 6px;
+                    font-size: 0.8em;
+                }
+                .modal-content {
+                    width: 100%;
+                    max-height: 100vh;
+                    border-radius: 0;
+                }
+                .modal-body iframe {
+                    height: 50vh !important;
+                }
+            }
         </style>
     </head>
     <body>
@@ -4752,6 +6043,7 @@ def set_signature_fields(doc_id):
     <html>
     <head>
         <title>Set Signature Fields - {{ document.original_filename }}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -4966,7 +6258,8 @@ def set_signature_fields(doc_id):
                 padding: 8px;
                 border: 1px solid #ddd;
                 border-radius: 0.5rem;
-                font-size: 14px;
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px; /* Touch-friendly */
             }
             .signature-field-item {
                 background: #f8f9fa;
@@ -6247,6 +7540,7 @@ def assign_document(doc_id):
     <html>
     <head>
         <title>Assign Document - {{ document.original_filename }}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -6337,7 +7631,8 @@ def assign_document(doc_id):
                 padding: 10px;
                 border: 1px solid #ddd;
                 border-radius: 0.5rem;
-                font-size: 14px;
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px; /* Touch-friendly */
             }
             .form-group textarea {
                 min-height: 80px;
@@ -6362,6 +7657,8 @@ def assign_document(doc_id):
             }
             .user-item input[type="checkbox"] {
                 margin-right: 10px;
+                min-width: 20px;
+                min-height: 20px; /* Touch-friendly */
             }
             .user-item label {
                 flex: 1;
@@ -6389,6 +7686,69 @@ def assign_document(doc_id):
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
+            }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .header-content h1 {
+                    font-size: 1.2em;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .admin-panel {
+                    padding: 15px;
+                }
+                .admin-panel h2 {
+                    font-size: 1.3em;
+                }
+                .form-group input[type="text"],
+                .form-group input[type="date"],
+                .form-group textarea {
+                    font-size: 16px; /* Prevents zoom on iOS */
+                    min-height: 44px;
+                }
+                .users-list {
+                    max-height: 300px;
+                }
+                .user-item {
+                    flex-wrap: wrap;
+                    gap: 10px;
+                }
+                .assignment-item {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 10px;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                    width: 100%;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header-content h1 {
+                    font-size: 1em;
+                }
+                .admin-panel {
+                    padding: 12px;
+                }
+                .admin-panel h2 {
+                    font-size: 1.2em;
+                }
+                .users-list {
+                    max-height: 250px;
+                }
             }
         </style>
     </head>
@@ -6819,6 +8179,124 @@ def view_documents():
                 line-height: 1.5;
                 vertical-align: middle;
                 white-space: nowrap;
+                min-height: 44px;
+                touch-action: manipulation;
+            }
+            /* Mobile Menu */
+            .mobile-menu-toggle {
+                display: none;
+                background: none;
+                border: none;
+                color: #ffffff;
+                font-size: 1.5em;
+                cursor: pointer;
+                padding: 8px;
+            }
+            .mobile-nav {
+                display: none;
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                background: #000000;
+                flex-direction: column;
+                padding: 20px;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            }
+            .mobile-nav.show {
+                display: flex;
+            }
+            .mobile-nav a {
+                color: #ffffff;
+                text-decoration: none;
+                padding: 12px 0;
+                font-size: 1.1em;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            .mobile-nav a:last-child {
+                border-bottom: none;
+            }
+            .mobile-nav a:hover {
+                color: #FE0100;
+            }
+            
+            @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
+                .nav-links {
+                    display: none;
+                }
+                .mobile-menu-toggle {
+                    display: block;
+                }
+                .user-section {
+                    gap: 10px;
+                }
+                .user-dropdown span:not(.user-icon) {
+                    display: none;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .documents-list {
+                    padding: 15px;
+                }
+                .document-item {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 15px;
+                    padding: 15px;
+                }
+                .document-info {
+                    width: 100%;
+                }
+                .document-info h3 {
+                    font-size: 1em;
+                    word-break: break-word;
+                }
+                .document-actions {
+                    width: 100%;
+                    flex-direction: column;
+                    gap: 10px;
+                }
+                .document-actions .btn,
+                .document-actions .badge {
+                    width: 100%;
+                    text-align: center;
+                }
+                .btn, .badge {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .documents-list {
+                    padding: 12px;
+                }
+                .document-item {
+                    padding: 12px;
+                }
             }
         </style>
     </head>
@@ -6828,6 +8306,7 @@ def view_documents():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
+            <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
@@ -6835,6 +8314,15 @@ def view_documents():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% endif %}
+            </div>
+            <div class="mobile-nav" id="mobileNav">
+                <a href="{{ url_for('dashboard') }}">Home</a>
+                <a href="{{ url_for('user_tasks') }}">Tasks</a>
+                <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('profile') }}">Profile</a>
+                {% if is_admin %}
+                <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -6913,11 +8401,24 @@ def view_documents():
                 dropdown.classList.toggle('show');
             }
             
+            function toggleMobileMenu() {
+                var mobileNav = document.getElementById('mobileNav');
+                if (mobileNav) {
+                    mobileNav.classList.toggle('show');
+                }
+            }
+            
             window.onclick = function(event) {
                 if (!event.target.closest('.user-dropdown')) {
                     var dropdown = document.getElementById('userDropdown');
                     if (dropdown.classList.contains('show')) {
                         dropdown.classList.remove('show');
+                    }
+                }
+                if (!event.target.closest('.mobile-menu-toggle') && !event.target.closest('.mobile-nav')) {
+                    var mobileNav = document.getElementById('mobileNav');
+                    if (mobileNav && mobileNav.classList.contains('show')) {
+                        mobileNav.classList.remove('show');
                     }
                 }
             }
@@ -7435,6 +8936,7 @@ def sign_document(doc_id):
     <html>
     <head>
         <title>Sign Document - {{ document.original_filename }}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -7631,6 +9133,92 @@ def sign_document(doc_id):
             .signature-preview img {
                 max-width: 100%;
                 max-height: 80px;
+            }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .header-content h1 {
+                    font-size: 1.2em;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .main-content {
+                    grid-template-columns: 1fr;
+                    gap: 20px;
+                }
+                .document-viewer-container {
+                    padding: 15px;
+                }
+                .document-viewer {
+                    min-height: 500px;
+                    padding: 10px;
+                }
+                .document-viewer iframe {
+                    height: 500px !important;
+                }
+                .signature-panel {
+                    padding: 15px;
+                }
+                .signature-pad-container {
+                    margin-bottom: 10px;
+                }
+                #signaturePad {
+                    height: 150px;
+                }
+                canvas[id^="signaturePad-"] {
+                    width: 100% !important;
+                    height: 150px !important;
+                }
+                .signature-controls {
+                    flex-direction: column;
+                }
+                .signature-controls button {
+                    width: 100%;
+                    min-height: 44px;
+                    padding: 12px;
+                }
+                .signature-field-item {
+                    padding: 12px;
+                }
+                .btn, .btn-success {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                }
+                input[type="text"], input[type="date"], input[type="number"] {
+                    min-height: 44px;
+                    font-size: 16px; /* Prevents zoom on iOS */
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header-content h1 {
+                    font-size: 1em;
+                }
+                .document-viewer {
+                    min-height: 400px;
+                }
+                .document-viewer iframe {
+                    height: 400px !important;
+                }
+                #signaturePad {
+                    height: 120px;
+                }
+                canvas[id^="signaturePad-"] {
+                    height: 120px !important;
+                }
+                .signature-field-item {
+                    padding: 10px;
+                }
             }
         </style>
     </head>
@@ -9147,6 +10735,50 @@ def view_signed_documents(doc_id):
                 padding: 40px;
                 color: #999;
             }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .header-content h1 {
+                    font-size: 1.2em;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .admin-panel {
+                    padding: 15px;
+                }
+                .signed-user-item {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 15px;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                    width: 100%;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header-content h1 {
+                    font-size: 1em;
+                }
+                .admin-panel {
+                    padding: 12px;
+                }
+                .signed-user-item {
+                    padding: 15px;
+                }
+            }
         </style>
     </head>
     <body>
@@ -9448,6 +11080,82 @@ def view_form_signatures(doc_id):
             .stat-label {
                 color: #808080;
                 font-size: 0.9em;
+            }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .document-header {
+                    padding: 15px;
+                }
+                .document-header h2 {
+                    font-size: 1.2em;
+                }
+                .stats-summary {
+                    grid-template-columns: 1fr;
+                    gap: 15px;
+                }
+                .section {
+                    padding: 20px;
+                }
+                .section-title {
+                    font-size: 1.3em;
+                }
+                table {
+                    display: block;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+                th, td {
+                    padding: 10px 8px;
+                    font-size: 0.85em;
+                    white-space: nowrap;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .section {
+                    padding: 15px;
+                }
+                .section-title {
+                    font-size: 1.2em;
+                }
+                th, td {
+                    padding: 8px 6px;
+                    font-size: 0.8em;
+                }
             }
         </style>
     </head>
@@ -9978,9 +11686,10 @@ def view_new_hire_details(username):
                 border-radius: 0.5rem;
                 background: rgba(255,255,255,0.2);
                 color: white;
-                font-size: 1em;
+                font-size: 16px; /* Prevents zoom on iOS */
                 font-weight: 500;
                 font-family: inherit;
+                min-height: 44px; /* Touch-friendly */
             }
             .user-info-table input::placeholder {
                 color: rgba(255,255,255,0.7);
@@ -10112,6 +11821,96 @@ def view_new_hire_details(username):
                 background: #f8f9fa;
                 font-weight: 600;
                 color: #000000;
+            }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .user-header {
+                    padding: 20px;
+                }
+                .user-header h1 {
+                    font-size: 1.8em;
+                }
+                .user-info-table {
+                    font-size: 0.9em;
+                }
+                .user-info-table td {
+                    padding: 10px;
+                }
+                .user-info-table input,
+                .user-info-table select {
+                    font-size: 16px; /* Prevents zoom on iOS */
+                    min-height: 44px;
+                }
+                .section {
+                    padding: 20px;
+                }
+                .section-title {
+                    font-size: 1.3em;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                    width: 100%;
+                }
+                table {
+                    display: block;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+                th, td {
+                    padding: 10px 8px;
+                    font-size: 0.85em;
+                    white-space: nowrap;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .user-header {
+                    padding: 15px;
+                }
+                .user-header h1 {
+                    font-size: 1.5em;
+                }
+                .section {
+                    padding: 15px;
+                }
+                .section-title {
+                    font-size: 1.2em;
+                }
+                th, td {
+                    padding: 8px 6px;
+                    font-size: 0.8em;
+                }
             }
         </style>
     </head>
@@ -10330,6 +12129,7 @@ def manage_checklist():
     <html>
     <head>
         <title>Manage Checklist - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -11969,8 +13769,9 @@ def manage_external_links():
                 padding: 10px 12px;
                 border: 1px solid #ddd;
                 border-radius: 0.5rem;
-                font-size: 14px;
+                font-size: 16px; /* Prevents zoom on iOS */
                 font-family: inherit;
+                min-height: 44px; /* Touch-friendly */
             }
             .form-group textarea {
                 min-height: 80px;
@@ -12034,6 +13835,89 @@ def manage_external_links():
                 text-align: center;
                 padding: 40px 20px;
                 color: #999;
+            }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .section {
+                    padding: 20px;
+                }
+                .section-title {
+                    font-size: 1.3em;
+                }
+                .form-row {
+                    grid-template-columns: 1fr;
+                    gap: 15px;
+                }
+                .form-group input,
+                .form-group textarea {
+                    font-size: 16px; /* Prevents zoom on iOS */
+                    min-height: 44px;
+                }
+                table {
+                    display: block;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+                th, td {
+                    padding: 10px 8px;
+                    font-size: 0.85em;
+                    white-space: nowrap;
+                }
+                .action-buttons {
+                    flex-direction: column;
+                    width: 100%;
+                }
+                .action-buttons .btn {
+                    width: 100%;
+                    margin: 5px 0;
+                }
+                .btn, .btn-success {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .section {
+                    padding: 15px;
+                }
+                .section-title {
+                    font-size: 1.2em;
+                }
+                th, td {
+                    padding: 8px 6px;
+                    font-size: 0.8em;
+                }
             }
         </style>
     </head>
@@ -13537,6 +15421,72 @@ def admin_reports():
                 border-bottom: 2px solid #dc3545;
                 padding-bottom: 10px;
             }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .section {
+                    padding: 20px;
+                }
+                .section-title {
+                    font-size: 1.3em;
+                }
+                table {
+                    display: block;
+                    overflow-x: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+                th, td {
+                    padding: 10px 8px;
+                    font-size: 0.85em;
+                    white-space: nowrap;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .section {
+                    padding: 15px;
+                }
+                .section-title {
+                    font-size: 1.2em;
+                }
+                th, td {
+                    padding: 8px 6px;
+                    font-size: 0.8em;
+                }
+            }
         </style>
     </head>
     <body>
@@ -13808,6 +15758,7 @@ def manage_training():
     <html>
     <head>
         <title>Training Management - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -14126,6 +16077,7 @@ def manage_video_quiz(video_id):
     <html>
     <head>
         <title>Manage Quiz - {{ video.title }}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -14229,7 +16181,8 @@ def manage_video_quiz(video_id):
                 padding: 10px;
                 border: 1px solid #ddd;
                 border-radius: 0.5rem;
-                font-size: 14px;
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px; /* Touch-friendly */
             }
             .form-group textarea {
                 min-height: 80px;
@@ -14252,6 +16205,70 @@ def manage_video_quiz(video_id):
             }
             .answer-item.correct {
                 border-left: 3px solid #28a745;
+            }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .header-content h1 {
+                    font-size: 1.2em;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .admin-panel {
+                    padding: 15px;
+                }
+                .admin-panel h2 {
+                    font-size: 1.3em;
+                }
+                .form-group input,
+                .form-group textarea,
+                .form-group select {
+                    font-size: 16px; /* Prevents zoom on iOS */
+                    min-height: 44px;
+                }
+                .answer-input {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 10px;
+                    margin-bottom: 10px;
+                }
+                .answer-input input[type="text"] {
+                    font-size: 16px; /* Prevents zoom on iOS */
+                    min-height: 44px;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                }
+                .btn-small {
+                    min-height: 44px;
+                    padding: 10px 15px;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header-content h1 {
+                    font-size: 1em;
+                }
+                .admin-panel {
+                    padding: 12px;
+                }
+                .admin-panel h2 {
+                    font-size: 1.2em;
+                }
+                .question-item {
+                    padding: 12px;
+                }
             }
         </style>
     </head>
@@ -14545,6 +16562,7 @@ def view_training_video(video_id):
     <html>
     <head>
         <title>{{ video.title }} - Harassment Training</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -14681,6 +16699,80 @@ def view_training_video(video_id):
             }
             .score-fail {
                 color: #FE0100;
+            }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                }
+                .header h1 {
+                    font-size: 1.2em;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .video-container {
+                    margin-bottom: 15px;
+                }
+                video {
+                    max-height: 50vh;
+                }
+                .progress-info {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 10px;
+                    padding: 12px;
+                }
+                .quiz-overlay {
+                    padding: 20px;
+                }
+                .quiz-content {
+                    padding: 20px;
+                }
+                .quiz-content h2 {
+                    font-size: 1.2em;
+                }
+                .quiz-content .question {
+                    font-size: 1em;
+                }
+                .answer-option {
+                    padding: 12px;
+                    min-height: 44px; /* Touch-friendly */
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                    width: 100%;
+                }
+                .score-display {
+                    padding: 20px;
+                }
+                .score-display h1 {
+                    font-size: 2em;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header h1 {
+                    font-size: 1em;
+                }
+                .header p {
+                    font-size: 0.9em;
+                }
+                video {
+                    max-height: 40vh;
+                }
+                .quiz-content {
+                    padding: 15px;
+                }
+                .quiz-content h2 {
+                    font-size: 1em;
+                }
+                .answer-option {
+                    padding: 10px;
+                }
             }
         </style>
     </head>
@@ -15365,6 +17457,26 @@ def mark_all_notifications_read():
                 )
                 db.session.add(notification)
         
+        # Handle test notifications (for admins)
+        if current_user.is_admin() and current_user.username.lower() == 'aka':
+            test_notification = UserNotification.query.filter_by(
+                username=current_user.username,
+                notification_type='test',
+                notification_id='999'
+            ).first()
+            if test_notification:
+                test_notification.is_read = True
+                test_notification.read_at = datetime.utcnow()
+            else:
+                test_notification = UserNotification(
+                    username=current_user.username,
+                    notification_type='test',
+                    notification_id='999',
+                    is_read=True,
+                    read_at=datetime.utcnow()
+                )
+                db.session.add(test_notification)
+        
         db.session.commit()
         return jsonify({'success': True})
     except Exception as e:
@@ -15398,6 +17510,7 @@ def list_training_videos():
     <html>
     <head>
         <title>Harassment Training - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -15587,6 +17700,98 @@ def list_training_videos():
                 background: #ffc107;
                 color: #000;
             }
+            .mobile-menu-toggle {
+                display: none;
+                background: none;
+                border: none;
+                color: #ffffff;
+                font-size: 1.5em;
+                cursor: pointer;
+                padding: 8px;
+            }
+            .mobile-nav {
+                display: none;
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                background: #000000;
+                flex-direction: column;
+                padding: 20px;
+                z-index: 1000;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            }
+            .mobile-nav.show {
+                display: flex;
+            }
+            .mobile-nav a {
+                color: #ffffff;
+                text-decoration: none;
+                padding: 12px 0;
+                font-size: 1.1em;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            .mobile-nav a:last-child {
+                border-bottom: none;
+            }
+            .mobile-nav a:hover {
+                color: #FE0100;
+            }
+            
+            @media (max-width: 768px) {
+                .top-header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .logo-section {
+                    font-size: 1.1em;
+                }
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
+                }
+                .nav-links {
+                    display: none;
+                }
+                .mobile-menu-toggle {
+                    display: block;
+                }
+                .user-section {
+                    gap: 10px;
+                }
+                .user-dropdown span:not(.user-icon) {
+                    display: none;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .training-list {
+                    grid-template-columns: 1fr;
+                    gap: 15px;
+                }
+                .btn {
+                    min-height: 44px;
+                    padding: 12px 20px;
+                    font-size: 1em;
+                    width: 100%;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .top-header {
+                    padding: 10px 12px;
+                }
+                .logo-section {
+                    font-size: 1em;
+                }
+                .logo-section img {
+                    height: 50px;
+                    margin-bottom: -25px;
+                }
+                .training-card {
+                    padding: 15px;
+                }
+            }
         </style>
     </head>
     <body>
@@ -15595,6 +17800,7 @@ def list_training_videos():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 Ziebart Onboarding
             </div>
+            <button class="mobile-menu-toggle" onclick="toggleMobileMenu()" style="display: none; background: none; border: none; color: #ffffff; font-size: 1.5em; cursor: pointer; padding: 8px;">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
@@ -15602,6 +17808,15 @@ def list_training_videos():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% endif %}
+            </div>
+            <div class="mobile-nav" id="mobileNav" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: #000000; flex-direction: column; padding: 20px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
+                <a href="{{ url_for('dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Home</a>
+                <a href="{{ url_for('user_tasks') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Tasks</a>
+                <a href="{{ url_for('view_documents') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Files</a>
+                <a href="{{ url_for('profile') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Profile</a>
+                {% if is_admin %}
+                <a href="{{ url_for('admin_dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em;">Admin Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -15679,11 +17894,24 @@ def list_training_videos():
                 dropdown.classList.toggle('show');
             }
             
+            function toggleMobileMenu() {
+                var mobileNav = document.getElementById('mobileNav');
+                if (mobileNav) {
+                    mobileNav.classList.toggle('show');
+                }
+            }
+            
             window.onclick = function(event) {
                 if (!event.target.closest('.user-dropdown')) {
                     var dropdown = document.getElementById('userDropdown');
                     if (dropdown.classList.contains('show')) {
                         dropdown.classList.remove('show');
+                    }
+                }
+                if (!event.target.closest('.mobile-menu-toggle') && !event.target.closest('.mobile-nav')) {
+                    var mobileNav = document.getElementById('mobileNav');
+                    if (mobileNav && mobileNav.classList.contains('show')) {
+                        mobileNav.classList.remove('show');
                     }
                 }
             }
