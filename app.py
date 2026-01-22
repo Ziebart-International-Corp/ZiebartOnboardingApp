@@ -4,7 +4,7 @@ Windows Domain Authentication with Admin and User roles
 """
 from flask import Flask, render_template_string, redirect, url_for, request, flash, jsonify, send_file, send_from_directory
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from sqlalchemy import exists
+from sqlalchemy import exists, or_
 from auth import authenticate_user, login_required, admin_required, User, get_windows_user, check_user_can_login_as_admin
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
@@ -241,6 +241,60 @@ def logout():
     return redirect(url_for('index'))
 
 
+def is_signature_field_signed(document_id, field, username):
+    """
+    Check if a signature field is signed by a user.
+    Handles cases where the field was deleted and recreated by checking:
+    1. Signatures with matching signature_field_id
+    2. Signatures with null signature_field_id that match field location (within tolerance)
+    """
+    # First check for signature with matching field ID
+    if field.id:
+        sig = DocumentSignature.query.filter_by(
+            document_id=document_id,
+            signature_field_id=field.id,
+            username=username
+        ).first()
+        if sig:
+            return True
+    
+    # If no match by ID, check for signatures with null field_id that match location
+    # Use a tolerance of 10 pixels for position matching (in case field was slightly moved)
+    # Check if new columns exist (handle case where database hasn't been migrated yet)
+    try:
+        # Try to query for orphaned signatures - this might fail if columns don't exist
+        tolerance = 10.0
+        try:
+            orphaned_sigs = DocumentSignature.query.filter_by(
+                document_id=document_id,
+                username=username
+            ).filter(DocumentSignature.signature_field_id.is_(None)).all()
+        except Exception:
+            # If query fails (columns don't exist), return False
+            return False
+        
+        for sig in orphaned_sigs:
+            # Safely access new fields (may not exist if database not migrated)
+            try:
+                field_page = getattr(sig, 'field_page_number', None)
+                field_x = getattr(sig, 'field_x_position', None)
+                field_y = getattr(sig, 'field_y_position', None)
+                
+                if (field_page == field.page_number and
+                    field_x is not None and field_y is not None and
+                    abs(field_x - field.x_position) <= tolerance and
+                    abs(field_y - field.y_position) <= tolerance):
+                    return True
+            except (AttributeError, Exception):
+                # If accessing fields fails, skip this signature
+                continue
+    except Exception:
+        # If anything fails, just return False (no orphaned signature match)
+        pass
+    
+    return False
+
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -286,14 +340,8 @@ def dashboard():
                 ).all()
                 
                 if required_fields:
-                    user_signatures = DocumentSignature.query.filter_by(
-                        document_id=task.document_id,
-                        username=current_user.username
-                    ).all()
-                    signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
-                    
-                    # Check if all required fields are signed
-                    all_signed = all(f.id in signed_field_ids for f in required_fields)
+                    # Check if all required fields are signed (using helper to handle deleted fields)
+                    all_signed = all(is_signature_field_signed(task.document_id, f, current_user.username) for f in required_fields)
                     
                     if all_signed and task.status != 'completed':
                         # Auto-complete the task
@@ -985,13 +1033,14 @@ def dashboard():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
@@ -1001,6 +1050,7 @@ def dashboard():
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
@@ -1107,23 +1157,6 @@ def dashboard():
                         <p style="color: #808080; font-size: 1.1em;">Great job! You've completed all your onboarding tasks.</p>
                     </div>
                     {% endif %}
-                </div>
-                {% endif %}
-                
-                {% if all_videos %}
-                <div class="section">
-                    <h2 class="section-title">Training Videos</h2>
-                    <div class="videos-grid">
-                        {% for video in all_videos %}
-                        <div class="video-card">
-                            <div class="video-thumbnail">📹</div>
-                            <div class="video-info">
-                                <h3>{{ video.title }}</h3>
-                                <a href="{{ url_for('view_training_video', video_id=video.id) }}" class="video-btn">Watch ></a>
-                            </div>
-                        </div>
-                        {% endfor %}
-                    </div>
                 </div>
                 {% endif %}
             </div>
@@ -1337,6 +1370,52 @@ def user_tasks():
         UserTask.created_at.desc()
     ).all()
     
+    # Get new hire record for current user
+    user_new_hire = NewHire.query.filter_by(username=current_user.username).first()
+    
+    # Ensure tasks exist for incomplete training videos
+    if user_new_hire:
+        required_videos = list(user_new_hire.required_training_videos)
+        for video in required_videos:
+            # Check if video is completed
+            progress = UserTrainingProgress.query.filter_by(
+                username=current_user.username,
+                video_id=video.id,
+                is_completed=True,
+                is_passed=True
+            ).first()
+            
+            # Only create task if video is not completed
+            if not progress:
+                # Check if task already exists for this video
+                existing_task = UserTask.query.filter_by(
+                    username=current_user.username,
+                    task_type='training',
+                    status='pending'
+                ).filter(UserTask.notes.like(f'video_id:{video.id}%')).first()
+                
+                if not existing_task:
+                    # Create task for incomplete training video
+                    task = UserTask(
+                        username=current_user.username,
+                        task_title=f"Complete Training: {video.title}",
+                        task_description=f"Please watch and complete the training video: {video.title}",
+                        task_type='training',
+                        priority='normal',
+                        status='pending',
+                        assigned_by=user_new_hire.created_by or 'system',
+                        notes=f'video_id:{video.id}'
+                    )
+                    db.session.add(task)
+                    db.session.commit()
+    
+    # Refresh tasks list after potential additions
+    user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+        UserTask.priority.desc(),
+        UserTask.due_date.asc(),
+        UserTask.created_at.desc()
+    ).all()
+    
     # Check document tasks and update completion status
     for task in user_tasks:
         if task.task_type == 'document' and task.document_id:
@@ -1349,14 +1428,8 @@ def user_tasks():
                 ).all()
                 
                 if required_fields:
-                    user_signatures = DocumentSignature.query.filter_by(
-                        document_id=task.document_id,
-                        username=current_user.username
-                    ).all()
-                    signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
-                    
-                    # Check if all required fields are signed
-                    all_signed = all(f.id in signed_field_ids for f in required_fields)
+                    # Check if all required fields are signed (using helper to handle deleted fields)
+                    all_signed = all(is_signature_field_signed(task.document_id, f, current_user.username) for f in required_fields)
                     
                     if all_signed and task.status != 'completed':
                         # Auto-complete the task
@@ -1374,9 +1447,28 @@ def user_tasks():
                         if all_signed and not assignment.completed_at:
                             assignment.completed_at = datetime.utcnow()
                         db.session.commit()
-    
-    # Get new hire record for current user
-    user_new_hire = NewHire.query.filter_by(username=current_user.username).first()
+        
+        # Check training video tasks and update completion status
+        elif task.task_type == 'training' and task.notes:
+            # Extract video_id from notes (format: "video_id:123")
+            if task.notes.startswith('video_id:'):
+                try:
+                    video_id = int(task.notes.split(':')[1])
+                    # Check if video is completed
+                    progress = UserTrainingProgress.query.filter_by(
+                        username=current_user.username,
+                        video_id=video_id,
+                        is_completed=True,
+                        is_passed=True
+                    ).first()
+                    
+                    if progress and task.status != 'completed':
+                        # Auto-complete the task
+                        task.status = 'completed'
+                        task.completed_at = datetime.utcnow()
+                        db.session.commit()
+                except (ValueError, IndexError):
+                    pass
     user_first_name = user_new_hire.first_name if user_new_hire else current_user.username
     user_full_name = f"{user_new_hire.first_name} {user_new_hire.last_name}" if user_new_hire else current_user.username
     
@@ -1384,6 +1476,16 @@ def user_tasks():
     pending_tasks = [t for t in user_tasks if t.status == 'pending']
     in_progress_tasks = [t for t in user_tasks if t.status == 'in_progress']
     completed_tasks = [t for t in user_tasks if t.status == 'completed']
+    
+    # Extract video_id from training tasks for easier template access
+    for task in user_tasks:
+        if task.task_type == 'training' and task.notes and task.notes.startswith('video_id:'):
+            try:
+                task.video_id = int(task.notes.split(':')[1])
+            except (ValueError, IndexError):
+                task.video_id = None
+        else:
+            task.video_id = None
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -1838,13 +1940,14 @@ def user_tasks():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}" class="active">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
@@ -1854,6 +1957,7 @@ def user_tasks():
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
@@ -1936,6 +2040,8 @@ def user_tasks():
                                 {% if task.status != 'completed' %}
                                     {% if task.task_type == 'document' and task.document_id %}
                                         <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" class="btn btn-success">✍️ Sign Document</a>
+                                    {% elif task.task_type == 'training' and task.video_id %}
+                                        <a href="{{ url_for('view_training_video', video_id=task.video_id) }}" class="btn btn-success">▶️ Watch Training</a>
                                     {% else %}
                                         <button class="btn btn-success" onclick="markComplete({{ task.id }})">Mark Complete</button>
                                         {% if task.status == 'pending' %}
@@ -2586,13 +2692,14 @@ def profile():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
@@ -2602,6 +2709,7 @@ def profile():
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
@@ -2690,260 +2798,260 @@ def profile():
          user_email=user_email, user_domain=user_domain, domain_groups=domain_groups)
 
 
-@app.route('/new-hires')
-@login_required
-def new_hire_list():
-    """List all new hires"""
-    new_hires = NewHire.query.order_by(NewHire.created_at.desc()).all()
+@app.route('/admin/new-hires')
+@admin_required
+def view_all_new_hires():
+    """View all new hires with progress information"""
+    # Get all new hires with their progress
+    all_new_hires = NewHire.query.order_by(NewHire.created_at.desc()).all()
+    new_hires_with_progress = []
+    
+    for new_hire in all_new_hires:
+        required_videos = list(new_hire.required_training_videos)
+        total_videos = len(required_videos)
+        completed_videos = 0
+        
+        for video in required_videos:
+            progress = UserTrainingProgress.query.filter_by(
+                username=new_hire.username,
+                video_id=video.id,
+                is_completed=True,
+                is_passed=True
+            ).first()
+            if progress:
+                completed_videos += 1
+        
+        progress_percentage = int((completed_videos / total_videos * 100)) if total_videos > 0 else 0
+        new_hires_with_progress.append({
+            'new_hire': new_hire,
+            'progress': progress_percentage,
+            'completed': completed_videos,
+            'total': total_videos
+        })
+    
+    admin_name = current_user.username
     
     return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>New Hires - Onboarding App</title>
+        <title>New Hires List - Admin Dashboard</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
                 font-family: 'URW Form', Arial, sans-serif;
-                background: #f5f5f5;
+                background: #FFFFFF;
+                color: #000000;
             }
-            .header {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 20px;
-            }
-            .header-content {
-                max-width: 1600px;
-                margin: 0 auto;
+            .top-header {
+                background: #000000;
+                padding: 12px 30px;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                min-height: 60px;
+            }
+            .logo-section {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                font-size: 1.4em;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                color: #ffffff;
+            }
+            .logo-section img {
+                height: 80px;
+                width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-family: 'URW Form', Arial, sans-serif;
+                font-size: 0.95em;
+                font-weight: 500;
+                transition: all 0.2s;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover {
+                background: rgba(255,255,255,0.3);
+                color: #FFFFFF;
             }
             .container {
                 max-width: 1600px;
                 margin: 30px auto;
                 padding: 0 20px;
             }
-            .btn {
-                display: inline-block;
-                padding: 10px 20px;
-                background: #667eea;
-                color: white;
-                text-decoration: none;
-                border-radius: 5px;
-                margin: 10px 0;
-            }
-            table {
-                width: 100%;
+            .section {
                 background: white;
-                border-radius: 0.5rem;
-                overflow: hidden;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                border-radius: 12px;
+                padding: 25px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                margin-bottom: 20px;
             }
-            th, td {
-                padding: 15px;
-                text-align: left;
-                border-bottom: 1px solid #eee;
+            .section-title {
+                font-size: 1.6em;
+                font-weight: 800;
+                color: #000000;
+                margin-bottom: 20px;
             }
-            th {
-                background: #f8f9fa;
-                font-weight: bold;
+            .new-hires-list {
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
             }
-            .status {
-                padding: 5px 10px;
-                border-radius: 15px;
-                font-size: 0.85em;
-            }
-            .status-pending { background: #fff3cd; color: #856404; }
-            .status-active { background: #d4edda; color: #155724; }
-            .status-completed { background: #d1ecf1; color: #0c5460; }
-            .user-info {
+            .new-hire-item {
                 display: flex;
                 align-items: center;
-                gap: 20px;
-                position: relative;
-            }
-            .badge {
-                background: rgba(255,255,255,0.2);
-                padding: 5px 15px;
-                border-radius: 20px;
-                font-size: 0.9em;
-            }
-            .settings-dropdown {
-                position: relative;
-                display: inline-block;
-            }
-            .settings-icon {
-                cursor: pointer;
-                font-size: 1.5em;
-                padding: 5px 10px;
+                gap: 15px;
+                padding: 15px;
+                background: #f8f9fa;
                 border-radius: 0.5rem;
-                transition: background 0.3s;
+                transition: all 0.2s;
             }
-            .settings-icon:hover {
-                background: rgba(255,255,255,0.2);
+            .new-hire-item:hover {
+                background: #e9ecef;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             }
-            .dropdown-menu {
-                display: none;
-                position: absolute;
-                right: 0;
-                top: 100%;
-                background: white;
-                min-width: 200px;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-                border-radius: 0.5rem;
-                margin-top: 5px;
-                z-index: 1000;
+            .progress-avatar {
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                background: #FE0100;
+                color: white;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: bold;
+                flex-shrink: 0;
             }
-            .dropdown-menu.show {
-                display: block;
+            .new-hire-info {
+                flex: 1;
             }
-            .dropdown-item {
-                padding: 12px 20px;
+            .new-hire-name {
+                font-weight: 600;
+                margin-bottom: 5px;
+            }
+            .new-hire-name a {
                 color: #000000;
                 text-decoration: none;
-                display: block;
-                transition: background 0.2s;
             }
-            .dropdown-item:hover {
-                background: #f5f5f5;
+            .new-hire-name a:hover {
+                color: #FE0100;
             }
-            .dropdown-divider {
-                height: 1px;
-                background: #eee;
-                margin: 5px 0;
+            .new-hire-meta {
+                font-size: 0.85em;
+                color: #808080;
             }
+            .progress-percentage {
+                font-weight: 600;
+                color: #1976d2;
+                min-width: 60px;
+                text-align: right;
+            }
+            .progress-bar-container {
+                width: 150px;
+                height: 8px;
+                background: #e0e0e0;
+                border-radius: 0.5rem;
+                overflow: hidden;
+            }
+            .progress-bar-fill {
+                height: 100%;
+                border-radius: 0.5rem;
+                transition: width 0.3s;
+            }
+            .progress-bar-fill.completed { background: #4caf50; }
+            .progress-bar-fill.in-progress { background: #ff9800; }
+            .progress-bar-fill.not-started { background: #2196f3; }
             
-            /* Mobile Responsive Styles */
             @media (max-width: 768px) {
-                .header {
+                .top-header {
                     padding: 12px 15px;
                     flex-wrap: wrap;
                 }
-                .header-content {
-                    flex-direction: column;
-                    align-items: flex-start;
-                    gap: 10px;
+                .logo-section {
+                    font-size: 1.1em;
                 }
-                .header-content h1 {
-                    font-size: 1.2em;
-                }
-                .user-info {
-                    flex-wrap: wrap;
-                    gap: 10px;
+                .logo-section img {
+                    height: 60px;
+                    margin-bottom: -30px;
                 }
                 .container {
                     padding: 15px;
                 }
-                table {
-                    display: block;
-                    overflow-x: auto;
-                    -webkit-overflow-scrolling: touch;
-                    font-size: 0.85em;
+                .section {
+                    padding: 20px;
                 }
-                th, td {
-                    padding: 10px 8px;
-                    white-space: nowrap;
+                .new-hire-item {
+                    flex-wrap: wrap;
+                    gap: 10px;
                 }
-                .btn {
-                    min-height: 44px;
-                    padding: 12px 20px;
-                    font-size: 1em;
-                }
-            }
-            
-            @media (max-width: 480px) {
-                .header {
-                    padding: 10px 12px;
-                }
-                .header-content h1 {
-                    font-size: 1em;
-                }
-                th, td {
-                    padding: 8px 6px;
-                    font-size: 0.8em;
+                .progress-bar-container {
+                    width: 100%;
+                    margin-top: 10px;
                 }
             }
         </style>
     </head>
     <body>
-        <div class="header">
-            <div class="header-content">
-                <h1>📋 New Hires</h1>
-                <div class="user-info">
-                    <span>{{ current_user.username }}</span>
-                    <span class="badge">{{ "Admin" if current_user.is_admin() else "User" }}</span>
-                    <div class="settings-dropdown">
-                        <span class="settings-icon" onclick="toggleDropdown()">⚙️</span>
-                        <div class="dropdown-menu" id="settingsDropdown">
-                            {% if current_user.is_admin() %}
-                            <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                            <div class="dropdown-divider"></div>
-                            {% endif %}
-                            <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
-                            <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
-                        </div>
-                    </div>
-                </div>
+        <div class="top-header">
+            <div class="logo-section">
+                <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('dashboard') }}" class="back-btn">← Back</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            
-            {% if new_hires %}
-            <table>
-                <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>Email</th>
-                        <th>Department</th>
-                        <th>Position</th>
-                        <th>Start Date</th>
-                        <th>Status</th>
-                        <th>Created By</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for hire in new_hires %}
-                    <tr>
-                        <td><strong>{{ hire.username }}</strong></td>
-                        <td>{{ hire.first_name }} {{ hire.last_name }}</td>
-                        <td>{{ hire.email }}</td>
-                        <td>{{ hire.department or '-' }}</td>
-                        <td>{{ hire.position or '-' }}</td>
-                        <td>{{ hire.start_date.strftime('%Y-%m-%d') if hire.start_date else '-' }}</td>
-                        <td><span class="status status-{{ hire.status }}">{{ hire.status }}</span></td>
-                        <td>{{ hire.required_training_videos.count() }} video(s)</td>
-                        <td>{{ hire.created_by }}</td>
-                    </tr>
+            <div class="section">
+                <h2 class="section-title">New Hires List</h2>
+                {% if new_hires_with_progress %}
+                <div class="new-hires-list">
+                    {% for item in new_hires_with_progress %}
+                    <div class="new-hire-item">
+                        <div class="progress-avatar">{{ item.new_hire.first_name[0].upper() if item.new_hire.first_name else 'N' }}</div>
+                        <div class="new-hire-info">
+                            <div class="new-hire-name">
+                                <a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}">
+                                    {{ item.new_hire.first_name }} {{ item.new_hire.last_name }}
+                                </a>
+                            </div>
+                            <div class="new-hire-meta">
+                                {{ item.new_hire.username }}
+                                {% if item.new_hire.department %} • {{ item.new_hire.department }}{% endif %}
+                                {% if item.new_hire.position %} • {{ item.new_hire.position }}{% endif %}
+                                {% if item.total > 0 %} • {{ item.completed }}/{{ item.total }} videos{% endif %}
+                            </div>
+                        </div>
+                        <div class="progress-bar-container">
+                            {% if item.progress == 100 %}
+                            <div class="progress-bar-fill completed" style="width: 100%;"></div>
+                            {% elif item.progress > 0 %}
+                            <div class="progress-bar-fill in-progress" style="width: {{ item.progress }}%;"></div>
+                            {% else %}
+                            <div class="progress-bar-fill not-started" style="width: 100%;"></div>
+                            {% endif %}
+                        </div>
+                        <div class="progress-percentage">{{ item.progress }}%</div>
+                    </div>
                     {% endfor %}
-                </tbody>
-            </table>
-            {% else %}
-            <p>No new hires found.</p>
-            {% endif %}
+                </div>
+                {% else %}
+                <p style="color: #666; text-align: center; padding: 40px;">No new hires found.</p>
+                {% endif %}
+            </div>
         </div>
-        
-        <script>
-            function toggleDropdown() {
-                var dropdown = document.getElementById('settingsDropdown');
-                dropdown.classList.toggle('show');
-            }
-            
-            window.onclick = function(event) {
-                if (!event.target.matches('.settings-icon')) {
-                    var dropdown = document.getElementById('settingsDropdown');
-                    if (dropdown.classList.contains('show')) {
-                        dropdown.classList.remove('show');
-                    }
-                }
-            }
-        </script>
     </body>
     </html>
-    ''', new_hires=new_hires)
+    ''', new_hires_with_progress=new_hires_with_progress, admin_name=admin_name)
 
 
 @app.route('/admin/new-hire/add')
@@ -3663,6 +3771,27 @@ def create_new_hire():
             video = TrainingVideo.query.get(int(video_id))
             if video:
                 new_hire.required_training_videos.append(video)
+                
+                # Create a UserTask for this training video
+                # Check if task already exists
+                existing_task = UserTask.query.filter_by(
+                    username=username,
+                    task_type='training',
+                    status='pending'
+                ).filter(UserTask.notes.like(f'video_id:{video_id}%')).first()
+                
+                if not existing_task:
+                    task = UserTask(
+                        username=username,
+                        task_title=f"Complete Training: {video.title}",
+                        task_description=f"Please watch and complete the training video: {video.title}",
+                        task_type='training',
+                        priority='normal',
+                        status='pending',
+                        assigned_by=current_user.username,
+                        notes=f'video_id:{video_id}'
+                    )
+                    db.session.add(task)
         
         # Assign documents if selected
         for doc_id in required_documents:
@@ -3716,122 +3845,147 @@ def create_new_hire():
 @admin_required
 def admin_dashboard():
     """Admin dashboard"""
-    total_users = UserModel.query.count()
-    total_new_hires = NewHire.query.count()
-    admin_users = UserModel.query.filter_by(role='admin').count()
-    
-    # Get forms completed count (documents that are visible)
-    forms_completed = Document.query.filter_by(is_visible=True).count()
-    
-    # Get onboarding checklists count (total checklist items available)
-    total_checklist_items = ChecklistItem.query.filter_by(is_active=True).count()
-    
-    # Get all new hires with their progress
-    all_new_hires = NewHire.query.order_by(NewHire.created_at.desc()).all()
-    new_hires_with_progress = []
-    
-    for new_hire in all_new_hires:
-        required_videos = list(new_hire.required_training_videos)
-        total_videos = len(required_videos)
-        completed_videos = 0
+    try:
+        total_users = UserModel.query.count()
+        total_new_hires = NewHire.query.count()
+        admin_users = UserModel.query.filter_by(role='admin').count()
         
-        for video in required_videos:
-            progress = UserTrainingProgress.query.filter_by(
-                username=new_hire.username,
-                video_id=video.id,
-                is_completed=True,
-                is_passed=True
-            ).first()
-            if progress:
-                completed_videos += 1
+        # Get forms completed count (documents that are visible)
+        forms_completed = Document.query.filter_by(is_visible=True).count()
         
-        progress_percentage = int((completed_videos / total_videos * 100)) if total_videos > 0 else 0
-        new_hires_with_progress.append({
-            'new_hire': new_hire,
-            'progress': progress_percentage,
-            'completed': completed_videos,
-            'total': total_videos
-        })
-    
-    # Get recent activity (new hires ordered by creation date)
-    recent_activity = all_new_hires[:10]
-    
-    # Get form status stats - documents with signature fields
-    documents_with_signatures = Document.query.join(DocumentSignatureField).distinct().all()
-    form_status_data = []
-    
-    for doc in documents_with_signatures:
-        # Get all required signature fields for this document
-        required_fields = DocumentSignatureField.query.filter_by(
-            document_id=doc.id,
-            is_required=True
-        ).all()
+        # Get onboarding checklists count (total checklist items available)
+        total_checklist_items = ChecklistItem.query.filter_by(is_active=True).count()
         
-        total_required = len(required_fields)
-        if total_required == 0:
-            continue  # Skip documents with no required fields
+        # Get all new hires with their progress
+        all_new_hires = NewHire.query.order_by(NewHire.created_at.desc()).all()
+        new_hires_with_progress = []
         
-        # Count how many unique users have signed all required fields
-        # For admin dashboard, we'll show overall completion across all users
-        signed_count = 0
-        all_users = UserModel.query.all()
-        
-        for user in all_users:
-            user_signatures = DocumentSignature.query.filter_by(
-                document_id=doc.id,
-                username=user.username
-            ).all()
-            signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
+        for new_hire in all_new_hires:
+            required_videos = list(new_hire.required_training_videos)
+            total_videos = len(required_videos)
+            completed_videos = 0
             
-            # Check if user has signed all required fields
-            all_signed = all(f.id in signed_field_ids for f in required_fields)
-            if all_signed:
-                signed_count += 1
-        
-        total_users = len(all_users)
-        percentage = int((signed_count / total_users * 100)) if total_users > 0 else 0
-        
-        form_status_data.append({
-            'doc_id': doc.id,
-            'name': doc.original_filename or 'Untitled Document',
-            'signed': signed_count,
-            'total': total_users,
-            'percentage': percentage
-        })
-    
-    # Sort by percentage descending and limit to 4 items
-    form_status_data.sort(key=lambda x: x['percentage'], reverse=True)
-    form_status_data = form_status_data[:4]
-    
-    # Get admin user info
-    admin_user = current_user
-    admin_name = f"{admin_user.username}"
-    
-    # Build notifications for admin (can be empty for now, or add admin-specific notifications)
-    notifications = []
-    
-    # Add test notification for "aka" user
-    if admin_user.username.lower() == 'aka':
-        # Check if test notification has been read
-        test_notification = UserNotification.query.filter_by(
-            username=admin_user.username,
-            notification_type='test',
-            notification_id='999'
-        ).first()
-        
-        is_read = test_notification.is_read if test_notification else False
-        
-        if not is_read:
-            notifications.append({
-                'type': 'test',
-                'id': 999,
-                'title': 'Test Notification',
-                'message': 'This is a test notification to verify the notification system is working correctly.',
-                'url': url_for('admin_dashboard'),
-                'is_read': False
+            for video in required_videos:
+                progress = UserTrainingProgress.query.filter_by(
+                    username=new_hire.username,
+                    video_id=video.id,
+                    is_completed=True,
+                    is_passed=True
+                ).first()
+                if progress:
+                    completed_videos += 1
+            
+            progress_percentage = int((completed_videos / total_videos * 100)) if total_videos > 0 else 0
+            new_hires_with_progress.append({
+                'new_hire': new_hire,
+                'progress': progress_percentage,
+                'completed': completed_videos,
+                'total': total_videos
             })
-    
-    pending_count = len([n for n in notifications if not n['is_read']])
+        
+        # Get recent activity (new hires ordered by creation date)
+        recent_activity = all_new_hires[:10]
+        
+        # Get form status stats - documents with signature fields
+        # Wrap in try/except to handle potential database schema issues
+        form_status_data = []
+        try:
+            documents_with_signatures = Document.query.join(DocumentSignatureField).distinct().all()
+            
+            for doc in documents_with_signatures:
+                # Get all required signature fields for this document
+                required_fields = DocumentSignatureField.query.filter_by(
+                    document_id=doc.id,
+                    is_required=True
+                ).all()
+                
+                total_required = len(required_fields)
+                if total_required == 0:
+                    continue  # Skip documents with no required fields
+                
+                # Count how many unique users have signed all required fields
+                # For admin dashboard, we'll show overall completion across all users
+                signed_count = 0
+                all_users = UserModel.query.all()
+                
+                for user in all_users:
+                    try:
+                        # Check if user has signed all required fields (using helper to handle deleted fields)
+                        all_signed = all(is_signature_field_signed(doc.id, f, user.username) for f in required_fields)
+                        if all_signed:
+                            signed_count += 1
+                    except Exception as e:
+                        # If checking signatures fails, skip this user
+                        print(f"Error checking signatures for user {user.username}: {e}")
+                        continue
+                
+                total_users = len(all_users)
+                percentage = int((signed_count / total_users * 100)) if total_users > 0 else 0
+                
+                form_status_data.append({
+                    'doc_id': doc.id,
+                    'name': doc.original_filename or 'Untitled Document',
+                    'signed': signed_count,
+                    'total': total_users,
+                    'percentage': percentage
+                })
+        except Exception as e:
+            # If form status calculation fails, just use empty list
+            print(f"Error calculating form status: {e}")
+            import traceback
+            traceback.print_exc()
+            form_status_data = []
+        
+        # Sort by percentage descending and limit to 4 items
+        form_status_data.sort(key=lambda x: x['percentage'], reverse=True)
+        form_status_data = form_status_data[:4]
+        
+        # Get admin user info
+        admin_user = current_user
+        admin_name = f"{admin_user.username}"
+        
+        # Build notifications for admin (can be empty for now, or add admin-specific notifications)
+        notifications = []
+        
+        # Add test notification for "aka" user
+        if admin_user.username.lower() == 'aka':
+            # Check if test notification has been read
+            test_notification = UserNotification.query.filter_by(
+                username=admin_user.username,
+                notification_type='test',
+                notification_id='999'
+            ).first()
+            
+            is_read = test_notification.is_read if test_notification else False
+            
+            if not is_read:
+                notifications.append({
+                    'type': 'test',
+                    'id': 999,
+                    'title': 'Test Notification',
+                    'message': 'This is a test notification to verify the notification system is working correctly.',
+                    'url': url_for('admin_dashboard'),
+                    'is_read': False
+                })
+        
+        pending_count = len([n for n in notifications if not n['is_read']])
+    except Exception as e:
+        # If there's an error, log it and show a basic dashboard
+        import traceback
+        traceback.print_exc()
+        print(f"Error in admin_dashboard: {e}")
+        # Set defaults to prevent template errors
+        total_users = 0
+        total_new_hires = 0
+        admin_users = 0
+        forms_completed = 0
+        total_checklist_items = 0
+        new_hires_with_progress = []
+        recent_activity = []
+        form_status_data = []
+        admin_name = current_user.username if current_user else "Admin"
+        pending_count = 0
+        notifications = []
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -3923,7 +4077,7 @@ def admin_dashboard():
                 gap: 15px;
                 position: relative;
             }
-            .notification-icon, .search-icon {
+            .notification-icon {
                 font-size: 1.3em;
                 cursor: pointer;
                 position: relative;
@@ -4245,11 +4399,17 @@ def admin_dashboard():
                 background: #e0e0e0;
                 border-radius: 3px;
                 overflow: hidden;
+                display: inline-block;
+                vertical-align: middle;
             }
             .table-progress-fill {
                 height: 100%;
                 background: #4caf50;
                 border-radius: 3px;
+                min-width: 0;
+            }
+            .table-progress-fill[style*="width: 0%"] {
+                display: none;
             }
             .sidebar {
                 display: flex;
@@ -4291,12 +4451,10 @@ def admin_dashboard():
             .form-status-name {
                 font-size: 0.9em;
                 color: #000000;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
                 flex: 1;
                 min-width: 0;
-                max-width: 200px;
+                word-break: break-word;
+                overflow-wrap: break-word;
             }
             .form-status-progress {
                 width: 120px;
@@ -4304,17 +4462,23 @@ def admin_dashboard():
                 background: #e0e0e0;
                 border-radius: 3px;
                 overflow: hidden;
+                flex-shrink: 0;
             }
             .form-status-fill {
                 height: 100%;
                 background: #4caf50;
                 border-radius: 3px;
+                min-width: 0;
+            }
+            .form-status-fill[style*="width: 0%"] {
+                display: none;
             }
             .form-status-count {
                 font-size: 0.85em;
                 color: #808080;
                 min-width: 50px;
                 text-align: right;
+                flex-shrink: 0;
             }
             .quick-link-item {
                 padding: 12px 0;
@@ -4404,13 +4568,19 @@ def admin_dashboard():
                 .top-header {
                     padding: 12px 15px;
                     flex-wrap: wrap;
+                    min-height: 50px;
                 }
                 .logo-section {
                     font-size: 1.1em;
+                    flex: 1;
+                    min-width: 0;
+                }
+                .logo-section .logo-text {
+                    display: none;
                 }
                 .logo-section img {
-                    height: 60px;
-                    margin-bottom: -30px;
+                    height: 50px;
+                    margin-bottom: -25px;
                 }
                 .nav-links {
                     display: none;
@@ -4419,12 +4589,12 @@ def admin_dashboard():
                     display: block;
                 }
                 .user-section {
-                    gap: 10px;
+                    gap: 8px;
                 }
                 .user-dropdown span:not(.user-icon) {
                     display: none;
                 }
-                .notification-icon, .search-icon {
+                .notification-icon {
                     font-size: 1.1em;
                 }
                 .notification-dropdown {
@@ -4434,6 +4604,24 @@ def admin_dashboard():
                 }
                 .main-container {
                     padding: 15px;
+                    gap: 15px;
+                }
+                .welcome-banner {
+                    padding: 15px;
+                }
+                .summary-cards {
+                    gap: 12px;
+                }
+                .summary-card {
+                    padding: 15px;
+                }
+                .summary-icon {
+                    width: 50px;
+                    height: 50px;
+                    font-size: 1.5em;
+                }
+                .summary-content .number {
+                    font-size: 1.5em;
                 }
                 .welcome-banner {
                     flex-direction: column;
@@ -4443,6 +4631,11 @@ def admin_dashboard():
                 }
                 .welcome-banner h1 {
                     font-size: 1.8em;
+                }
+                .filter-dropdown {
+                    width: 100%;
+                    font-size: 16px; /* Prevents zoom on iOS */
+                    min-height: 44px; /* Touch-friendly */
                 }
                 .summary-cards {
                     grid-template-columns: 1fr;
@@ -4471,11 +4664,22 @@ def admin_dashboard():
                 .sidebar {
                     margin-top: 20px;
                 }
+                .form-status-item {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 8px;
+                }
+                .form-status-name {
+                    width: 100%;
+                    max-width: none;
+                }
                 .form-status-progress {
-                    width: 80px;
+                    width: 100%;
                 }
                 .form-status-count {
-                    min-width: 40px;
+                    min-width: auto;
+                    width: 100%;
+                    text-align: left;
                     font-size: 0.8em;
                 }
             }
@@ -4483,27 +4687,67 @@ def admin_dashboard():
             @media (max-width: 480px) {
                 .top-header {
                     padding: 10px 12px;
+                    min-height: 45px;
                 }
                 .logo-section {
-                    font-size: 1em;
+                    font-size: 0.9em;
+                }
+                .logo-section .logo-text {
+                    display: none;
                 }
                 .logo-section img {
-                    height: 50px;
-                    margin-bottom: -25px;
+                    height: 40px;
+                    margin-bottom: -20px;
+                }
+                .back-btn {
+                    font-size: 0.75em;
+                    padding: 6px 10px;
+                }
+                .welcome-banner {
+                    padding: 12px;
                 }
                 .welcome-banner h1 {
-                    font-size: 1.5em;
+                    font-size: 1.3em;
+                }
+                .summary-card {
+                    padding: 12px;
+                }
+                .summary-icon {
+                    width: 40px;
+                    height: 40px;
+                    font-size: 1.2em;
+                }
+                .summary-content .number {
+                    font-size: 1.3em;
                 }
                 .section {
-                    padding: 15px;
+                    padding: 12px;
                 }
                 .section-title {
-                    font-size: 1.2em;
+                    font-size: 1.1em;
                 }
                 .btn {
                     min-height: 44px;
                     padding: 12px 16px;
                     font-size: 0.95em;
+                }
+                .section-header {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 10px;
+                }
+                .section-header .filter-dropdown {
+                    width: 100%;
+                    font-size: 16px;
+                    min-height: 44px;
+                }
+                .progress-item {
+                    padding: 10px 0;
+                }
+                .progress-avatar {
+                    width: 35px;
+                    height: 35px;
+                    font-size: 0.9em;
                 }
             }
         </style>
@@ -4512,7 +4756,7 @@ def admin_dashboard():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
@@ -4548,7 +4792,6 @@ def admin_dashboard():
                         </div>
                     </div>
                 </div>
-                <div class="search-icon">🔍</div>
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
                     <div class="user-icon">{{ admin_name[0].upper() if admin_name else 'A' }}</div>
                     <span>{{ admin_name }}</span>
@@ -4575,7 +4818,7 @@ def admin_dashboard():
                 </div>
                 
                 <div class="summary-cards">
-                    <div class="summary-card">
+                    <div class="summary-card" style="cursor: pointer;" onclick="window.location.href='{{ url_for('view_all_new_hires') }}'">
                         <div class="summary-icon blue">👥</div>
                         <div class="summary-content">
                             <h3>New Hires</h3>
@@ -4619,7 +4862,7 @@ def admin_dashboard():
                                     {% elif item.progress > 0 %}
                                     <div class="progress-fill in-progress" style="width: {{ item.progress }}%;"></div>
                                     {% else %}
-                                    <div class="progress-fill not-started" style="width: 100%;"></div>
+                                    <span style="color: #666; font-size: 0.85em;">0%</span>
                                     {% endif %}
                                 </div>
                             </div>
@@ -4657,12 +4900,16 @@ def admin_dashboard():
                         <tbody>
                             {% for item in new_hires_with_progress[:6] %}
                             <tr>
-                                <td><a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" style="color: #333; text-decoration: none; font-weight: 600;">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a></td>
-                                <td>{{ item.new_hire.position or '-' }}</td>
-                                <td>{{ item.new_hire.department or '-' }}</td>
-                                <td>
+                                <td data-label="Name"><a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" style="color: #333; text-decoration: none; font-weight: 600;">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a></td>
+                                <td data-label="Position">{{ item.new_hire.position or '-' }}</td>
+                                <td data-label="Department">{{ item.new_hire.department or '-' }}</td>
+                                <td data-label="Progress">
                                     <div class="table-progress">
+                                        {% if item.progress > 0 %}
                                         <div class="table-progress-fill" style="width: {{ item.progress }}%;"></div>
+                                        {% else %}
+                                        <span style="color: #666; font-size: 0.85em;">0%</span>
+                                        {% endif %}
                                     </div>
                                     <span style="font-size: 0.85em; color: #808080; margin-left: 8px;">{{ item.progress }}%</span>
                                 </td>
@@ -4672,26 +4919,6 @@ def admin_dashboard():
                     </table>
                 </div>
                 
-                <div class="section">
-                    <div class="section-header">
-                        <h2 class="section-title">New Hires List</h2>
-                        <div style="display: flex; gap: 10px;">
-                            <button style="background: none; border: none; font-size: 1.2em; cursor: pointer;">←</button>
-                            <button style="background: none; border: none; font-size: 1.2em; cursor: pointer;">→</button>
-                        </div>
-                    </div>
-                    <div class="new-hires-list">
-                        {% for item in new_hires_with_progress[:5] %}
-                        <div class="new-hire-item">
-                            <div class="progress-avatar">{{ item.new_hire.first_name[0].upper() if item.new_hire.first_name else 'N' }}</div>
-                            <div style="flex: 1;">
-                                <div style="font-weight: 600;"><a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" style="color: #333; text-decoration: none; cursor: pointer;">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a></div>
-                            </div>
-                            <div style="font-weight: 600; color: #1976d2;">{{ item.progress }}%</div>
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
             </div>
             
             <div class="sidebar">
@@ -4706,7 +4933,11 @@ def admin_dashboard():
                                 <div class="form-status-item" style="cursor: pointer; transition: background 0.2s;">
                                     <span class="form-status-name">{{ form.name }}</span>
                                     <div class="form-status-progress">
+                                        {% if form.percentage > 0 %}
                                         <div class="form-status-fill" style="width: {{ form.percentage }}%;"></div>
+                                        {% else %}
+                                        <span style="color: #666; font-size: 0.75em;">0%</span>
+                                        {% endif %}
                                     </div>
                                     <span class="form-status-count">{{ form.signed }}/{{ form.total }}</span>
                                 </div>
@@ -4769,6 +5000,13 @@ def admin_dashboard():
             function toggleUserDropdown() {
                 var dropdown = document.getElementById('userDropdown');
                 dropdown.classList.toggle('show');
+            }
+            
+            function toggleMobileMenu() {
+                var mobileNav = document.getElementById('mobileNav');
+                if (mobileNav) {
+                    mobileNav.classList.toggle('show');
+                }
             }
             
             function toggleNotificationDropdown(event) {
@@ -5050,12 +5288,19 @@ def manage_users():
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             }
+            .form-group h3 {
+                font-size: 1.2em;
+                margin-bottom: 15px;
+                font-weight: 600;
+            }
             .form-group input {
                 padding: 10px;
                 border: 1px solid #ddd;
                 border-radius: 0.5rem;
                 width: 300px;
                 margin-right: 10px;
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px; /* Touch-friendly */
             }
             .form-group button {
                 padding: 10px 20px;
@@ -5064,6 +5309,101 @@ def manage_users():
                 border: none;
                 border-radius: 0.5rem;
                 cursor: pointer;
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px; /* Touch-friendly */
+            }
+            
+            /* Mobile Responsive Styles */
+            @media (max-width: 768px) {
+                .header {
+                    padding: 12px 15px;
+                    flex-wrap: wrap;
+                }
+                .header-content h1 {
+                    font-size: 1.2em;
+                }
+                .back-btn {
+                    font-size: 0.85em;
+                    padding: 6px 12px;
+                }
+                .container {
+                    padding: 15px;
+                }
+                .form-group {
+                    padding: 15px;
+                }
+                .form-group h3 {
+                    font-size: 1.2em;
+                    margin-bottom: 15px;
+                }
+                .form-group input {
+                    width: 100%;
+                    margin-right: 0;
+                    margin-bottom: 10px;
+                }
+                .form-group button {
+                    width: 100%;
+                }
+                table {
+                    display: block;
+                    overflow-x: visible;
+                }
+                thead {
+                    display: none;
+                }
+                tbody {
+                    display: block;
+                }
+                tr {
+                    display: block;
+                    margin-bottom: 15px;
+                    background: white;
+                    border-radius: 0.5rem;
+                    padding: 15px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    border: 1px solid #e0e0e0;
+                }
+                td {
+                    display: block;
+                    padding: 8px 0;
+                    text-align: left;
+                    border: none;
+                    font-size: 0.9em;
+                    white-space: normal;
+                    word-break: break-word;
+                }
+                td:before {
+                    content: attr(data-label) ": ";
+                    font-weight: 600;
+                    color: #000000;
+                    display: inline-block;
+                    min-width: 120px;
+                }
+                th {
+                    display: none;
+                }
+                .action-btn {
+                    width: 100%;
+                    margin: 5px 0;
+                    min-height: 44px;
+                    text-align: center;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                .header-content h1 {
+                    font-size: 1em;
+                }
+                .form-group {
+                    padding: 12px;
+                }
+                .form-group h3 {
+                    font-size: 1.1em;
+                }
+                td:before {
+                    min-width: 100px;
+                    font-size: 0.85em;
+                }
             }
         </style>
     </head>
@@ -5099,14 +5439,14 @@ def manage_users():
                 <tbody>
                     {% for user in users %}
                     <tr>
-                        <td>{{ user.username }}</td>
-                        <td>{{ user.domain or '-' }}</td>
-                        <td>
+                        <td data-label="Username">{{ user.username }}</td>
+                        <td data-label="Domain">{{ user.domain or '-' }}</td>
+                        <td data-label="Role">
                             <span class="badge badge-{{ user.role }}">{{ user.role }}</span>
                         </td>
-                        <td>{{ user.email or '-' }}</td>
-                        <td>{{ user.last_login.strftime('%Y-%m-%d %H:%M') if user.last_login else 'Never' }}</td>
-                        <td>
+                        <td data-label="Email">{{ user.email or '-' }}</td>
+                        <td data-label="Last Login">{{ user.last_login.strftime('%Y-%m-%d %H:%M') if user.last_login else 'Never' }}</td>
+                        <td data-label="Actions">
                             {% if user.role == 'admin' %}
                                 <form method="POST" action="{{ url_for('remove_admin') }}" style="display: inline;">
                                     <input type="hidden" name="user_id" value="{{ user.id }}">
@@ -5193,18 +5533,31 @@ def remove_admin():
 @admin_required
 def manage_documents():
     """Manage documents - upload and manage new hire paperwork"""
-    documents = Document.query.order_by(Document.created_at.desc()).all()
-    
-    # Get signature status for each document
-    for doc in documents:
-        signature_fields = DocumentSignatureField.query.filter_by(document_id=doc.id).all()
-        doc.signature_fields_count = len(signature_fields)
-        # Count how many users have signed
-        signatures = DocumentSignature.query.filter_by(document_id=doc.id).all()
-        doc.signatures_count = len(signatures)
-        # Get unique users who signed
-        signed_users = set(sig.username for sig in signatures)
-        doc.signed_users_count = len(signed_users)
+    try:
+        documents = Document.query.order_by(Document.created_at.desc()).all()
+        
+        # Get signature status for each document
+        for doc in documents:
+            signature_fields = DocumentSignatureField.query.filter_by(document_id=doc.id).all()
+            doc.signature_fields_count = len(signature_fields)
+            # Count how many users have signed
+            try:
+                signatures = DocumentSignature.query.filter_by(document_id=doc.id).all()
+                doc.signatures_count = len(signatures)
+                # Get unique users who signed
+                signed_users = set(sig.username for sig in signatures)
+                doc.signed_users_count = len(signed_users)
+            except Exception as e:
+                # If query fails (columns don't exist), use defaults
+                doc.signatures_count = 0
+                doc.signed_users_count = 0
+    except Exception as e:
+        # If anything fails, provide default values
+        documents = Document.query.order_by(Document.created_at.desc()).all()
+        for doc in documents:
+            doc.signature_fields_count = 0
+            doc.signatures_count = 0
+            doc.signed_users_count = 0
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -5270,6 +5623,7 @@ def manage_documents():
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+                overflow: visible;
             }
             .admin-panel h2 {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -5343,7 +5697,7 @@ def manage_documents():
                 width: 100%;
                 background: white;
                 border-radius: 0.5rem;
-                overflow: hidden;
+                overflow: visible;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-top: 20px;
             }
@@ -5351,6 +5705,9 @@ def manage_documents():
                 padding: 15px;
                 text-align: left;
                 border-bottom: 1px solid #eee;
+            }
+            td {
+                position: relative;
             }
             th {
                 background: #f8f9fa;
@@ -5428,6 +5785,12 @@ def manage_documents():
             }
             .actions-dropdown.show {
                 display: block;
+            }
+            .actions-dropdown.show-up {
+                top: auto;
+                bottom: 100%;
+                margin-top: 0;
+                margin-bottom: 5px;
             }
             .actions-dropdown-item {
                 padding: 10px 15px;
@@ -5889,11 +6252,31 @@ def manage_documents():
                 allMenus.forEach(function(m) {
                     if (m !== menu) {
                         m.classList.remove('show');
+                        m.classList.remove('show-up');
                     }
                 });
                 
                 // Toggle current menu
+                var isShowing = menu.classList.contains('show');
                 menu.classList.toggle('show');
+                
+                if (!isShowing) {
+                    // Check if there's enough space below, if not, show above
+                    setTimeout(function() {
+                        var rect = menu.getBoundingClientRect();
+                        var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+                        var spaceBelow = viewportHeight - rect.bottom;
+                        var spaceAbove = rect.top;
+                        var menuHeight = rect.height;
+                        
+                        // If not enough space below (less than 50px buffer) and more space above, show upward
+                        if (spaceBelow < 50 && spaceAbove > menuHeight) {
+                            menu.classList.add('show-up');
+                        } else {
+                            menu.classList.remove('show-up');
+                        }
+                    }, 10);
+                }
             }
         </script>
     </body>
@@ -7496,7 +7879,7 @@ def delete_typed_field(field_id):
 @app.route('/admin/documents/signature-fields/<int:field_id>/delete', methods=['POST'])
 @admin_required
 def delete_signature_field(field_id):
-    """Delete a signature field"""
+    """Delete a signature field - preserves existing signatures by setting signature_field_id to null"""
     field = DocumentSignatureField.query.get(field_id)
     if not field:
         flash('Signature field not found.', 'error')
@@ -7505,13 +7888,31 @@ def delete_signature_field(field_id):
     doc_id = field.document_id
     
     try:
-        # Delete associated signatures
-        DocumentSignature.query.filter_by(signature_field_id=field_id).delete()
+        # Preserve existing signatures by setting signature_field_id to null
+        # The signatures retain their stored field metadata (page_number, x_position, etc.)
+        # so they can still be embedded in PDFs even if the field is deleted
+        signatures = DocumentSignature.query.filter_by(signature_field_id=field_id).all()
+        for sig in signatures:
+            # Ensure field metadata is stored (in case it wasn't stored when signature was created)
+            # Safely set new fields (may not exist if database not migrated yet)
+            try:
+                if not getattr(sig, 'field_page_number', None) and field:
+                    sig.field_page_number = field.page_number
+                    sig.field_x_position = field.x_position
+                    sig.field_y_position = field.y_position
+                    sig.field_width = field.width
+                    sig.field_height = field.height
+                    sig.field_label = field.field_label
+            except AttributeError:
+                # New columns don't exist yet, skip metadata storage
+                pass
+            sig.signature_field_id = None  # Disconnect from deleted field
+        
         # Delete the field
         db.session.delete(field)
         db.session.commit()
         
-        flash('Signature field deleted successfully.', 'success')
+        flash('Signature field deleted successfully. Existing signatures have been preserved.', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error deleting signature field: {str(e)}', 'error')
@@ -7952,11 +8353,13 @@ def view_documents():
     for doc in documents:
         signature_fields = DocumentSignatureField.query.filter_by(document_id=doc.id).all()
         doc.has_signature_fields = len(signature_fields) > 0
-        # Check if current user has signed all required fields
-        user_signatures = DocumentSignature.query.filter_by(document_id=doc.id, username=current_user.username).all()
-        signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
+        # Check if current user has signed all required fields (using helper to handle deleted fields)
         required_fields = [f for f in signature_fields if f.is_required]
-        doc.all_signed = len(required_fields) > 0 and all(f.id in signed_field_ids for f in required_fields)
+        try:
+            doc.all_signed = len(required_fields) > 0 and all(is_signature_field_signed(doc.id, f, current_user.username) for f in required_fields)
+        except Exception as e:
+            # If checking signatures fails, assume not signed
+            doc.all_signed = False
         # Only require signature if document is assigned
         doc.is_assigned = doc.id in assigned_doc_ids
         doc.needs_signature = doc.is_assigned and len(required_fields) > 0 and not doc.all_signed
@@ -8304,13 +8707,14 @@ def view_documents():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
@@ -8320,6 +8724,7 @@ def view_documents():
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
@@ -8502,10 +8907,14 @@ def view_document_embed(doc_id, username=None):
     if show_signed:
         try:
             # Get user's signatures for this document
-            user_signatures = DocumentSignature.query.filter_by(
-                document_id=doc_id,
-                username=username
-            ).all()
+            try:
+                user_signatures = DocumentSignature.query.filter_by(
+                    document_id=doc_id,
+                    username=username
+                ).all()
+            except Exception as e:
+                # If query fails (columns don't exist), use empty list
+                user_signatures = []
             
             # Get typed field values for this user (handle case where table might not exist yet)
             try:
@@ -8538,10 +8947,44 @@ def view_document_embed(doc_id, username=None):
                     if not sig.signature_image:
                         continue
                     
-                    # Get signature field
-                    field = DocumentSignatureField.query.get(sig.signature_field_id)
+                    # Get signature field (may be None if field was deleted)
+                    field = None
+                    if sig.signature_field_id:
+                        field = DocumentSignatureField.query.get(sig.signature_field_id)
+                    
+                    # Use stored field metadata if field doesn't exist (field was deleted)
+                    # This preserves signatures even when admin deletes and recreates fields
+                    # Safely access new fields (may not exist if database not migrated)
+                    try:
+                        sig_field_page = getattr(sig, 'field_page_number', None)
+                        sig_field_x = getattr(sig, 'field_x_position', None)
+                        sig_field_y = getattr(sig, 'field_y_position', None)
+                        sig_field_width = getattr(sig, 'field_width', None)
+                        sig_field_height = getattr(sig, 'field_height', None)
+                    except Exception:
+                        sig_field_page = None
+                        sig_field_x = None
+                        sig_field_y = None
+                        sig_field_width = None
+                        sig_field_height = None
+                    
                     if not field:
-                        continue
+                        if not sig_field_page or not sig_field_x or not sig_field_y:
+                            # Missing metadata, skip this signature
+                            continue
+                        # Use stored metadata
+                        page_number = sig_field_page
+                        x_position = sig_field_x
+                        y_position = sig_field_y
+                        width = sig_field_width or 200
+                        height = sig_field_height or 80
+                    else:
+                        # Use current field data (prefer stored metadata if available for consistency)
+                        page_number = sig_field_page if sig_field_page else field.page_number
+                        x_position = sig_field_x if sig_field_x else field.x_position
+                        y_position = sig_field_y if sig_field_y else field.y_position
+                        width = sig_field_width if sig_field_width else (field.width or 200)
+                        height = sig_field_height if sig_field_height else (field.height or 80)
                     
                     # Embed this signature
                     try:
@@ -8549,7 +8992,7 @@ def view_document_embed(doc_id, username=None):
                         import base64
                         from io import BytesIO
                         
-                        page_num = field.page_number - 1
+                        page_num = page_number - 1
                         if page_num < 0 or page_num >= len(pdf_doc):
                             continue
                         
@@ -8564,10 +9007,10 @@ def view_document_embed(doc_id, username=None):
                         viewer_width_px = viewer_height_px * (page_width / page_height)
                         scale_x = page_width / viewer_width_px
                         
-                        x_pdf = field.x_position * scale_x
-                        y_pdf = field.y_position * scale_y
-                        width_pdf = (field.width or 200) * scale_x
-                        height_pdf = (field.height or 80) * scale_y
+                        x_pdf = x_position * scale_x
+                        y_pdf = y_position * scale_y
+                        width_pdf = width * scale_x
+                        height_pdf = height * scale_y
                         
                         # Clamp to page bounds
                         x_pdf = max(0, min(x_pdf, page_width - width_pdf))
@@ -8792,8 +9235,53 @@ def render_document_with_signatures(doc_id):
         username=current_user.username
     ).filter(DocumentSignature.signature_field_id.in_(field_ids)).all() if field_ids else []
     
-    # Create a map of field_id -> signature
-    sig_map = {sig.signature_field_id: sig for sig in user_signatures}
+    # Also get orphaned signatures (where field was deleted) that match these fields by location
+    # Safely handle case where new columns don't exist yet
+    try:
+        orphaned_sigs = DocumentSignature.query.filter_by(
+            document_id=doc_id,
+            username=current_user.username
+        ).filter(DocumentSignature.signature_field_id.is_(None)).all()
+        
+        # Match orphaned signatures to fields by location
+        tolerance = 10.0
+        for field in signature_fields:
+            for sig in orphaned_sigs:
+                # Safely access new fields (may not exist if database not migrated)
+                sig_field_page = getattr(sig, 'field_page_number', None)
+                sig_field_x = getattr(sig, 'field_x_position', None)
+                sig_field_y = getattr(sig, 'field_y_position', None)
+                
+                if (sig_field_page == field.page_number and
+                    sig_field_x is not None and sig_field_y is not None and
+                    abs(sig_field_x - field.x_position) <= tolerance and
+                    abs(sig_field_y - field.y_position) <= tolerance):
+                    # Add to user_signatures if not already there
+                    if sig not in user_signatures:
+                        user_signatures.append(sig)
+                    break
+        
+        # Create a map of field_id -> signature (including orphaned signatures matched by location)
+        sig_map = {}
+        for sig in user_signatures:
+            if sig.signature_field_id:
+                sig_map[sig.signature_field_id] = sig
+            else:
+                # For orphaned signatures, find matching field by location
+                for field in signature_fields:
+                    sig_field_page = getattr(sig, 'field_page_number', None)
+                    sig_field_x = getattr(sig, 'field_x_position', None)
+                    sig_field_y = getattr(sig, 'field_y_position', None)
+                    
+                    if (sig_field_page == field.page_number and
+                        sig_field_x is not None and sig_field_y is not None and
+                        abs(sig_field_x - field.x_position) <= tolerance and
+                        abs(sig_field_y - field.y_position) <= tolerance):
+                        sig_map[field.id] = sig
+                        break
+    except Exception:
+        # If new columns don't exist yet, just use the basic sig_map
+        sig_map = {sig.signature_field_id: sig for sig in user_signatures if sig.signature_field_id}
     
     try:
         from PIL import Image
@@ -8918,8 +9406,42 @@ def sign_document(doc_id):
         return redirect(url_for('view_documents'))
     
     # Get existing signatures by current user
-    user_signatures = DocumentSignature.query.filter_by(document_id=doc_id, username=current_user.username).all()
-    signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
+    try:
+        user_signatures = DocumentSignature.query.filter_by(document_id=doc_id, username=current_user.username).all()
+    except Exception as e:
+        # If query fails (columns don't exist), use empty list
+        user_signatures = []
+    # Mark each field as signed or not (using helper to handle deleted fields)
+    # Also find the matching signature for each field
+    for field in signature_fields:
+        field.is_signed = is_signature_field_signed(doc_id, field, current_user.username)
+        # Find the matching signature for this field
+        field.matching_signature = None
+        if field.id:
+            # First try to find by field ID
+            field.matching_signature = next((sig for sig in user_signatures if sig.signature_field_id == field.id), None)
+        if not field.matching_signature:
+            # If not found by ID, try to find by location (for orphaned signatures)
+            try:
+                tolerance = 10.0
+                for sig in user_signatures:
+                    # Safely access new fields (may not exist if database not migrated)
+                    sig_field_page = getattr(sig, 'field_page_number', None)
+                    sig_field_x = getattr(sig, 'field_x_position', None)
+                    sig_field_y = getattr(sig, 'field_y_position', None)
+                    
+                    if (not sig.signature_field_id and
+                        sig_field_page == field.page_number and
+                        sig_field_x is not None and sig_field_y is not None and
+                        abs(sig_field_x - field.x_position) <= tolerance and
+                        abs(sig_field_y - field.y_position) <= tolerance):
+                        field.matching_signature = sig
+                        break
+            except Exception:
+                # If new columns don't exist yet, skip orphaned signature matching
+                pass
+    # Also create a set for backward compatibility with template
+    signed_field_ids = set(f.id for f in signature_fields if f.is_signed)
     
     # Get existing typed field values by current user (handle case where table might not exist yet)
     try:
@@ -9248,7 +9770,7 @@ def sign_document(doc_id):
                     <h3 style="margin-bottom: 15px;">Signature Fields</h3>
                     
                     {% for field in signature_fields %}
-                    <div class="signature-field-item {% if field.id in signed_field_ids %}signed{% endif %}" id="field-{{ field.id }}">
+                    <div class="signature-field-item {% if field.is_signed %}signed{% endif %}" id="field-{{ field.id }}">
                         <h4>{{ field.field_label or 'Signature Field' }}</h4>
                         <p>Page: {{ field.page_number }}</p>
                         {% if field.signature_type == 'cryptographic' %}
@@ -9258,29 +9780,26 @@ def sign_document(doc_id):
                             </p>
                         {% endif %}
                         <div id="signature-field-container-{{ field.id }}">
-                        {% if field.id in signed_field_ids %}
+                        {% if field.is_signed and field.matching_signature %}
                             <p style="color: #28a745; font-weight: bold;">✓ Signed</p>
-                            {% for sig in user_signatures %}
-                                {% if sig.signature_field_id == field.id %}
-                                    {% if sig.signature_type and sig.signature_type == 'cryptographic' %}
-                                        <div class="signature-preview" style="padding: 15px; background: #e8f4f8; border: 2px solid #0066cc; border-radius: 4px;">
-                                            <p style="margin: 0; color: #0066cc; font-weight: bold;">🔒 Cryptographically Signed</p>
-                                            <p style="margin: 5px 0 0 0; font-size: 0.85em; color: #666;">
-                                                Signed: {{ sig.signed_at.strftime('%Y-%m-%d %H:%M:%S') if sig.signed_at else 'N/A' }}<br>
-                                                {% if sig.signature_hash %}
-                                                Hash: {{ sig.signature_hash[:16] }}...
-                                                {% endif %}
-                                            </p>
-                                        </div>
-                                    {% else %}
-                                        {% if sig.signature_image %}
-                                        <div class="signature-preview">
-                                            <img src="data:image/png;base64,{{ sig.signature_image }}" alt="Signature">
-                                        </div>
+                            {% set sig = field.matching_signature %}
+                            {% if sig.signature_type and sig.signature_type == 'cryptographic' %}
+                                <div class="signature-preview" style="padding: 15px; background: #e8f4f8; border: 2px solid #0066cc; border-radius: 4px;">
+                                    <p style="margin: 0; color: #0066cc; font-weight: bold;">🔒 Cryptographically Signed</p>
+                                    <p style="margin: 5px 0 0 0; font-size: 0.85em; color: #666;">
+                                        Signed: {{ sig.signed_at.strftime('%Y-%m-%d %H:%M:%S') if sig.signed_at else 'N/A' }}<br>
+                                        {% if sig.signature_hash %}
+                                        Hash: {{ sig.signature_hash[:16] }}...
                                         {% endif %}
-                                    {% endif %}
+                                    </p>
+                                </div>
+                            {% else %}
+                                {% if sig.signature_image %}
+                                <div class="signature-preview">
+                                    <img src="data:image/png;base64,{{ sig.signature_image }}" alt="Signature">
+                                </div>
                                 {% endif %}
-                            {% endfor %}
+                            {% endif %}
                             <button type="button" onclick="redoSignature({{ field.id }})" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Signature</button>
                         {% else %}
                             {% if field.signature_type == 'cryptographic' %}
@@ -10092,12 +10611,39 @@ def submit_signature(doc_id):
             return jsonify({'success': False, 'error': 'Missing signature image'}), 400
     
     try:
-        # Check if user already signed this field
+        # Check if user already signed this field (by ID or by location for orphaned signatures)
         existing_signature = DocumentSignature.query.filter_by(
             document_id=doc_id,
             signature_field_id=signature_field_id,
             username=current_user.username
         ).first()
+        
+        # Also check for orphaned signatures at the same location
+        if not existing_signature:
+            try:
+                tolerance = 10.0
+                orphaned_sigs = DocumentSignature.query.filter_by(
+                    document_id=doc_id,
+                    username=current_user.username
+                ).filter(DocumentSignature.signature_field_id.is_(None)).all()
+                
+                for sig in orphaned_sigs:
+                    # Safely access new fields (may not exist if database not migrated)
+                    field_page = getattr(sig, 'field_page_number', None)
+                    field_x = getattr(sig, 'field_x_position', None)
+                    field_y = getattr(sig, 'field_y_position', None)
+                    
+                    if (field_page == signature_field.page_number and
+                        field_x is not None and field_y is not None and
+                        abs(field_x - signature_field.x_position) <= tolerance and
+                        abs(field_y - signature_field.y_position) <= tolerance):
+                        existing_signature = sig
+                        # Reconnect orphaned signature to the new field
+                        existing_signature.signature_field_id = signature_field_id
+                        break
+            except Exception:
+                # If new columns don't exist yet, skip orphaned signature matching
+                pass
         
         if existing_signature:
             # Update existing signature
@@ -10107,9 +10653,22 @@ def submit_signature(doc_id):
             existing_signature.ip_address = request.remote_addr
             existing_signature.user_agent = request.headers.get('User-Agent', '')
             existing_signature.consent_given = consent_given
+            # Update stored field metadata in case field was recreated
+            # Safely set new fields (may not exist if database not migrated yet)
+            try:
+                existing_signature.field_page_number = signature_field.page_number
+                existing_signature.field_x_position = signature_field.x_position
+                existing_signature.field_y_position = signature_field.y_position
+                existing_signature.field_width = signature_field.width
+                existing_signature.field_height = signature_field.height
+                existing_signature.field_label = signature_field.field_label
+            except AttributeError:
+                # New columns don't exist yet, skip metadata storage
+                pass
             sig_to_embed = existing_signature
         else:
-            # Create new signature record
+            # Create new signature record with stored field metadata
+            # Build signature with basic fields first
             new_signature = DocumentSignature(
                 document_id=doc_id,
                 signature_field_id=signature_field_id,
@@ -10121,6 +10680,18 @@ def submit_signature(doc_id):
                 user_agent=request.headers.get('User-Agent', ''),
                 consent_given=consent_given
             )
+            
+            # Add field metadata if columns exist (handle case where database hasn't been migrated)
+            try:
+                new_signature.field_page_number = signature_field.page_number
+                new_signature.field_x_position = signature_field.x_position
+                new_signature.field_y_position = signature_field.y_position
+                new_signature.field_width = signature_field.width
+                new_signature.field_height = signature_field.height
+                new_signature.field_label = signature_field.field_label
+            except (AttributeError, Exception):
+                # Columns don't exist yet, skip metadata (signature will still work)
+                pass
             db.session.add(new_signature)
             sig_to_embed = new_signature
         
@@ -10143,12 +10714,10 @@ def submit_signature(doc_id):
         
         db.session.commit()
         
-        # Check if all required fields are signed
+        # Check if all required fields are signed (using helper to handle deleted fields)
         all_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
-        user_sigs = DocumentSignature.query.filter_by(document_id=doc_id, username=current_user.username).all()
-        signed_field_ids = set(sig.signature_field_id for sig in user_sigs)
-        
-        all_signed = all(f.id in signed_field_ids for f in all_fields if f.is_required)
+        required_fields = [f for f in all_fields if f.is_required]
+        all_signed = all(is_signature_field_signed(doc_id, f, current_user.username) for f in required_fields) if required_fields else False
         
         # Update task completion if all fields signed
         if all_signed:
@@ -10250,12 +10819,42 @@ def delete_signature(doc_id):
             return jsonify({'success': False, 'error': 'Missing signature field ID'}), 400
         
         try:
-            # Find and delete the signature
+            # Get the signature field to check location
+            field = DocumentSignatureField.query.get(signature_field_id)
+            if not field:
+                return jsonify({'success': False, 'error': 'Signature field not found'}), 404
+            
+            # First try to find signature by field ID
             signature = DocumentSignature.query.filter_by(
                 document_id=doc_id,
                 signature_field_id=signature_field_id,
                 username=current_user.username
             ).first()
+            
+            # If not found by ID, try to find by location (for orphaned signatures)
+            if not signature:
+                try:
+                    tolerance = 10.0
+                    orphaned_sigs = DocumentSignature.query.filter_by(
+                        document_id=doc_id,
+                        username=current_user.username
+                    ).filter(DocumentSignature.signature_field_id.is_(None)).all()
+                    
+                    for sig in orphaned_sigs:
+                        # Safely access new fields (may not exist if database not migrated)
+                        field_page = getattr(sig, 'field_page_number', None)
+                        field_x = getattr(sig, 'field_x_position', None)
+                        field_y = getattr(sig, 'field_y_position', None)
+                        
+                        if (field_page == field.page_number and
+                            field_x is not None and field_y is not None and
+                            abs(field_x - field.x_position) <= tolerance and
+                            abs(field_y - field.y_position) <= tolerance):
+                            signature = sig
+                            break
+                except Exception:
+                    # If new columns don't exist yet, skip orphaned signature matching
+                    pass
             
             if signature:
                 db.session.delete(signature)
@@ -10602,15 +11201,19 @@ def view_signed_documents(doc_id):
         flash('Document not found.', 'error')
         return redirect(url_for('manage_documents'))
     
-    # Get all users who have signed this document
-    signatures = DocumentSignature.query.filter_by(document_id=doc_id).all()
-    
-    # Group signatures by username
-    signed_users = {}
-    for sig in signatures:
-        if sig.username not in signed_users:
-            signed_users[sig.username] = []
-        signed_users[sig.username].append(sig)
+    try:
+        # Get all users who have signed this document
+        signatures = DocumentSignature.query.filter_by(document_id=doc_id).all()
+        
+        # Group signatures by username
+        signed_users = {}
+        for sig in signatures:
+            if sig.username not in signed_users:
+                signed_users[sig.username] = []
+            signed_users[sig.username].append(sig)
+    except Exception as e:
+        # If query fails (columns don't exist), use empty dict
+        signed_users = {}
     
     # Get signature fields to check if all required fields are signed
     signature_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
@@ -10692,6 +11295,7 @@ def view_signed_documents(doc_id):
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+                overflow: visible;
             }
             .admin-panel h2 {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -10828,80 +11432,89 @@ def view_signed_documents(doc_id):
 @admin_required
 def view_form_signatures(doc_id):
     """View which users have signed a form and which haven't"""
-    document = Document.query.get(doc_id)
-    if not document:
-        flash('Document not found.', 'error')
-        return redirect(url_for('admin_dashboard'))
-    
-    # Get all required signature fields for this document
-    required_fields = DocumentSignatureField.query.filter_by(
-        document_id=doc_id,
-        is_required=True
-    ).all()
-    
-    if not required_fields:
-        flash('This document has no required signature fields.', 'error')
-        return redirect(url_for('admin_dashboard'))
-    
-    # Get only users who have been assigned this document
-    assignments = DocumentAssignment.query.filter_by(document_id=doc_id).all()
-    assigned_usernames = set(a.username for a in assignments)
-    
-    if not assigned_usernames:
-        # If no assignments, show message
+    try:
+        document = Document.query.get(doc_id)
+        if not document:
+            flash('Document not found.', 'error')
+            return redirect(url_for('admin_dashboard'))
+        
+        # Get all required signature fields for this document
+        required_fields = DocumentSignatureField.query.filter_by(
+            document_id=doc_id,
+            is_required=True
+        ).all()
+        
+        if not required_fields:
+            flash('This document has no required signature fields.', 'error')
+            return redirect(url_for('admin_dashboard'))
+        
+        # Get only users who have been assigned this document
+        assignments = DocumentAssignment.query.filter_by(document_id=doc_id).all()
+        assigned_usernames = set(a.username for a in assignments)
+        
+        if not assigned_usernames:
+            # If no assignments, show message
+            signed_users = []
+            unsigned_users = []
+        else:
+            # Get user records for assigned users only
+            assigned_users = UserModel.query.filter(UserModel.username.in_(assigned_usernames)).all()
+            
+            # Check signing status for each assigned user
+            users_status = []
+            for user in assigned_users:
+                try:
+                    # Check if user has signed all required fields (using helper to handle deleted fields)
+                    all_signed = all(is_signature_field_signed(doc_id, f, user.username) for f in required_fields)
+                    signed_count = len([f for f in required_fields if is_signature_field_signed(doc_id, f, user.username)])
+                except Exception as e:
+                    # If checking signatures fails, assume not signed
+                    all_signed = False
+                    signed_count = 0
+                
+                # Get user's new hire record if exists
+                new_hire = NewHire.query.filter_by(username=user.username).first()
+                try:
+                    if new_hire:
+                        first_name = new_hire.first_name or ''
+                        last_name = new_hire.last_name or ''
+                        user_name = f"{first_name} {last_name}".strip() or user.username
+                        user_email = getattr(new_hire, 'email', None) or getattr(user, 'email', None) or '-'
+                        user_department = getattr(new_hire, 'department', None) or '-'
+                    else:
+                        user_name = user.username
+                        user_email = getattr(user, 'email', None) or '-'
+                        user_department = '-'
+                except Exception as e:
+                    # Fallback if there's any error accessing attributes
+                    user_name = user.username
+                    user_email = '-'
+                    user_department = '-'
+                
+                users_status.append({
+                    'username': user.username,
+                    'name': user_name,
+                    'email': user_email,
+                    'department': user_department,
+                    'signed': all_signed,
+                    'signed_count': signed_count,
+                    'total_required': len(required_fields)
+                })
+            
+            # Sort: signed users first, then by name
+            users_status.sort(key=lambda x: (not x['signed'], x['name']))
+            
+            signed_users = [u for u in users_status if u['signed']]
+            unsigned_users = [u for u in users_status if not u['signed']]
+    except Exception as e:
+        # If anything fails, provide default values
+        flash(f'Error loading signature data: {str(e)}', 'error')
         signed_users = []
         unsigned_users = []
-    else:
-        # Get user records for assigned users only
-        assigned_users = UserModel.query.filter(UserModel.username.in_(assigned_usernames)).all()
-        
-        # Check signing status for each assigned user
-        users_status = []
-        for user in assigned_users:
-            user_signatures = DocumentSignature.query.filter_by(
-                document_id=doc_id,
-                username=user.username
-            ).all()
-            signed_field_ids = set(sig.signature_field_id for sig in user_signatures)
-            
-            # Check if user has signed all required fields
-            all_signed = all(f.id in signed_field_ids for f in required_fields)
-            signed_count = len([f for f in required_fields if f.id in signed_field_ids])
-            
-            # Get user's new hire record if exists
-            new_hire = NewHire.query.filter_by(username=user.username).first()
-            try:
-                if new_hire:
-                    first_name = new_hire.first_name or ''
-                    last_name = new_hire.last_name or ''
-                    user_name = f"{first_name} {last_name}".strip() or user.username
-                    user_email = getattr(new_hire, 'email', None) or getattr(user, 'email', None) or '-'
-                    user_department = getattr(new_hire, 'department', None) or '-'
-                else:
-                    user_name = user.username
-                    user_email = getattr(user, 'email', None) or '-'
-                    user_department = '-'
-            except Exception as e:
-                # Fallback if there's any error accessing attributes
-                user_name = user.username
-                user_email = '-'
-                user_department = '-'
-            
-            users_status.append({
-                'username': user.username,
-                'name': user_name,
-                'email': user_email,
-                'department': user_department,
-                'signed': all_signed,
-                'signed_count': signed_count,
-                'total_required': len(required_fields)
-            })
-        
-        # Sort: signed users first, then by name
-        users_status.sort(key=lambda x: (not x['signed'], x['name']))
-        
-        signed_users = [u for u in users_status if u['signed']]
-        unsigned_users = [u for u in users_status if not u['signed']]
+        required_fields = []
+        document = Document.query.get(doc_id)
+        if not document:
+            return redirect(url_for('admin_dashboard'))
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -11163,7 +11776,7 @@ def view_form_signatures(doc_id):
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
@@ -11289,10 +11902,14 @@ def download_signed_document(doc_id, username):
         return redirect(url_for('view_signed_documents', doc_id=doc_id))
     
     # Get all signatures by this user for this document
-    user_signatures = DocumentSignature.query.filter_by(
-        document_id=doc_id,
-        username=username
-    ).all()
+    try:
+        user_signatures = DocumentSignature.query.filter_by(
+            document_id=doc_id,
+            username=username
+        ).all()
+    except Exception as e:
+        # If query fails (columns don't exist), use empty list
+        user_signatures = []
     
     # Get typed field values for this user (handle case where table might not exist yet)
     try:
@@ -11918,7 +12535,7 @@ def view_new_hire_details(username):
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
@@ -12189,6 +12806,7 @@ def manage_checklist():
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+                overflow: visible;
             }
             .admin-panel h2 {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -12786,6 +13404,7 @@ def view_checklist():
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+                overflow: visible;
             }
             .admin-panel h2 {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -13212,7 +13831,7 @@ def view_user_checklists():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
@@ -13463,7 +14082,7 @@ def view_user_checklist(username):
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <a href="{{ url_for('view_user_checklists') }}" class="back-btn">← Back to User List</a>
         </div>
@@ -13925,7 +14544,7 @@ def manage_external_links():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
@@ -14578,7 +15197,7 @@ def edit_external_link(link_id):
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <a href="{{ url_for('manage_external_links') }}" class="back-btn">← Back to Links</a>
         </div>
@@ -15271,6 +15890,74 @@ def admin_reports():
         if user_stats and user_stats['overall_progress'] == 100:
             department_stats[dept]['completed'] += 1
     
+    # Detailed Training Information - per user and video
+    training_details = []
+    all_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.title).all()
+    
+    for new_hire in all_new_hires:
+        for video in all_videos:
+            # Get the latest progress record for this user and video
+            progress = UserTrainingProgress.query.filter_by(
+                username=new_hire.username,
+                video_id=video.id
+            ).order_by(UserTrainingProgress.attempt_number.desc()).first()
+            
+            if progress:
+                # Calculate watch percentage if video has duration
+                watch_percentage = 0
+                if video.duration and video.duration > 0:
+                    watch_percentage = min(100, (progress.time_watched / video.duration) * 100)
+                
+                # Format time watched
+                time_watched_min = int(progress.time_watched // 60)
+                time_watched_sec = int(progress.time_watched % 60)
+                time_watched_str = f"{time_watched_min}m {time_watched_sec}s"
+                
+                # Format video duration
+                video_duration_min = int(video.duration // 60) if video.duration else 0
+                video_duration_sec = int(video.duration % 60) if video.duration else 0
+                video_duration_str = f"{video_duration_min}m {video_duration_sec}s" if video.duration else "N/A"
+                
+                training_details.append({
+                    'user': new_hire,
+                    'video': video,
+                    'progress': progress,
+                    'watched': True,
+                    'score': progress.score,
+                    'watch_percentage': watch_percentage,
+                    'time_watched': time_watched_str,
+                    'video_duration': video_duration_str,
+                    'is_passed': progress.is_passed,
+                    'is_completed': progress.is_completed,
+                    'attempt_number': progress.attempt_number,
+                    'started_at': progress.started_at,
+                    'completed_at': progress.completed_at
+                })
+            else:
+                # User hasn't watched this video yet
+                video_duration_min = int(video.duration // 60) if video.duration else 0
+                video_duration_sec = int(video.duration % 60) if video.duration else 0
+                video_duration_str = f"{video_duration_min}m {video_duration_sec}s" if video.duration else "N/A"
+                
+                training_details.append({
+                    'user': new_hire,
+                    'video': video,
+                    'progress': None,
+                    'watched': False,
+                    'score': None,
+                    'watch_percentage': 0,
+                    'time_watched': '0m 0s',
+                    'video_duration': video_duration_str,
+                    'is_passed': False,
+                    'is_completed': False,
+                    'attempt_number': 0,
+                    'started_at': None,
+                    'completed_at': None
+                })
+    
+    # Sort training details by user name, then video title
+    training_details.sort(key=lambda x: (x['user'].last_name, x['user'].first_name, x['video'].title))
+    
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -15411,7 +16098,16 @@ def admin_reports():
                 color: white;
                 font-size: 0.75em;
                 font-weight: 600;
-                min-width: 40px;
+                min-width: 0;
+            }
+            .progress-fill[style*="width: 0%"] {
+                display: none;
+            }
+            .progress-fill.failed {
+                background: #dc3545;
+            }
+            .progress-fill.in-progress {
+                background: #ffc107;
             }
             .section-title {
                 font-size: 1.4em;
@@ -15420,6 +16116,29 @@ def admin_reports():
                 color: #000000;
                 border-bottom: 2px solid #dc3545;
                 padding-bottom: 10px;
+            }
+            .status-badge {
+                display: inline-block;
+                padding: 4px 10px;
+                border-radius: 12px;
+                font-size: 0.85em;
+                font-weight: 600;
+            }
+            .status-badge.passed {
+                background: #28a745;
+                color: white;
+            }
+            .status-badge.failed {
+                background: #dc3545;
+                color: white;
+            }
+            .status-badge.in-progress {
+                background: #ffc107;
+                color: #000;
+            }
+            .status-badge.not-watched {
+                background: #6c757d;
+                color: white;
             }
             
             /* Mobile Responsive Styles */
@@ -15493,7 +16212,7 @@ def admin_reports():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
@@ -15694,9 +16413,13 @@ def admin_reports():
                             </td>
                             <td>
                                 <div class="progress-bar">
+                                    {% if stats.overall_progress > 0 %}
                                     <div class="progress-fill" style="width: {{ stats.overall_progress }}%;">
                                         {{ stats.overall_progress }}%
                                     </div>
+                                    {% else %}
+                                    <span style="color: #666; font-size: 0.75em;">0%</span>
+                                    {% endif %}
                                 </div>
                             </td>
                         </tr>
@@ -15724,10 +16447,105 @@ def admin_reports():
                             <td>{{ stats.completed }}</td>
                             <td>
                                 <div class="progress-bar">
-                                    <div class="progress-fill" style="width: {{ (stats.completed / stats.count * 100) if stats.count > 0 else 0 }}%;">
-                                        {{ "%.0f"|format((stats.completed / stats.count * 100) if stats.count > 0 else 0) }}%
+                                    {% set completion_rate = (stats.completed / stats.count * 100) if stats.count > 0 else 0 %}
+                                    {% if completion_rate > 0 %}
+                                    <div class="progress-fill" style="width: {{ completion_rate }}%;">
+                                        {{ "%.0f"|format(completion_rate) }}%
                                     </div>
+                                    {% else %}
+                                    <span style="color: #666; font-size: 0.75em;">0%</span>
+                                    {% endif %}
                                 </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="section">
+                <h2 class="section-title">Detailed Training Information</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Employee Name</th>
+                            <th>Username</th>
+                            <th>Training Video</th>
+                            <th>Watched</th>
+                            <th>Watch Progress</th>
+                            <th>Time Watched</th>
+                            <th>Video Duration</th>
+                            <th>Score</th>
+                            <th>Status</th>
+                            <th>Attempts</th>
+                            <th>Completed Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for detail in training_details %}
+                        <tr>
+                            <td><strong>{{ detail.user.first_name }} {{ detail.user.last_name }}</strong></td>
+                            <td>{{ detail.user.username }}</td>
+                            <td>{{ detail.video.title }}</td>
+                            <td>
+                                {% if detail.watched %}
+                                    <span class="status-badge {% if detail.is_completed and detail.is_passed %}passed{% elif detail.is_completed and not detail.is_passed %}failed{% else %}in-progress{% endif %}">
+                                        {% if detail.is_completed and detail.is_passed %}Yes ✓{% elif detail.is_completed and not detail.is_passed %}Yes ✗{% else %}In Progress{% endif %}
+                                    </span>
+                                {% else %}
+                                    <span class="status-badge not-watched">No</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if detail.watched and detail.watch_percentage > 0 %}
+                                    <div class="progress-bar">
+                                        <div class="progress-fill {% if detail.is_completed and not detail.is_passed %}failed{% elif not detail.is_completed %}in-progress{% endif %}" style="width: {{ detail.watch_percentage }}%;">
+                                            {{ "%.0f"|format(detail.watch_percentage) }}%
+                                        </div>
+                                    </div>
+                                {% elif detail.watched and detail.watch_percentage == 0 %}
+                                    <div class="progress-bar">
+                                        <span style="color: #666; font-size: 0.75em;">0%</span>
+                                    </div>
+                                {% else %}
+                                    <span style="color: #999;">-</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ detail.time_watched }}</td>
+                            <td>{{ detail.video_duration }}</td>
+                            <td>
+                                {% if detail.score is not none %}
+                                    <strong>{{ "%.1f"|format(detail.score) }}%</strong>
+                                {% else %}
+                                    <span style="color: #999;">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if detail.watched %}
+                                    {% if detail.is_completed and detail.is_passed %}
+                                        <span class="status-badge passed">Passed</span>
+                                    {% elif detail.is_completed and not detail.is_passed %}
+                                        <span class="status-badge failed">Failed</span>
+                                    {% else %}
+                                        <span class="status-badge in-progress">In Progress</span>
+                                    {% endif %}
+                                {% else %}
+                                    <span class="status-badge not-watched">Not Started</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if detail.attempt_number > 0 %}
+                                    {{ detail.attempt_number }}
+                                {% else %}
+                                    <span style="color: #999;">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if detail.completed_at %}
+                                    {{ detail.completed_at.strftime('%Y-%m-%d %H:%M') }}
+                                {% else %}
+                                    <span style="color: #999;">-</span>
+                                {% endif %}
                             </td>
                         </tr>
                         {% endfor %}
@@ -15744,7 +16562,8 @@ def admin_reports():
          visible_documents=visible_documents, documents_with_signatures=documents_with_signatures,
          total_signatures=total_signatures, unique_signed_users=unique_signed_users,
          total_checklist_completions=total_checklist_completions,
-         user_progress_stats=user_progress_stats, department_stats=department_stats)
+         user_progress_stats=user_progress_stats, department_stats=department_stats,
+         training_details=training_details)
 
 
 @app.route('/admin/training')
@@ -15818,6 +16637,7 @@ def manage_training():
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+                overflow: visible;
             }
             .admin-panel h2 {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -16137,6 +16957,7 @@ def manage_video_quiz(video_id):
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 margin-bottom: 20px;
+                overflow: visible;
             }
             .admin-panel h2 {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -17292,6 +18113,21 @@ def save_training_score():
             progress.is_completed = True
             progress.completed_at = datetime.utcnow()
             progress.last_updated = datetime.utcnow()
+            
+            # If training is passed, mark corresponding task as completed
+            if is_passed and progress.is_completed:
+                # Find the task for this training video
+                video_id = progress.video_id
+                task = UserTask.query.filter_by(
+                    username=current_user.username,
+                    task_type='training',
+                    status='pending'
+                ).filter(UserTask.notes.like(f'video_id:{video_id}%')).first()
+                
+                if task:
+                    task.status = 'completed'
+                    task.completed_at = datetime.utcnow()
+            
             db.session.commit()
         return jsonify({'success': True})
     except Exception as e:
@@ -17798,13 +18634,14 @@ def list_training_videos():
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                Ziebart Onboarding
+                <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()" style="display: none; background: none; border: none; color: #ffffff; font-size: 1.5em; cursor: pointer; padding: 8px;">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}" class="active">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
@@ -17814,6 +18651,7 @@ def list_training_videos():
                 <a href="{{ url_for('dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Home</a>
                 <a href="{{ url_for('user_tasks') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Tasks</a>
                 <a href="{{ url_for('view_documents') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Files</a>
+                <a href="{{ url_for('list_training_videos') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Videos</a>
                 <a href="{{ url_for('profile') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em;">Admin Console</a>

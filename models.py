@@ -371,7 +371,7 @@ class DocumentSignature(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     document_id = db.Column(db.Integer, db.ForeignKey('documents.id'), nullable=False)
-    signature_field_id = db.Column(db.Integer, db.ForeignKey('document_signature_fields.id'), nullable=False)
+    signature_field_id = db.Column(db.Integer, db.ForeignKey('document_signature_fields.id'), nullable=True)  # Made nullable to preserve signatures when field is deleted
     username = db.Column(db.String(100), nullable=False, index=True)  # Username who signed
     signature_image = db.Column(db.Text, nullable=True)  # Base64 encoded signature image (for image-based)
     signature_hash = db.Column(db.String(64), nullable=True)  # SHA-256 hash of signed PDF (for cryptographic)
@@ -381,6 +381,14 @@ class DocumentSignature(db.Model):
     ip_address = db.Column(db.String(50))  # IP address when signed (for audit)
     user_agent = db.Column(db.String(500), nullable=True)  # Browser user agent
     consent_given = db.Column(db.Boolean, default=False)  # User consent for electronic signing
+    
+    # Stored field metadata (snapshot at time of signing) - preserves signature location even if field is deleted
+    field_page_number = db.Column(db.Integer, nullable=True)  # Page number where signature was placed
+    field_x_position = db.Column(db.Float, nullable=True)  # X coordinate where signature was placed
+    field_y_position = db.Column(db.Float, nullable=True)  # Y coordinate where signature was placed
+    field_width = db.Column(db.Float, nullable=True)  # Width of signature field
+    field_height = db.Column(db.Float, nullable=True)  # Height of signature field
+    field_label = db.Column(db.String(200), nullable=True)  # Label of the signature field
     
     # Relationships
     document = db.relationship('Document', backref='signatures')
