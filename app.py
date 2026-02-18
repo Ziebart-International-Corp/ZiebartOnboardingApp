@@ -16,6 +16,7 @@ from datetime import datetime
 import os
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.security import generate_password_hash
 from io import BytesIO
 import base64
 try:
@@ -129,10 +130,50 @@ def send_email(to_email, subject, body_html, body_text=None):
         return False
 
 
+_users_access_revoked_at_migrated = False
+
+
+def _ensure_users_access_revoked_at_column():
+    """Ensure users.access_revoked_at exists (one-time migration). Prevents 500 on load_user and index."""
+    global _users_access_revoked_at_migrated
+    if _users_access_revoked_at_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 access_revoked_at FROM users"))
+        _users_access_revoked_at_migrated = True
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        _users_access_revoked_at_migrated = True
+
+
+@app.before_request
+def _run_users_migration_if_needed():
+    """Run one-time migration for users.access_revoked_at before any request."""
+    if request.path.startswith('/static'):
+        return
+    try:
+        _ensure_users_access_revoked_at_column()
+    except Exception:
+        pass
+
+
 @login_manager.user_loader
 def load_user(user_id):
     """Load user from session (user_id is username)."""
-    user_record = UserModel.query.filter_by(username=user_id).first()
+    try:
+        user_record = UserModel.query.filter_by(username=user_id).first()
+    except Exception:
+        db.session.rollback()
+        _ensure_users_access_revoked_at_column()
+        try:
+            user_record = UserModel.query.filter_by(username=user_id).first()
+        except Exception:
+            return None
     if not user_record:
         return None
     return User(user_record.username, user_record.domain, user_record.role)
@@ -1424,6 +1465,7 @@ def dashboard():
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
         </div>
@@ -1962,6 +2004,34 @@ def user_tasks():
             except Exception as e:
                 task.video_id = None
         
+        # Fallback: document tasks missing document_id - try to resolve from user's incomplete assignments
+        try:
+            doc_tasks_missing_id = [t for t in user_tasks if t.task_type == 'document' and not t.document_id]
+            if doc_tasks_missing_id:
+                incomplete = DocumentAssignment.query.filter_by(
+                    username=current_user.username, is_completed=False
+                ).all()
+                for task in doc_tasks_missing_id:
+                    if task.document_id:
+                        continue
+                    # Match by task title: "Sign Document: handbook.pdf" or "Sign Document: Ziebart Handbook"
+                    title_suffix = (task.task_title or '').split(':', 1)[-1].strip().lower()
+                    title_key = title_suffix.replace('.pdf', '').strip() or title_suffix  # e.g. "handbook"
+                    for a in incomplete:
+                        doc = Document.query.get(a.document_id) if a.document_id else None
+                        if not doc:
+                            continue
+                        doc_name = (getattr(doc, 'name_for_users', None) or doc.original_filename or '').lower()
+                        doc_key = (doc.original_filename or '').lower().replace('.pdf', '').strip()
+                        if (title_suffix in doc_name or (doc_name and doc_name in title_suffix) or
+                                (title_key and title_key in doc_name) or (doc_key and title_key in doc_key)):
+                            task.document_id = a.document_id
+                            break
+                    if not task.document_id and len(incomplete) == 1:
+                        task.document_id = incomplete[0].document_id
+        except Exception:
+            pass
+        
         return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -2465,6 +2535,7 @@ def user_tasks():
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
         </div>
@@ -2499,7 +2570,17 @@ def user_tasks():
                     {% for task in user_tasks %}
                     <div class="task-item {{ 'completed' if task.status == 'completed' else '' }} {{ 'high-priority' if task.priority == 'high' else '' }} {{ 'urgent-priority' if task.priority == 'urgent' else '' }}">
                         <div class="task-header">
-                            <div class="task-title">{{ task.task_title }}</div>
+                            <div class="task-title">
+                                {% if task.status != 'completed' and task.task_type == 'document' %}
+                                {% if task.document_id %}
+                                <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" style="color: inherit; text-decoration: none;">{{ task.task_title }}</a>
+                                {% else %}
+                                <a href="{{ url_for('view_documents') }}" style="color: inherit; text-decoration: none;">{{ task.task_title }}</a>
+                                {% endif %}
+                                {% else %}
+                                {{ task.task_title }}
+                                {% endif %}
+                            </div>
                             <div class="task-badges">
                                 <span class="badge badge-{{ task.status.replace('_', '-') }}">{{ task.status.replace('_', ' ').title() }}</span>
                                 {% if task.priority in ['high', 'urgent'] %}
@@ -2527,8 +2608,12 @@ def user_tasks():
                             </div>
                             <div class="task-actions">
                                 {% if task.status != 'completed' %}
-                                    {% if task.task_type == 'document' and task.document_id %}
-                                        <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" class="btn btn-success">✍️ Sign Document</a>
+                                    {% if task.task_type == 'document' %}
+                                        {% if task.document_id %}
+                                        <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" class="btn btn-success" style="flex-shrink: 0;">✍️ Sign Document</a>
+                                        {% else %}
+                                        <a href="{{ url_for('view_documents') }}" class="btn btn-success" style="flex-shrink: 0;">✍️ Sign Document</a>
+                                        {% endif %}
                                     {% elif task.task_type == 'training' and task.video_id %}
                                         <a href="{{ url_for('view_training_video', video_id=task.video_id) }}" class="btn btn-success">▶️ Watch Training</a>
                                     {% else %}
@@ -3255,11 +3340,19 @@ def profile():
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
         </div>
         
         <div class="main-content">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
             <div class="profile-header">
                 <div class="profile-avatar">{{ user_name[0].upper() if user_name else 'U' }}</div>
                 <div class="profile-name">{{ user_name }}</div>
@@ -3314,6 +3407,17 @@ def profile():
 @admin_required
 def view_all_new_hires():
     """View all new hires with progress information"""
+    import traceback
+    try:
+        return _view_all_new_hires_impl()
+    except Exception as e:
+        app.logger.exception("view_all_new_hires failed")
+        db.session.rollback()
+        return f'<html><body><h1>New Hires Page Error</h1><pre>{traceback.format_exc()}</pre></body></html>', 500
+
+
+def _view_all_new_hires_impl():
+    """Implementation for admin new-hires list."""
     # Get all new hires with their progress (exclude removed / flaked-out users)
     all_new_hires = NewHire.query.filter(NewHire.status != 'removed').order_by(NewHire.created_at.desc()).all()
     new_hires_with_progress = []
@@ -4305,6 +4409,7 @@ def create_new_hire():
     access_revoked_at_str = request.form.get('access_revoked_at', '').strip()
     required_videos = request.form.getlist('required_videos')
     required_documents = request.form.getlist('required_documents')
+    role_id_str = request.form.get('role_id', '').strip()
     
     if not username or not first_name or not last_name:
         flash('Username, first name, and last name are required.', 'error')
@@ -4472,21 +4577,77 @@ def create_new_hire():
 @admin_required
 def admin_dashboard():
     """Admin dashboard"""
+    import traceback
+    try:
+        return _admin_dashboard_impl()
+    except Exception as e:
+        app.logger.exception("admin_dashboard failed")
+        db.session.rollback()
+        return f'<html><body><h1>Admin Dashboard Error</h1><pre>{traceback.format_exc()}</pre></body></html>', 500
+
+
+def _admin_dashboard_impl():
+    """Admin dashboard implementation (called from admin_dashboard)."""
+    total_users = 0
+    total_new_hires = 0
+    admin_users = 0
+    forms_completed = 0
+    total_checklist_items = 0
+    all_new_hires = []
+    new_hires_with_progress = []
+    form_status_data = []
+    recent_activity = []
+    admin_name = current_user.username if current_user else "Admin"
+    pending_count = 0
+    notifications = []
+
     try:
         total_users = UserModel.query.count()
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f"admin_dashboard: total_users failed: {e}")
+    try:
         total_new_hires = NewHire.query.filter(NewHire.status != 'removed').count()
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f"admin_dashboard: total_new_hires failed: {e}")
+    try:
         admin_users = UserModel.query.filter_by(role='admin').count()
-        
-        # Get forms completed count (documents that are visible)
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f"admin_dashboard: admin_users failed: {e}")
+    try:
         forms_completed = Document.query.filter_by(is_visible=True).count()
-        
-        # Get onboarding checklists count (total checklist items available)
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f"admin_dashboard: forms_completed failed: {e}")
+    try:
         total_checklist_items = ChecklistItem.query.filter_by(is_active=True).count()
-        
-        # Get all active new hires with their progress (exclude removed)
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f"admin_dashboard: total_checklist_items failed: {e}")
+    try:
         all_new_hires = NewHire.query.filter(NewHire.status != 'removed').order_by(NewHire.created_at.desc()).all()
-        new_hires_with_progress = []
-        
+        # Exclude new hires whose user was revoked or deleted (so they don't show in Progress/Recent Activity)
+        from datetime import date as _date
+        today = _date.today()
+        kept = []
+        for nh in all_new_hires:
+            user = UserModel.query.filter_by(username=nh.username).first()
+            if not user:
+                continue  # User deleted (revoked = remove)
+            revoked_at = getattr(user, 'access_revoked_at', None)
+            if revoked_at is not None and today >= revoked_at:
+                continue  # Access revoked (old revoke flow)
+            kept.append(nh)
+        all_new_hires = kept
+        total_new_hires = len(all_new_hires)  # Keep count in sync with filtered list
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f"admin_dashboard: all_new_hires failed: {e}")
+        all_new_hires = []
+
+    try:
         for new_hire in all_new_hires:
             try:
                 # Training videos progress
@@ -4658,22 +4819,16 @@ def admin_dashboard():
         
         pending_count = len([n for n in notifications if not n['is_read']])
     except Exception as e:
-        # If there's an error, log it and show a basic dashboard
+        # Log error but keep counts already computed (so summary cards still show data)
         import traceback
         traceback.print_exc()
-        print(f"Error in admin_dashboard: {e}")
-        # Set defaults to prevent template errors
-        total_users = 0
-        total_new_hires = 0
-        admin_users = 0
-        forms_completed = 0
-        total_checklist_items = 0
-        new_hires_with_progress = []
-        recent_activity = []
-        form_status_data = []
-        admin_name = current_user.username if current_user else "Admin"
-        pending_count = 0
-        notifications = []
+        app.logger.error(f"Error in admin_dashboard (progress/form status): {e}")
+        db.session.rollback()
+        new_hires_with_progress = new_hires_with_progress if new_hires_with_progress else []
+        recent_activity = all_new_hires[:10] if all_new_hires else []
+        # form_status_data, notifications, pending_count already have defaults from above
+        if not notifications:
+            pending_count = 0
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -5488,6 +5643,7 @@ def admin_dashboard():
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
         </div>
@@ -5666,6 +5822,11 @@ def admin_dashboard():
                         <a href="{{ url_for('manage_users') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">👥</span>
                             <span class="quick-link-text">Manage Users</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
+                        <a href="{{ url_for('manage_admins') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">🛡️</span>
+                            <span class="quick-link-text">Manage Admins</span>
                             <span class="quick-link-count">→</span>
                         </a>
                         <a href="{{ url_for('manage_roles') }}" class="quick-link-item" style="text-decoration: none;">
@@ -5857,313 +6018,404 @@ def admin_dashboard():
 @app.route('/admin/users')
 @admin_required
 def manage_users():
-    """Manage users and assign admin roles"""
-    users = UserModel.query.order_by(UserModel.username).all()
-    
-    return render_template_string('''
+    """Manage users: add, edit, reset password, revoke/restore access. Admin roles are managed on Manage Admins."""
+    try:
+        users = []
+        try:
+            users = UserModel.query.filter_by(role='user').order_by(UserModel.username).all()
+        except Exception as e:
+            db.session.rollback()
+            try:
+                db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+            try:
+                users = UserModel.query.filter_by(role='user').order_by(UserModel.username).all()
+            except Exception:
+                db.session.rollback()
+                users = []
+        today = datetime.utcnow().date()
+        for u in users:
+            revoked_at = getattr(u, 'access_revoked_at', None)
+            try:
+                u.is_revoked = bool(revoked_at is not None and today >= revoked_at)
+            except (TypeError, ValueError):
+                u.is_revoked = False
+        # Only show active users (revoked users are removed from list; revoke = delete)
+        users = [u for u in users if not getattr(u, 'is_revoked', False)]
+        return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
         <title>Manage Users - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: 'URW Form', Arial, sans-serif;
-                background: #f5f5f5;
-            }
-            .header {
-                background: #000000;
-                color: white;
-                padding: 12px 30px;
-                overflow: visible;
-                position: relative;
-                z-index: 100;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                min-height: 60px;
-            }
-            .header-content {
-                max-width: 1600px;
-                margin: 0 auto;
-                display: flex;
-                align-items: center;
-                gap: 20px;
-                flex: 1;
-            }
-            .header-content h1 {
-                font-family: 'URW Form', Arial, sans-serif;
-                font-weight: 800;
-                margin: 0;
-            }
-            .back-btn {
-                background: rgba(255,255,255,0.2);
-                color: #FFFFFF;
-                padding: 8px 16px;
-                border-radius: 0.5rem;
-                text-decoration: none;
-                font-family: 'URW Form', Arial, sans-serif;
-                font-size: 0.95em;
-                font-weight: 500;
-                transition: all 0.2s;
-                border: 1px solid rgba(255,255,255,0.3);
-                white-space: nowrap;
-            }
-            .back-btn:hover {
-                background: rgba(255,255,255,0.3);
-                color: #FFFFFF;
-            }
-            .container {
-                max-width: 1600px;
-                margin: 30px auto;
-                padding: 0 20px;
-            }
-            .btn {
-                display: inline-block;
-                padding: 10px 20px;
-                background: #FE0100;
-                color: white;
-                text-decoration: none;
-                border-radius: 5px;
-                margin: 5px;
-            }
-            .btn-success {
-                background: #28a745;
-            }
-            .btn-danger {
-                background: #FE0100;
-            }
-            table {
-                width: 100%;
-                background: white;
-                border-radius: 0.5rem;
-                overflow: hidden;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                margin-top: 20px;
-            }
-            th, td {
-                padding: 15px;
-                text-align: left;
-                border-bottom: 1px solid #eee;
-            }
-            th {
-                background: #f8f9fa;
-                font-weight: bold;
-            }
-            .badge {
-                padding: 5px 10px;
-                border-radius: 15px;
-                font-size: 0.85em;
-                font-weight: bold;
-            }
-            .badge-admin {
-                background: #FE0100;
-                color: white;
-            }
-            .badge-user {
-                background: #6c757d;
-                color: white;
-            }
-            .action-btn {
-                padding: 5px 15px;
-                border: none;
-                border-radius: 0.5rem;
-                cursor: pointer;
-                font-size: 0.9em;
-                text-decoration: none;
-                display: inline-block;
-            }
-            .form-group {
-                margin: 20px 0;
-                background: white;
-                padding: 20px;
-                border-radius: 0.5rem;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            .form-group h3 {
-                font-size: 1.2em;
-                margin-bottom: 15px;
-                font-weight: 600;
-            }
-            .form-group input {
-                padding: 10px;
-                border: 1px solid #ddd;
-                border-radius: 0.5rem;
-                width: 300px;
-                margin-right: 10px;
-                font-size: 16px; /* Prevents zoom on iOS */
-                min-height: 44px; /* Touch-friendly */
-            }
-            .form-group button {
-                padding: 10px 20px;
-                background: #28a745;
-                color: white;
-                border: none;
-                border-radius: 0.5rem;
-                cursor: pointer;
-                font-size: 16px; /* Prevents zoom on iOS */
-                min-height: 44px; /* Touch-friendly */
-            }
-            
-            /* Mobile Responsive Styles */
-            @media (max-width: 768px) {
-                .header {
-                    padding: 12px 15px;
-                    flex-wrap: wrap;
-                }
-                .header-content h1 {
-                    font-size: 1.2em;
-                }
-                .back-btn {
-                    font-size: 0.85em;
-                    padding: 6px 12px;
-                }
-                .container {
-                    padding: 15px;
-                }
-                .form-group {
-                    padding: 15px;
-                }
-                .form-group h3 {
-                    font-size: 1.2em;
-                    margin-bottom: 15px;
-                }
-                .form-group input {
-                    width: 100%;
-                    margin-right: 0;
-                    margin-bottom: 10px;
-                }
-                .form-group button {
-                    width: 100%;
-                }
-                table {
-                    display: block;
-                    overflow-x: visible;
-                }
-                thead {
-                    display: none;
-                }
-                tbody {
-                    display: block;
-                }
-                tr {
-                    display: block;
-                    margin-bottom: 15px;
-                    background: white;
-                    border-radius: 0.5rem;
-                    padding: 15px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    border: 1px solid #e0e0e0;
-                }
-                td {
-                    display: block;
-                    padding: 8px 0;
-                    text-align: left;
-                    border: none;
-                    font-size: 0.9em;
-                    white-space: normal;
-                    word-break: break-word;
-                }
-                td:before {
-                    content: attr(data-label) ": ";
-                    font-weight: 600;
-                    color: #000000;
-                    display: inline-block;
-                    min-width: 120px;
-                }
-                th {
-                    display: none;
-                }
-                .action-btn {
-                    width: 100%;
-                    margin: 5px 0;
-                    min-height: 44px;
-                    text-align: center;
-                }
-            }
-            
-            @media (max-width: 480px) {
-                .header-content h1 {
-                    font-size: 1em;
-                }
-                .form-group {
-                    padding: 12px;
-                }
-                .form-group h3 {
-                    font-size: 1.1em;
-                }
-                td:before {
-                    min-width: 100px;
-                    font-size: 0.85em;
-                }
-            }
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .container { max-width: 1200px; margin: 24px auto; padding: 0 20px; }
+            .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
+            .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
+            .form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+            .form-group { flex: 1; min-width: 140px; }
+            .form-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 4px; }
+            .form-group input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem; font-size: 16px; min-height: 44px; }
+            .btn { padding: 10px 20px; border: none; border-radius: 0.5rem; cursor: pointer; font-size: 1em; font-weight: 600; text-decoration: none; display: inline-block; min-height: 44px; }
+            .btn-primary { background: #FE0100; color: white; }
+            .btn-primary:hover { background: #cc0000; color: white; }
+            .btn-secondary { background: #6c757d; color: white; }
+            .btn-secondary:hover { background: #5a6268; color: white; }
+            .btn-success { background: #28a745; color: white; }
+            .btn-danger { background: #dc3545; color: white; }
+            .btn-warning { background: #ffc107; color: #000; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background: #f8f9fa; font-weight: 600; font-size: 0.9em; }
+            .actions-cell { display: flex; flex-wrap: wrap; gap: 8px; }
+            .badge { padding: 4px 10px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
+            .badge-admin { background: #FE0100; color: white; }
+            .badge-user { background: #6c757d; color: white; }
+            .badge-active { background: #d4edda; color: #155724; }
+            .badge-revoked { background: #f8d7da; color: #721c24; }
+            .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; }
+            .modal.show { display: flex; }
+            .modal-content { background: white; border-radius: 0.5rem; padding: 24px; max-width: 420px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+            .modal-content h3 { margin-bottom: 16px; }
+            .modal-content .form-group { margin-bottom: 16px; }
+            .modal-actions { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
+            .flash { padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; }
+            .flash.success { background: #d4edda; color: #155724; }
+            .flash.error { background: #f8d7da; color: #721c24; }
+            @media (max-width: 768px) { .form-row { flex-direction: column; } .form-group { min-width: 100%; } th, td { padding: 10px; font-size: 0.9em; } .actions-cell { flex-direction: column; } }
         </style>
     </head>
     <body>
         <div class="header">
-            <div class="header-content">
-                <h1>👥 Manage Users & Admins</h1>
-            </div>
+            <h1>👥 Manage Users</h1>
             <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
-        
         <div class="container">
-            
-            <div class="form-group">
-                <h3>Add User as Admin</h3>
-                <form method="POST" action="{{ url_for('assign_admin') }}">
-                    <input type="text" name="username" placeholder="Enter username (without domain)" required>
-                    <button type="submit">Assign Admin Role</button>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash {{ category }}">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
+
+            <div class="card">
+                <h2>Add User</h2>
+                <form method="POST" action="{{ url_for('users_add') }}">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Username</label>
+                            <input type="text" name="username" placeholder="Username" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Email (for login)</label>
+                            <input type="email" name="email" placeholder="user@example.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Password</label>
+                            <input type="password" name="password" placeholder="••••••••" required minlength="6">
+                        </div>
+                        <div class="form-group">
+                            <label>Full name (optional)</label>
+                            <input type="text" name="full_name" placeholder="Full Name">
+                        </div>
+                        <div class="form-group" style="flex: 0;">
+                            <label>&nbsp;</label>
+                            <button type="submit" class="btn btn-primary">Add User</button>
+                        </div>
+                    </div>
                 </form>
             </div>
-            
-            <table>
-                <thead>
-                    <tr>
-                        <th>Username</th>
-                        <th>Domain</th>
-                        <th>Role</th>
-                        <th>Email</th>
-                        <th>Last Login</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for user in users %}
-                    <tr>
-                        <td data-label="Username">{{ user.username }}</td>
-                        <td data-label="Domain">{{ user.domain or '-' }}</td>
-                        <td data-label="Role">
-                            <span class="badge badge-{{ user.role }}">{{ user.role }}</span>
-                        </td>
-                        <td data-label="Email">{{ user.email or '-' }}</td>
-                        <td data-label="Last Login">{{ user.last_login.strftime('%Y-%m-%d %H:%M') if user.last_login else 'Never' }}</td>
-                        <td data-label="Actions">
-                            {% if user.role == 'admin' %}
-                                <form method="POST" action="{{ url_for('remove_admin') }}" style="display: inline;">
-                                    <input type="hidden" name="user_id" value="{{ user.id }}">
-                                    <button type="submit" class="action-btn btn-danger" 
-                                            onclick="return confirm('Remove admin role from {{ user.username }}?')">
-                                        Remove Admin
-                                    </button>
-                                </form>
-                            {% else %}
-                                <form method="POST" action="{{ url_for('assign_admin') }}" style="display: inline;">
-                                    <input type="hidden" name="username" value="{{ user.username }}">
-                                    <button type="submit" class="action-btn btn-success">
-                                        Make Admin
-                                    </button>
-                                </form>
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+
+            <div class="card">
+                <h2>Users</h2>
+                {% if users %}
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Email</th>
+                            <th>Full Name</th>
+                            <th>Access</th>
+                            <th>Last Login</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for user in users %}
+                        <tr>
+                            <td>{{ user.username }}</td>
+                            <td>{{ user.email or '-' }}</td>
+                            <td>{{ user.full_name or '-' }}</td>
+                            <td>
+                                {% if user.is_revoked %}
+                                <span class="badge badge-revoked">Revoked</span>
+                                {% else %}
+                                <span class="badge badge-active">Active</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ user.last_login.strftime('%Y-%m-%d %H:%M') if user.last_login else 'Never' }}</td>
+                            <td class="actions-cell">
+                                <button type="button" class="btn btn-secondary btn-edit-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}" data-email="{{ (user.email or '')|e }}" data-full-name="{{ (user.full_name or '')|e }}">Edit</button>
+                                <button type="button" class="btn btn-secondary btn-password-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}">Reset Password</button>
+                                {% if user.username != current_user.username and not user.is_revoked %}
+                                    <form method="POST" action="{{ url_for('users_revoke', user_id=user.id) }}" style="display: inline;" onsubmit="return confirm('Remove {{ user.username }}? This will delete their account and they will no longer be able to log in.');">
+                                        <button type="submit" class="btn btn-danger">Revoke Access</button>
+                                    </form>
+                                {% elif user.username == current_user.username %}
+                                <span style="color: #999; font-size: 0.9em;">(you)</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p style="color: #666;">No users yet. Add one above.</p>
+                {% endif %}
+            </div>
         </div>
+
+        <div id="editModal" class="modal">
+            <div class="modal-content">
+                <h3>Edit User</h3>
+                <form method="POST" id="editUserForm">
+                    <input type="hidden" name="user_id" id="editUserId">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" id="editUsername" readonly style="background: #f0f0f0;">
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" name="email" id="editUserEmail" placeholder="user@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>Full name</label>
+                        <input type="text" name="full_name" id="editUserFullName" placeholder="Full Name">
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn btn-secondary" onclick="document.getElementById('editModal').classList.remove('show')">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div id="passwordModal" class="modal">
+            <div class="modal-content">
+                <h3>Reset Password</h3>
+                <p id="passwordModalUsername" style="margin-bottom: 12px; color: #666;"></p>
+                <form method="POST" id="passwordUserForm">
+                    <input type="hidden" name="user_id" id="passwordUserId">
+                    <div class="form-group">
+                        <label>New password</label>
+                        <input type="password" name="new_password" id="userNewPassword" placeholder="••••••••" required minlength="6">
+                    </div>
+                    <div class="form-group">
+                        <label>Confirm password</label>
+                        <input type="password" name="confirm_password" id="userConfirmPassword" placeholder="••••••••" required minlength="6">
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn btn-secondary" onclick="document.getElementById('passwordModal').classList.remove('show')">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Update Password</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script>
+            document.querySelectorAll('.btn-edit-user').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var id = this.getAttribute('data-id');
+                    document.getElementById('editUserId').value = id;
+                    document.getElementById('editUsername').value = this.getAttribute('data-username') || '';
+                    document.getElementById('editUserEmail').value = this.getAttribute('data-email') || '';
+                    document.getElementById('editUserFullName').value = this.getAttribute('data-full-name') || '';
+                    document.getElementById('editUserForm').action = '/admin/users/' + id + '/update';
+                    document.getElementById('editModal').classList.add('show');
+                });
+            });
+            document.querySelectorAll('.btn-password-user').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var id = this.getAttribute('data-id');
+                    var username = this.getAttribute('data-username') || '';
+                    document.getElementById('passwordUserId').value = id;
+                    document.getElementById('passwordModalUsername').textContent = 'Set new password for: ' + username;
+                    document.getElementById('passwordUserForm').action = '/admin/users/' + id + '/reset-password';
+                    document.getElementById('userNewPassword').value = '';
+                    document.getElementById('userConfirmPassword').value = '';
+                    document.getElementById('passwordModal').classList.add('show');
+                });
+            });
+            document.getElementById('passwordUserForm').onsubmit = function() {
+                if (document.getElementById('userNewPassword').value !== document.getElementById('userConfirmPassword').value) {
+                    alert('Passwords do not match.');
+                    return false;
+                }
+                if (document.getElementById('userNewPassword').value.length < 6) {
+                    alert('Password must be at least 6 characters.');
+                    return false;
+                }
+                return true;
+            };
+            window.onclick = function(e) { if (e.target.classList.contains('modal')) e.target.classList.remove('show'); };
+        </script>
     </body>
     </html>
     ''', users=users)
+    except Exception as e:
+        import traceback
+        app.logger.error(f'Error in manage_users: {str(e)}')
+        app.logger.error(traceback.format_exc())
+        db.session.rollback()
+        flash('Unable to load users list. Please try again.', 'error')
+        return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/users/add', methods=['POST'])
+@admin_required
+def users_add():
+    """Add a new user (regular user, not admin)."""
+    username = (request.form.get('username') or '').strip()
+    email = (request.form.get('email') or '').strip()
+    password = (request.form.get('password') or '').strip()
+    full_name = (request.form.get('full_name') or '').strip()
+    if not username:
+        flash('Username is required.', 'error')
+        return redirect(url_for('manage_users'))
+    if not password or len(password) < 6:
+        flash('Password is required and must be at least 6 characters.', 'error')
+        return redirect(url_for('manage_users'))
+    if UserModel.query.filter_by(username=username).first():
+        flash(f'User "{username}" already exists.', 'error')
+        return redirect(url_for('manage_users'))
+    try:
+        user = UserModel(
+            username=username,
+            email=email or None,
+            full_name=full_name or None,
+            password_hash=generate_password_hash(password),
+            role='user'
+        )
+        db.session.add(user)
+        db.session.commit()
+        flash(f'User "{username}" added successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error adding user: {str(e)}', 'error')
+    return redirect(url_for('manage_users'))
+
+
+@app.route('/admin/users/<int:user_id>/update', methods=['POST'])
+@admin_required
+def users_update(user_id):
+    """Update user email and full name."""
+    user = UserModel.query.get(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('manage_users'))
+    email = (request.form.get('email') or '').strip()
+    full_name = (request.form.get('full_name') or '').strip()
+    user.email = email or None
+    user.full_name = full_name or None
+    try:
+        db.session.commit()
+        flash(f'User "{user.username}" updated.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating: {str(e)}', 'error')
+    return redirect(url_for('manage_users'))
+
+
+@app.route('/admin/users/<int:user_id>/reset-password', methods=['POST'])
+@admin_required
+def users_reset_password(user_id):
+    """Reset a user's password."""
+    user = UserModel.query.get(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('manage_users'))
+    new_password = (request.form.get('new_password') or '').strip()
+    if not new_password or len(new_password) < 6:
+        flash('Password must be at least 6 characters.', 'error')
+        return redirect(url_for('manage_users'))
+    user.password_hash = generate_password_hash(new_password)
+    try:
+        db.session.commit()
+        flash(f'Password updated for "{user.username}".', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating password: {str(e)}', 'error')
+    return redirect(url_for('manage_users'))
+
+
+@app.route('/admin/users/<int:user_id>/revoke', methods=['POST'])
+@admin_required
+def users_revoke(user_id):
+    """Remove user permanently (delete account and mark new hire as removed). They will no longer appear in the list."""
+    user = UserModel.query.get(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('manage_users'))
+    if user.username == current_user.username:
+        flash('You cannot remove your own account.', 'error')
+        return redirect(url_for('manage_users'))
+    if getattr(user, 'role', None) == 'admin':
+        flash('Cannot remove an admin. Remove admin role first from Manage Admins.', 'error')
+        return redirect(url_for('manage_users'))
+    username = user.username
+    try:
+        # Mark new hire as removed if they have a record
+        new_hire = NewHire.query.filter_by(username=username).first()
+        if new_hire:
+            new_hire.status = 'removed'
+        # Delete the user account
+        db.session.delete(user)
+        db.session.commit()
+        flash(f'User "{username}" has been removed.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception('users_revoke failed')
+        flash(f'Error removing user: {str(e)}', 'error')
+    return redirect(url_for('manage_users'))
+
+
+@app.route('/admin/users/<int:user_id>/restore', methods=['POST'])
+@admin_required
+def users_restore(user_id):
+    """Restore user access (clear revoke date)."""
+    user = UserModel.query.get(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('manage_users'))
+    user.access_revoked_at = None
+    try:
+        db.session.commit()
+        flash(f'Access restored for "{user.username}".', 'success')
+    except Exception as e:
+        db.session.rollback()
+        err_str = (str(e) or '').lower()
+        if 'access_revoked_at' in err_str or 'invalid column' in err_str:
+            try:
+                db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+                db.session.commit()
+                user.access_revoked_at = None
+                db.session.commit()
+                flash(f'Access restored for "{user.username}".', 'success')
+            except Exception:
+                db.session.rollback()
+                flash(f'Error: {str(e)}', 'error')
+        else:
+            flash(f'Error: {str(e)}', 'error')
+    return redirect(url_for('manage_users'))
 
 
 @app.route('/admin/roles')
@@ -6449,6 +6701,411 @@ def remove_admin():
     db.session.commit()
     flash(f'Admin role removed from {user.username}.', 'success')
     return redirect(url_for('manage_users'))
+
+
+@app.route('/admin/manage-admins')
+@admin_required
+def manage_admins():
+    """Manage admin users: add, update, delete, change password"""
+    admins = UserModel.query.filter_by(role='admin').order_by(UserModel.username).all()
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manage Admins - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header {
+                background: #000000;
+                color: white;
+                padding: 12px 30px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
+            }
+            .header h1 { font-size: 1.4em; font-weight: 800; }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #FFFFFF;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-size: 0.95em;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover { background: rgba(255,255,255,0.3); color: #FFFFFF; }
+            .container { max-width: 1000px; margin: 24px auto; padding: 0 20px; }
+            .card {
+                background: white;
+                border-radius: 0.5rem;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                padding: 24px;
+                margin-bottom: 24px;
+            }
+            .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
+            .form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+            .form-group { flex: 1; min-width: 140px; }
+            .form-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 4px; }
+            .form-group input {
+                width: 100%;
+                padding: 10px 12px;
+                border: 1px solid #ddd;
+                border-radius: 0.5rem;
+                font-size: 16px;
+                min-height: 44px;
+            }
+            .btn {
+                padding: 10px 20px;
+                border: none;
+                border-radius: 0.5rem;
+                cursor: pointer;
+                font-size: 1em;
+                font-weight: 600;
+                text-decoration: none;
+                display: inline-block;
+                min-height: 44px;
+            }
+            .btn-primary { background: #FE0100; color: white; }
+            .btn-primary:hover { background: #cc0000; color: white; }
+            .btn-success { background: #28a745; color: white; }
+            .btn-success:hover { background: #218838; color: white; }
+            .btn-secondary { background: #6c757d; color: white; }
+            .btn-danger { background: #dc3545; color: white; }
+            .btn-danger:hover { background: #c82333; color: white; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background: #f8f9fa; font-weight: 600; font-size: 0.9em; }
+            .actions-cell { display: flex; flex-wrap: wrap; gap: 8px; }
+            .modal {
+                display: none;
+                position: fixed;
+                z-index: 1000;
+                left: 0; top: 0;
+                width: 100%; height: 100%;
+                background: rgba(0,0,0,0.5);
+                align-items: center;
+                justify-content: center;
+            }
+            .modal.show { display: flex; }
+            .modal-content {
+                background: white;
+                border-radius: 0.5rem;
+                padding: 24px;
+                max-width: 420px;
+                width: 90%;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+            }
+            .modal-content h3 { margin-bottom: 16px; }
+            .modal-content .form-group { margin-bottom: 16px; }
+            .modal-actions { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
+            .flash { padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; }
+            .flash.success { background: #d4edda; color: #155724; }
+            .flash.error { background: #f8d7da; color: #721c24; }
+            @media (max-width: 768px) {
+                .form-row { flex-direction: column; }
+                .form-group { min-width: 100%; }
+                th, td { padding: 10px; font-size: 0.9em; }
+                .actions-cell { flex-direction: column; }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🛡️ Manage Admins</h1>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+        </div>
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash {{ category }}">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
+
+            <div class="card">
+                <h2>Add Admin</h2>
+                <form method="POST" action="{{ url_for('manage_admins_add') }}">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Username</label>
+                            <input type="text" name="username" placeholder="Username" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Email (for login)</label>
+                            <input type="email" name="email" placeholder="admin@example.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Password</label>
+                            <input type="password" name="password" placeholder="••••••••" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Full name (optional)</label>
+                            <input type="text" name="full_name" placeholder="Full Name">
+                        </div>
+                        <div class="form-group" style="flex: 0;">
+                            <label>&nbsp;</label>
+                            <button type="submit" class="btn btn-primary">Add Admin</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+
+            <div class="card">
+                <h2>Admin Users</h2>
+                {% if admins %}
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Email</th>
+                            <th>Full Name</th>
+                            <th>Last Login</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for admin in admins %}
+                        <tr>
+                            <td>{{ admin.username }}</td>
+                            <td>{{ admin.email or '-' }}</td>
+                            <td>{{ admin.full_name or '-' }}</td>
+                            <td>{{ admin.last_login.strftime('%Y-%m-%d %H:%M') if admin.last_login else 'Never' }}</td>
+                            <td class="actions-cell">
+                                <button type="button" class="btn btn-secondary btn-edit-admin" data-id="{{ admin.id }}" data-username="{{ admin.username|e }}" data-email="{{ (admin.email or '')|e }}" data-full-name="{{ (admin.full_name or '')|e }}">Edit</button>
+                                <button type="button" class="btn btn-secondary btn-password-admin" data-id="{{ admin.id }}" data-username="{{ admin.username|e }}">Change Password</button>
+                                {% if admin.username != current_user.username %}
+                                <form method="POST" action="{{ url_for('manage_admins_remove', user_id=admin.id) }}" style="display: inline;" onsubmit="return confirm('Remove admin role from {{ admin.username }}? They will become a regular user.');">
+                                    <button type="submit" class="btn btn-danger">Remove Admin</button>
+                                </form>
+                                {% else %}
+                                <span style="color: #999; font-size: 0.9em;">(you)</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p style="color: #666;">No admin users yet. Add one above.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <div id="editModal" class="modal">
+            <div class="modal-content">
+                <h3>Edit Admin</h3>
+                <form method="POST" id="editForm">
+                    <input type="hidden" name="user_id" id="editUserId">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" id="editUsername" readonly style="background: #f0f0f0;">
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" name="email" id="editEmail" placeholder="admin@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>Full name</label>
+                        <input type="text" name="full_name" id="editFullName" placeholder="Full Name">
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div id="passwordModal" class="modal">
+            <div class="modal-content">
+                <h3>Change Password</h3>
+                <p id="passwordModalUsername" style="margin-bottom: 12px; color: #666;"></p>
+                <form method="POST" id="passwordForm">
+                    <input type="hidden" name="user_id" id="passwordUserId">
+                    <div class="form-group">
+                        <label>New password</label>
+                        <input type="password" name="new_password" id="newPassword" placeholder="••••••••" required minlength="6">
+                    </div>
+                    <div class="form-group">
+                        <label>Confirm password</label>
+                        <input type="password" name="confirm_password" id="confirmPassword" placeholder="••••••••" required minlength="6">
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn btn-secondary" onclick="closePasswordModal()">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Update Password</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script>
+            document.querySelectorAll('.btn-edit-admin').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var id = this.getAttribute('data-id');
+                    var username = this.getAttribute('data-username') || '';
+                    var email = this.getAttribute('data-email') || '';
+                    var fullName = this.getAttribute('data-full-name') || '';
+                    document.getElementById('editUserId').value = id;
+                    document.getElementById('editUsername').value = username;
+                    document.getElementById('editEmail').value = email;
+                    document.getElementById('editFullName').value = fullName;
+                    document.getElementById('editForm').action = '/admin/manage-admins/' + id + '/update';
+                    document.getElementById('editModal').classList.add('show');
+                });
+            });
+            document.querySelectorAll('.btn-password-admin').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var id = this.getAttribute('data-id');
+                    var username = this.getAttribute('data-username') || '';
+                    document.getElementById('passwordUserId').value = id;
+                    document.getElementById('passwordModalUsername').textContent = 'Set new password for: ' + username;
+                    document.getElementById('passwordForm').action = '/admin/manage-admins/' + id + '/change-password';
+                    document.getElementById('newPassword').value = '';
+                    document.getElementById('confirmPassword').value = '';
+                    document.getElementById('passwordModal').classList.add('show');
+                });
+            });
+            function closeEditModal() {
+                document.getElementById('editModal').classList.remove('show');
+            }
+            function closePasswordModal() {
+                document.getElementById('passwordModal').classList.remove('show');
+            }
+            function closePasswordModal() {
+                document.getElementById('passwordModal').classList.remove('show');
+            }
+            document.getElementById('passwordForm').onsubmit = function() {
+                var p1 = document.getElementById('newPassword').value;
+                var p2 = document.getElementById('confirmPassword').value;
+                if (p1 !== p2) {
+                    alert('Passwords do not match.');
+                    return false;
+                }
+                if (p1.length < 6) {
+                    alert('Password must be at least 6 characters.');
+                    return false;
+                }
+                return true;
+            };
+            window.onclick = function(e) {
+                if (e.target.classList.contains('modal')) {
+                    e.target.classList.remove('show');
+                }
+            };
+        </script>
+    </body>
+    </html>
+    ''', admins=admins)
+
+
+@app.route('/admin/manage-admins/add', methods=['POST'])
+@admin_required
+def manage_admins_add():
+    """Add a new admin user"""
+    username = (request.form.get('username') or '').strip()
+    email = (request.form.get('email') or '').strip()
+    password = (request.form.get('password') or '').strip()
+    full_name = (request.form.get('full_name') or '').strip()
+
+    if not username:
+        flash('Username is required.', 'error')
+        return redirect(url_for('manage_admins'))
+    if not password or len(password) < 6:
+        flash('Password is required and must be at least 6 characters.', 'error')
+        return redirect(url_for('manage_admins'))
+
+    existing = UserModel.query.filter_by(username=username).first()
+    if existing:
+        flash(f'User "{username}" already exists. Use Edit or Make Admin from Manage Users.', 'error')
+        return redirect(url_for('manage_admins'))
+
+    try:
+        user = UserModel(
+            username=username,
+            email=email or None,
+            full_name=full_name or None,
+            password_hash=generate_password_hash(password),
+            role='admin'
+        )
+        db.session.add(user)
+        db.session.commit()
+        flash(f'Admin "{username}" added successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error adding admin: {str(e)}', 'error')
+    return redirect(url_for('manage_admins'))
+
+
+@app.route('/admin/manage-admins/<int:user_id>/update', methods=['POST'])
+@admin_required
+def manage_admins_update(user_id):
+    """Update admin email and full name"""
+    user = UserModel.query.get(user_id)
+    if not user or user.role != 'admin':
+        flash('Admin not found.', 'error')
+        return redirect(url_for('manage_admins'))
+
+    email = (request.form.get('email') or '').strip()
+    full_name = (request.form.get('full_name') or '').strip()
+    user.email = email or None
+    user.full_name = full_name or None
+    try:
+        db.session.commit()
+        flash(f'Admin "{user.username}" updated.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating: {str(e)}', 'error')
+    return redirect(url_for('manage_admins'))
+
+
+@app.route('/admin/manage-admins/<int:user_id>/change-password', methods=['POST'])
+@admin_required
+def manage_admins_change_password(user_id):
+    """Change an admin's password"""
+    user = UserModel.query.get(user_id)
+    if not user or user.role != 'admin':
+        flash('Admin not found.', 'error')
+        return redirect(url_for('manage_admins'))
+
+    new_password = (request.form.get('new_password') or '').strip()
+    if not new_password or len(new_password) < 6:
+        flash('Password must be at least 6 characters.', 'error')
+        return redirect(url_for('manage_admins'))
+
+    user.password_hash = generate_password_hash(new_password)
+    try:
+        db.session.commit()
+        flash(f'Password updated for "{user.username}".', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating password: {str(e)}', 'error')
+    return redirect(url_for('manage_admins'))
+
+
+@app.route('/admin/manage-admins/<int:user_id>/remove', methods=['POST'])
+@admin_required
+def manage_admins_remove(user_id):
+    """Remove admin role from user (they become a regular user)"""
+    user = UserModel.query.get(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('manage_admins'))
+    if user.username == current_user.username:
+        flash('You cannot remove your own admin role.', 'error')
+        return redirect(url_for('manage_admins'))
+
+    user.role = 'user'
+    try:
+        db.session.commit()
+        flash(f'Admin role removed from "{user.username}".', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error: {str(e)}', 'error')
+    return redirect(url_for('manage_admins'))
 
 
 @app.route('/admin/documents')
@@ -7827,6 +8484,8 @@ def set_signature_fields(doc_id):
                                 <select name="typed_field_type" id="typed_field_type">
                                     <option value="text">Text</option>
                                     <option value="name">Name</option>
+                                    <option value="typed_name">Typed Name (auto-fills user's name, click to sign)</option>
+                                    <option value="typed_initials">Typed Initials (auto-fills initials, click to sign)</option>
                                     <option value="date">Date</option>
                                     <option value="number">Number</option>
                                 </select>
@@ -9449,7 +10108,15 @@ def remove_document_assignment(assignment_id):
 @app.route('/documents')
 @login_required
 def view_documents():
-    """View assigned documents (regular users) or all documents (admins)"""
+    """View assigned documents (regular users) or all documents (admins). Supports ?sign=<doc_id> to open sign page."""
+    sign_id = request.args.get('sign')
+    if sign_id:
+        try:
+            doc_id = int(sign_id)
+            # Serve sign page at this URL so it works even when /documents/<id>/sign is not routed (e.g. proxy)
+            return _serve_sign_document_page(doc_id)
+        except (ValueError, TypeError):
+            pass
     return _view_documents_impl()
 
 
@@ -9971,6 +10638,7 @@ def _view_documents_impl():
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
         </div>
@@ -9986,7 +10654,13 @@ def _view_documents_impl():
                     {% for doc in documents %}
                     <div class="document-item {{ 'signed' if (doc.has_signature_fields and doc.all_signed) else 'needs-signature' if doc.needs_signature else '' }}">
                         <div class="document-info">
-                            <h3>{{ doc.name_for_users }}</h3>
+                            <h3>
+                                {% if doc.needs_signature %}
+                                <a href="{{ url_for('view_documents', sign=doc.id) }}" style="color: inherit; text-decoration: none;">{{ doc.name_for_users }}</a>
+                                {% else %}
+                                {{ doc.name_for_users }}
+                                {% endif %}
+                            </h3>
                             {% if doc.description %}
                             <p>{{ doc.description }}</p>
                             {% endif %}
@@ -10013,7 +10687,7 @@ def _view_documents_impl():
                                 {% if doc.all_signed %}
                                     <span class="badge">✓ Signed</span>
                                 {% else %}
-                                    <a href="{{ url_for('sign_document', doc_id=doc.id) }}" class="btn btn-sign">✍️ Sign Document</a>
+                                    <a href="{{ url_for('view_documents', sign=doc.id) }}" class="btn btn-sign" title="Open document to sign">✍️ Sign Document</a>
                                 {% endif %}
                             {% endif %}
                             <a href="{{ url_for('download_document', doc_id=doc.id) }}" class="btn">⬇️ Download</a>
@@ -10608,10 +11282,8 @@ def render_document_with_signatures(doc_id):
         return f"Error rendering document: {str(e)}", 500
 
 
-@app.route('/documents/<int:doc_id>/sign')
-@login_required
-def sign_document(doc_id):
-    """Sign a document - only allowed if document is assigned to user"""
+def _serve_sign_document_page(doc_id):
+    """Build and return the sign document page (or a redirect if not allowed). Used by both /documents/<id>/sign and /documents?sign=<id>."""
     try:
         document = Document.query.get(doc_id)
         if not document:
@@ -10684,6 +11356,27 @@ def sign_document(doc_id):
         fn = (document.original_filename or '').strip()
         ft = (document.file_type or '').strip()
         is_pdf = ft == 'application/pdf' or fn.lower().endswith('.pdf')
+        
+        # User display name and initials for typed_name / typed_initials fields
+        user_display_name = current_user.username
+        user_initials = (current_user.username[:2] if len(current_user.username) >= 2 else current_user.username).upper()
+        try:
+            nh = NewHire.query.filter_by(username=current_user.username).first()
+            if nh:
+                first = (nh.first_name or '').strip()
+                last = (nh.last_name or '').strip()
+                user_display_name = f"{first} {last}".strip() or current_user.username
+                user_initials = ((first[:1] if first else '') + (last[:1] if last else '')).upper() or user_initials
+            elif getattr(current_user, 'full_name', None) and (current_user.full_name or '').strip():
+                parts = (current_user.full_name or '').strip().split()
+                user_display_name = current_user.full_name.strip()
+                user_initials = (parts[0][:1] + (parts[1][:1] if len(parts) > 1 else '')).upper() if parts else user_initials
+        except Exception:
+            pass
+        
+        # Today's date for auto-filling date typed fields (YYYY-MM-DD for HTML date input)
+        from datetime import date
+        today_date = date.today().isoformat()
         
         return render_template_string('''
     <!DOCTYPE html>
@@ -11002,7 +11695,7 @@ def sign_document(doc_id):
                     <h3 style="margin-bottom: 15px;">Signature Fields</h3>
                     
                     {% for field in signature_fields %}
-                    <div class="signature-field-item {% if field.is_signed %}signed{% endif %}" id="field-{{ field.id }}">
+                    <div class="signature-field-item {% if field.is_signed %}signed{% endif %} sign-field-item" id="field-{{ field.id }}" data-field-id="{{ field.id }}" data-field-type="signature">
                         <h4>{{ field.field_label or 'Signature Field' }}</h4>
                         <p>Page: {{ field.page_number }}</p>
                         {% if field.signature_type == 'cryptographic' %}
@@ -11072,9 +11765,9 @@ def sign_document(doc_id):
                     <h3 style="margin-bottom: 15px;">Typed Fields</h3>
                     
                     {% for field in typed_fields %}
-                    <div class="signature-field-item" style="border-left-color: #ffc107;">
+                    <div class="signature-field-item sign-field-item typed-field-item" style="border-left-color: #ffc107;" id="typed-field-item-{{ field.id }}" data-field-id="{{ field.id }}" data-field-type="typed" data-typed-type="{{ field.field_type }}">
                         <h4>{{ field.field_label or 'Typed Field' }}</h4>
-                        <p>Type: {{ field.field_type|title }} • Page: {{ field.page_number }}</p>
+                        <p>Type: {{ field.field_type|replace('_', ' ')|title }} • Page: {{ field.page_number }}</p>
                         <div id="typed-field-container-{{ field.id }}">
                         {% if field.id in filled_typed_field_ids %}
                             <p style="color: #28a745; font-weight: bold;">✓ Filled</p>
@@ -11084,11 +11777,24 @@ def sign_document(doc_id):
                             <button type="button" onclick="redoTypedField({{ field.id }})" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Field</button>
                         {% else %}
                             <div class="form-group" style="margin-top: 10px;">
-                                {% if field.field_type == 'date' %}
-                                    <input type="date" id="typed-field-{{ field.id }}" class="typed-field-input" 
-                                           placeholder="{{ field.placeholder or 'Enter date' }}" 
-                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"
-                                           {% if field.is_required %}required{% endif %}>
+                                {% if field.field_type == 'typed_name' %}
+                                    <input type="text" id="typed-field-{{ field.id }}" class="typed-field-input" readonly
+                                           value="{{ user_display_name }}"
+                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">
+                                    <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Your name will be used. Click below to sign.</p>
+                                    <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Click to Sign</button>
+                                {% elif field.field_type == 'typed_initials' %}
+                                    <input type="text" id="typed-field-{{ field.id }}" class="typed-field-input" readonly
+                                           value="{{ user_initials }}"
+                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">
+                                    <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Your initials will be used. Click below to sign.</p>
+                                    <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Click to Sign</button>
+                                {% elif field.field_type == 'date' %}
+                                    <input type="date" id="typed-field-{{ field.id }}" class="typed-field-input" readonly
+                                           value="{{ today_date }}"
+                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">
+                                    <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Today's date. Click below to sign.</p>
+                                    <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Click to Sign</button>
                                 {% elif field.field_type == 'number' %}
                                     <input type="number" id="typed-field-{{ field.id }}" class="typed-field-input" 
                                            placeholder="{{ field.placeholder or 'Enter number' }}" 
@@ -11100,7 +11806,9 @@ def sign_document(doc_id):
                                            style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"
                                            {% if field.is_required %}required{% endif %}>
                                 {% endif %}
+                                {% if field.field_type not in ['typed_name', 'typed_initials', 'date'] %}
                                 <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Save {{ field.field_label }}</button>
+                                {% endif %}
                             </div>
                         {% endif %}
                         </div>
@@ -11125,6 +11833,19 @@ def sign_document(doc_id):
             var pdfScale = 1.0;
             var canvasOffsetX = 0;
             var canvasOffsetY = 0;
+            
+            // Scroll sidebar to the first incomplete (unsigned/unfilled) field
+            function scrollToFirstIncompleteField() {
+                var panel = document.querySelector('.signature-panel');
+                if (!panel) return;
+                var items = panel.querySelectorAll('.sign-field-item');
+                for (var i = 0; i < items.length; i++) {
+                    if (!items[i].classList.contains('signed')) {
+                        items[i].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        break;
+                    }
+                }
+            }
             
             // Load PDF using PDF.js
             function loadPDF() {
@@ -11493,10 +12214,12 @@ def sign_document(doc_id):
                         // Update UI to show field is filled without reloading
                         var fieldContainer = document.getElementById('typed-field-container-' + fieldId);
                         if (fieldContainer) {
-                            var fieldLabel = fieldContainer.closest('.signature-field-item').querySelector('h4').textContent;
+                            var itemEl = fieldContainer.closest('.signature-field-item');
+                            if (itemEl) itemEl.classList.add('signed');
                             fieldContainer.innerHTML = '<p style="color: #28a745; font-weight: bold;">✓ Filled</p>' +
                                 '<div style="padding: 10px; background: #f8f9fa; border-radius: 4px; margin-top: 10px;"><strong>Value:</strong> ' + value + '</div>' +
                                 '<button type="button" onclick="redoTypedField(' + fieldId + ')" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Field</button>';
+                            scrollToFirstIncompleteField();
                             
                             // Reload the PDF iframe to show the typed field value
                             setTimeout(function() {
@@ -11568,6 +12291,19 @@ def sign_document(doc_id):
                 });
             }
             
+            // On load: scroll to first incomplete field; ensure date fields are pre-filled with today
+            document.addEventListener('DOMContentLoaded', function() {
+                var today = new Date();
+                var yyyy = today.getFullYear();
+                var mm = String(today.getMonth() + 1).padStart(2, '0');
+                var dd = String(today.getDate()).padStart(2, '0');
+                var todayStr = yyyy + '-' + mm + '-' + dd;
+                document.querySelectorAll('input.typed-field-input[type="date"]').forEach(function(inp) {
+                    if (!inp.value || inp.value.trim() === '') inp.value = todayStr;
+                });
+                setTimeout(scrollToFirstIncompleteField, 400);
+            });
+            
             // Redo typed field - delete existing value and show input form again
             function redoTypedField(fieldId) {
                 if (!confirm('Are you sure you want to redo this field? The current value will be deleted.')) {
@@ -11608,13 +12344,21 @@ def sign_document(doc_id):
     </body>
     </html>
     ''', document=document, signature_fields=signature_fields, signed_field_ids=signed_field_ids, 
-         user_signatures=user_signatures, typed_fields=typed_fields, filled_typed_field_ids=filled_typed_field_ids, is_pdf=is_pdf)
+         user_signatures=user_signatures, typed_fields=typed_fields, filled_typed_field_ids=filled_typed_field_ids, is_pdf=is_pdf,
+         user_display_name=user_display_name, user_initials=user_initials, today_date=today_date)
     except Exception as e:
         import traceback
         traceback.print_exc()
         app.logger.error(f'Error in sign_document (doc_id={doc_id}): {e}')
         flash('Unable to load the sign document page. Please try again or contact support.', 'error')
         return redirect(url_for('view_documents'))
+
+
+@app.route('/documents/<int:doc_id>/sign')
+@login_required
+def sign_document(doc_id):
+    """Sign a document - only allowed if document is assigned to user."""
+    return _serve_sign_document_page(doc_id)
 
 
 def embed_signature_in_pdf(document, signature_field, signature_image_base64):
@@ -12146,6 +12890,31 @@ def submit_typed_field(doc_id):
         
         if not typed_field or typed_field.document_id != doc_id:
             return jsonify({'success': False, 'error': 'Invalid typed field'}), 400
+        
+        # For typed_name/typed_initials, allow server-side default if client sent empty
+        if not field_value and typed_field.field_type in ('typed_name', 'typed_initials'):
+            try:
+                nh = NewHire.query.filter_by(username=current_user.username).first()
+                if nh:
+                    first = (nh.first_name or '').strip()
+                    last = (nh.last_name or '').strip()
+                    if typed_field.field_type == 'typed_name':
+                        field_value = f"{first} {last}".strip() or current_user.username
+                    else:
+                        field_value = ((first[:1] if first else '') + (last[:1] if last else '')).upper() or (current_user.username[:2] if len(current_user.username) >= 2 else current_user.username).upper()
+                elif getattr(current_user, 'full_name', None) and (current_user.full_name or '').strip():
+                    parts = (current_user.full_name or '').strip().split()
+                    if typed_field.field_type == 'typed_name':
+                        field_value = current_user.full_name.strip()
+                    else:
+                        field_value = (parts[0][:1] + (parts[1][:1] if len(parts) > 1 else '')).upper() if parts else (current_user.username[:2] if len(current_user.username) >= 2 else current_user.username).upper()
+                else:
+                    field_value = current_user.username if typed_field.field_type == 'typed_name' else (current_user.username[:2] if len(current_user.username) >= 2 else current_user.username).upper()
+            except Exception:
+                field_value = current_user.username if typed_field.field_type == 'typed_name' else (current_user.username[:2] if len(current_user.username) >= 2 else current_user.username).upper()
+        
+        if not field_value:
+            return jsonify({'success': False, 'error': 'Field value is required'}), 400
     
         try:
             # Check if user already filled this field
@@ -13486,6 +14255,18 @@ def view_new_hire_details(username):
             # If there's an error getting tasks, use empty list
             user_tasks = []
         
+        # Get user account (for Cancel / Restore access)
+        user_record = None
+        user_is_revoked = False
+        try:
+            user_record = UserModel.query.filter_by(username=username).first()
+            if user_record:
+                from datetime import date
+                revoked_at = getattr(user_record, 'access_revoked_at', None)
+                user_is_revoked = bool(revoked_at is not None and date.today() >= revoked_at)
+        except Exception:
+            pass
+        
         return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -13904,6 +14685,17 @@ def view_new_hire_details(username):
                     <div style="margin-top: 25px; text-align: center;">
                         <button type="submit" class="btn" style="background: rgba(255,255,255,0.2); border: 2px solid white; font-size: 1.1em; padding: 12px 30px;">💾 Save Changes</button>
                         {% if new_hire.status != 'removed' %}
+                        {% if user_record and user_record.role != 'admin' %}
+                        {% if user_is_revoked %}
+                        <form method="POST" action="{{ url_for('new_hire_restore_access', username=username) }}" style="display: inline;" onsubmit="return confirm('Restore access for {{ username }}? They will be able to log in again.');">
+                            <button type="submit" class="btn" style="background: #28a745; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin-left: 10px;">Restore access</button>
+                        </form>
+                        {% else %}
+                        <form method="POST" action="{{ url_for('new_hire_cancel_access', username=username) }}" style="display: inline;" onsubmit="return confirm('Cancel access for {{ username }}? They will no longer be able to log in. You can restore access later from here or Manage Users.');">
+                            <button type="submit" class="btn" style="background: #dc3545; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin-left: 10px;">Cancel access</button>
+                        </form>
+                        {% endif %}
+                        {% endif %}
                         <a href="{{ url_for('remove_new_hire_user', username=username) }}" class="btn" style="background: #333; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin-left: 10px;">Remove user</a>
                         {% endif %}
                     </div>
@@ -13984,6 +14776,7 @@ def view_new_hire_details(username):
                                 <th>Status</th>
                                 <th>Assigned Date</th>
                                 <th>Due Date</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -13998,6 +14791,11 @@ def view_new_hire_details(username):
                                 </td>
                                 <td>{{ task.assigned_at.strftime('%B %d, %Y') if task.assigned_at else '-' }}</td>
                                 <td>{{ task.due_date.strftime('%B %d, %Y') if task.due_date else '-' }}</td>
+                                <td>
+                                    <form method="POST" action="{{ url_for('remove_user_task', task_id=task.id) }}" style="display: inline;" onsubmit="return confirm('Remove this task for {{ username }}? They will no longer see it in their Tasks list.');">
+                                        <button type="submit" class="btn" style="padding: 6px 12px; font-size: 0.85em; background: #dc3545; color: white; border: none; border-radius: 0.35rem;">Remove</button>
+                                    </form>
+                                </td>
                             </tr>
                             {% endfor %}
                         </tbody>
@@ -14010,7 +14808,7 @@ def view_new_hire_details(username):
     </body>
     </html>
     ''', new_hire=new_hire, video_progress=video_progress, signed_documents=signed_documents, 
-         user_tasks=user_tasks, username=username)
+         user_tasks=user_tasks, username=username, user_record=user_record, user_is_revoked=user_is_revoked)
     except Exception as e:
         # Log the error for debugging
         import traceback
@@ -14018,6 +14816,27 @@ def view_new_hire_details(username):
         app.logger.error(traceback.format_exc())
         flash(f'Error loading new hire details: {str(e)}', 'error')
         return redirect(url_for('admin_dashboard'))
+
+
+@app.route('/admin/tasks/<int:task_id>/remove', methods=['POST'])
+@admin_required
+def remove_user_task(task_id):
+    """Remove a required task for a user (admin only)."""
+    task = UserTask.query.get(task_id)
+    if not task:
+        flash('Task not found.', 'error')
+        return redirect(url_for('admin_dashboard'))
+    username = task.username
+    task_title = task.task_title
+    try:
+        db.session.delete(task)
+        db.session.commit()
+        flash(f'Task "{task_title}" has been removed for {username}.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception('remove_user_task failed')
+        flash(f'Could not remove task: {str(e)}', 'error')
+    return redirect(url_for('view_new_hire_details', username=username))
 
 
 @app.route('/admin/new-hire/<username>/update', methods=['POST'])
@@ -14071,6 +14890,73 @@ def update_new_hire_details(username):
         db.session.rollback()
         flash(f'Error updating new hire details: {str(e)}', 'error')
     
+    return redirect(url_for('view_new_hire_details', username=username))
+
+
+@app.route('/admin/new-hire/<username>/cancel-access', methods=['POST'])
+@admin_required
+def new_hire_cancel_access(username):
+    """Cancel (revoke) access for this new hire so they can no longer log in. Reversible via Restore access."""
+    user = UserModel.query.filter_by(username=username).first()
+    if not user:
+        flash('No login account found for this user.', 'error')
+        return redirect(url_for('view_new_hire_details', username=username))
+    if getattr(user, 'role', None) == 'admin':
+        flash('Cannot cancel access for an admin.', 'error')
+        return redirect(url_for('view_new_hire_details', username=username))
+    if user.username == current_user.username:
+        flash('You cannot revoke your own access.', 'error')
+        return redirect(url_for('view_new_hire_details', username=username))
+    from datetime import date
+    try:
+        user.access_revoked_at = date.today()
+        db.session.commit()
+        flash(f'Access cancelled for {username}. They can no longer log in. Use "Restore access" to allow login again.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        err_str = (str(e) or '').lower()
+        if 'access_revoked_at' in err_str or 'invalid column' in err_str:
+            try:
+                db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+                db.session.commit()
+                user.access_revoked_at = date.today()
+                db.session.commit()
+                flash(f'Access cancelled for {username}. They can no longer log in.', 'success')
+            except Exception:
+                db.session.rollback()
+                flash(f'Error: {str(e)}', 'error')
+        else:
+            flash(f'Error: {str(e)}', 'error')
+    return redirect(url_for('view_new_hire_details', username=username))
+
+
+@app.route('/admin/new-hire/<username>/restore-access', methods=['POST'])
+@admin_required
+def new_hire_restore_access(username):
+    """Restore access for this new hire so they can log in again."""
+    user = UserModel.query.filter_by(username=username).first()
+    if not user:
+        flash('No login account found for this user.', 'error')
+        return redirect(url_for('view_new_hire_details', username=username))
+    try:
+        user.access_revoked_at = None
+        db.session.commit()
+        flash(f'Access restored for {username}. They can log in again.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        err_str = (str(e) or '').lower()
+        if 'access_revoked_at' in err_str or 'invalid column' in err_str:
+            try:
+                db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+                db.session.commit()
+                user.access_revoked_at = None
+                db.session.commit()
+                flash(f'Access restored for {username}.', 'success')
+            except Exception:
+                db.session.rollback()
+                flash(f'Error: {str(e)}', 'error')
+        else:
+            flash(f'Error: {str(e)}', 'error')
     return redirect(url_for('view_new_hire_details', username=username))
 
 
@@ -20286,11 +21172,19 @@ def list_training_videos():
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
         </div>
         
         <div class="main-content">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
             <h1 class="page-title">Videos</h1>
             <p class="page-subtitle">Required training videos</p>
             
