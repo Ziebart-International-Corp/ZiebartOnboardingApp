@@ -8,15 +8,17 @@ db = SQLAlchemy()
 
 
 class User(db.Model):
-    """User model for storing user information"""
+    """User model for storing user information. Login is by email + password."""
     __tablename__ = 'users'
     
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(100), unique=True, nullable=False, index=True)
     domain = db.Column(db.String(100))
     full_name = db.Column(db.String(200))
-    email = db.Column(db.String(200))
+    email = db.Column(db.String(200), nullable=True, index=True)  # Used for login; unique per user
+    password_hash = db.Column(db.String(255), nullable=True)  # Werkzeug hashed password
     role = db.Column(db.String(20), default='user')  # 'admin' or 'user'
+    access_revoked_at = db.Column(db.Date, nullable=True)  # When set (and today >= this date), user cannot log in
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_login = db.Column(db.DateTime)
     
@@ -42,13 +44,20 @@ class NewHire(db.Model):
     email = db.Column(db.String(200), nullable=False)
     department = db.Column(db.String(100))
     position = db.Column(db.String(100))
+    role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=True)  # Job role (for default docs)
     start_date = db.Column(db.Date)
+    access_revoked_at = db.Column(db.Date, nullable=True)  # After this date user cannot log in
     status = db.Column(db.String(50), default='pending')  # pending, active, completed
     created_by = db.Column(db.String(100))  # Username of creator
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     notes = db.Column(db.Text)
-    
+    # Finale message shown to new hire when onboarding is complete (sent from admin checklist)
+    finale_message = db.Column(db.Text, nullable=True)
+    finale_message_sent_at = db.Column(db.DateTime, nullable=True)
+    finale_document_id = db.Column(db.Integer, db.ForeignKey('documents.id'), nullable=True)
+    finale_message_dismissed_at = db.Column(db.DateTime, nullable=True)
+
     # Relationship to required training videos
     required_training_videos = db.relationship('TrainingVideo', 
                                                 secondary=new_hire_required_training,
@@ -68,6 +77,7 @@ class NewHire(db.Model):
             'department': self.department,
             'position': self.position,
             'start_date': self.start_date.isoformat() if self.start_date else None,
+            'access_revoked_at': self.access_revoked_at.isoformat() if self.access_revoked_at else None,
             'status': self.status,
             'created_by': self.created_by,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -83,6 +93,7 @@ class Document(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(255), nullable=False)
     original_filename = db.Column(db.String(255), nullable=False)
+    display_name = db.Column(db.String(255), nullable=True)  # Name shown to users; if null, original_filename is used
     file_path = db.Column(db.String(500), nullable=False)
     file_size = db.Column(db.Integer)  # Size in bytes
     file_type = db.Column(db.String(100))  # MIME type
@@ -95,12 +106,18 @@ class Document(db.Model):
     def __repr__(self):
         return f'<Document {self.original_filename}>'
     
+    @property
+    def name_for_users(self):
+        """Name to show to users (display_name if set, else original_filename)."""
+        return (self.display_name or self.original_filename or '').strip() or self.original_filename
+
     def to_dict(self):
         """Convert to dictionary for JSON serialization"""
         return {
             'id': self.id,
             'filename': self.filename,
             'original_filename': self.original_filename,
+            'display_name': self.display_name,
             'file_size': self.file_size,
             'file_type': self.file_type,
             'description': self.description,
@@ -109,6 +126,33 @@ class Document(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
+
+
+# Job roles: default documents per role for onboarding
+role_documents = db.Table('role_documents',
+    db.Column('role_id', db.Integer, db.ForeignKey('roles.id'), primary_key=True),
+    db.Column('document_id', db.Integer, db.ForeignKey('documents.id'), primary_key=True)
+)
+
+
+class Role(db.Model):
+    """Job role - used in onboarding to pre-select default documents"""
+    __tablename__ = 'roles'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(150), nullable=False, unique=True)
+    description = db.Column(db.String(500), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    default_documents = db.relationship(
+        'Document',
+        secondary=role_documents,
+        backref=db.backref('roles', lazy='dynamic'),
+        lazy='dynamic'
+    )
+    
+    def __repr__(self):
+        return f'<Role {self.name}>'
 
 
 class ChecklistItem(db.Model):
@@ -570,4 +614,14 @@ class UserNotification(db.Model):
     
     def __repr__(self):
         return f'<UserNotification {self.username} - {self.notification_type}:{self.notification_id} ({self.is_read})>'
+
+
+class AdminSetting(db.Model):
+    """Key-value store for admin defaults (e.g. default finale message)."""
+    __tablename__ = 'admin_settings'
+    key = db.Column(db.String(100), primary_key=True)
+    value = db.Column(db.Text, nullable=True)
+
+    def __repr__(self):
+        return f'<AdminSetting {self.key}>'
 

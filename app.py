@@ -2,13 +2,13 @@
 Onboarding App - Main Flask Application
 Email + password login with Admin and User roles
 """
-from flask import Flask, render_template_string, redirect, url_for, request, flash, jsonify, send_file, send_from_directory
+from flask import Flask, render_template_string, redirect, url_for, request, flash, jsonify, send_file, send_from_directory, make_response
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from sqlalchemy import exists, or_, text
 from auth import login_required, admin_required, User, check_user_can_login_as_admin, authenticate_by_email_password
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting)
 from membership import get_token_groups, get_local_groups
 from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, \
     MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
@@ -151,13 +151,67 @@ def _ensure_users_access_revoked_at_column():
         _users_access_revoked_at_migrated = True
 
 
+_new_hires_finale_migrated = False
+
+
+def _ensure_new_hires_finale_columns():
+    """Ensure new_hires has finale_message, finale_message_sent_at, finale_document_id, finale_message_dismissed_at."""
+    global _new_hires_finale_migrated
+    if _new_hires_finale_migrated:
+        return
+    for col, sql_type in [
+        ('finale_message', 'NVARCHAR(MAX) NULL'),
+        ('finale_message_sent_at', 'DATETIME NULL'),
+        ('finale_document_id', 'INT NULL'),
+        ('finale_message_dismissed_at', 'DATETIME NULL'),
+    ]:
+        try:
+            db.session.execute(text(f"SELECT TOP 1 {col} FROM new_hires"))
+        except Exception:
+            db.session.rollback()
+            try:
+                db.session.execute(text(f"ALTER TABLE new_hires ADD {col} {sql_type}"))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+    _new_hires_finale_migrated = True
+
+
+_admin_settings_table_migrated = False
+
+
+def _ensure_admin_settings_table():
+    """Create admin_settings table if it does not exist."""
+    global _admin_settings_table_migrated
+    if _admin_settings_table_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 key FROM admin_settings"))
+        _admin_settings_table_migrated = True
+        return
+    except Exception:
+        db.session.rollback()
+    try:
+        db.session.execute(text(
+            "CREATE TABLE admin_settings (key NVARCHAR(100) PRIMARY KEY, value NVARCHAR(MAX) NULL)"
+        ))
+        db.session.commit()
+        _admin_settings_table_migrated = True
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning("admin_settings table create failed: %s", e)
+        # Do not set migrated=True so we retry on next request
+
+
 @app.before_request
 def _run_users_migration_if_needed():
-    """Run one-time migration for users.access_revoked_at before any request."""
+    """Run one-time migration for users.access_revoked_at, new_hires finale columns, admin_settings before any request."""
     if request.path.startswith('/static'):
         return
     try:
         _ensure_users_access_revoked_at_column()
+        _ensure_new_hires_finale_columns()
+        _ensure_admin_settings_table()
     except Exception:
         pass
 
@@ -407,6 +461,20 @@ def is_signature_field_signed(document_id, field, username):
     return False
 
 
+@app.route('/dashboard/dismiss-finale', methods=['POST'])
+@login_required
+def dismiss_finale_message():
+    """Mark the current user's finale message as dismissed so it is no longer shown."""
+    new_hire = NewHire.query.filter_by(username=current_user.username).first()
+    if new_hire:
+        new_hire.finale_message_dismissed_at = datetime.utcnow()
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    return redirect(url_for('dashboard'))
+
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -630,7 +698,25 @@ def dashboard():
                         break
         except Exception:
             pass
-        
+
+        # Finale message from admin (show in center of page when set and not dismissed)
+        show_finale = False
+        finale_message = ''
+        finale_document = None
+        if user_new_hire:
+            msg = getattr(user_new_hire, 'finale_message', None)
+            sent_at = getattr(user_new_hire, 'finale_message_sent_at', None)
+            dismissed_at = getattr(user_new_hire, 'finale_message_dismissed_at', None)
+            if msg and sent_at and not dismissed_at:
+                show_finale = True
+                finale_message = msg
+                doc_id = getattr(user_new_hire, 'finale_document_id', None)
+                if doc_id:
+                    try:
+                        finale_document = Document.query.get(int(doc_id))
+                    except Exception:
+                        finale_document = None
+
         return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -1489,10 +1575,23 @@ def dashboard():
                 </div>
             </div>
         </div>
-        
+
         <div class="dashboard-container">
         <div class="dashboard-page-wrap">
             <div class="main-content{% if not external_links %} main-content-two-col{% endif %}">
+                {% if show_finale %}
+                <div class="dashboard-tasks-col">
+                    <div class="section dashboard-tasks-card" style="text-align: center; padding: 48px 40px; min-height: 400px; display: flex; flex-direction: column; justify-content: center; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border: 2px solid #28a745;">
+                        <h2 class="section-title-dash" style="font-size: 1.75em; margin-bottom: 20px;">🎉 Message for you</h2>
+                        <div style="white-space: pre-wrap; text-align: center; font-size: 1.2em; line-height: 1.75; color: #333; margin-bottom: 24px;">{{ finale_message }}</div>
+                        {% if finale_document %}
+                        <p style="margin-bottom: 0;">
+                            <a href="{{ url_for('view_document_embed', doc_id=finale_document.id) }}" target="_blank" style="display: inline-block; padding: 12px 24px; background: #FE0100; color: white; text-decoration: none; border-radius: 8px; font-weight: 600;">📄 {{ finale_document.name_for_users or finale_document.original_filename }}</a>
+                        </p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% else %}
                 <div class="dashboard-tasks-col">
                     {% if required_videos or user_tasks %}
                     <div class="section dashboard-tasks-card">
@@ -1558,6 +1657,7 @@ def dashboard():
                 </div>
                 {% endif %}
                 </div>
+                {% endif %}
             
                 {% if external_links %}
                 <div class="sidebar-right">
@@ -1758,9 +1858,10 @@ def dashboard():
          required_videos=required_videos, completed_required_videos=completed_required_videos,
          incomplete_training=incomplete_training, all_tasks_completed=all_tasks_completed,
          progress_percentage=progress_percentage, all_videos=all_videos, visible_documents=visible_documents,
-         user_tasks=user_tasks, total_tasks=total_tasks, completed_tasks=completed_tasks, 
+         user_tasks=user_tasks, total_tasks=total_tasks, completed_tasks=completed_tasks,
          pending_count=pending_count, notifications=notifications, external_links=external_links,
-         hero_media_url=hero_media_url, hero_media_type=hero_media_type)
+         hero_media_url=hero_media_url, hero_media_type=hero_media_type,
+         show_finale=show_finale, finale_message=finale_message, finale_document=finale_document)
     except Exception as e:
         # Log the error for debugging
         import traceback
@@ -4092,7 +4193,17 @@ def add_new_hire():
                             <div class="form-group">
                                 <label for="username">Username (Domain Username) *</label>
                                 <input type="text" name="username" id="username" required placeholder="e.g., jdoe (without domain)">
-                                <small>Internal ID; new hire logs in with their email and password</small>
+                                <small>Internal ID; new hire logs in with their email and this password</small>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="password">Password (for login) *</label>
+                                    <input type="password" name="password" id="password" required minlength="6" placeholder="Min 6 characters">
+                                </div>
+                                <div class="form-group">
+                                    <label for="password_confirm">Confirm Password *</label>
+                                    <input type="password" name="password_confirm" id="password_confirm" required minlength="6" placeholder="Same as above">
+                                </div>
                             </div>
                             
                             <div class="form-row">
@@ -4234,6 +4345,7 @@ def add_new_hire():
                                 <div class="review-section">
                                     <h3>👤 Basic Information</h3>
                                     <div class="review-item"><strong>Username:</strong> <span id="review-username">-</span></div>
+                                    <div class="review-item"><strong>Password:</strong> <input type="text" id="review-password" readonly style="width: 100%; max-width: 280px; padding: 6px 10px; margin-left: 4px; border: 1px solid #ddd; border-radius: 4px; background: #f9f9f9; font-family: inherit;" value=""> <small style="color: #666;">(copy to give to new hire)</small></div>
                                     <div class="review-item"><strong>Name:</strong> <span id="review-name">-</span></div>
                                     <div class="review-item"><strong>Email:</strong> <span id="review-email">-</span></div>
                                     <div class="review-item"><strong>Department:</strong> <span id="review-department">-</span></div>
@@ -4325,9 +4437,19 @@ def add_new_hire():
                     const username = document.getElementById('username').value.trim();
                     const firstName = document.getElementById('first_name').value.trim();
                     const lastName = document.getElementById('last_name').value.trim();
+                    const password = document.getElementById('password').value;
+                    const passwordConfirm = document.getElementById('password_confirm').value;
                     
                     if (!username || !firstName || !lastName) {
                         alert('Please fill in all required fields: Username, First Name, and Last Name');
+                        return false;
+                    }
+                    if (!password || password.length < 6) {
+                        alert('Password is required and must be at least 6 characters.');
+                        return false;
+                    }
+                    if (password !== passwordConfirm) {
+                        alert('Password and Confirm Password do not match.');
                         return false;
                     }
                 } else if (currentStep === 2) {
@@ -4343,6 +4465,8 @@ def add_new_hire():
             function updateReview() {
                 // Basic Info
                 document.getElementById('review-username').textContent = document.getElementById('username').value || '-';
+                var pwd = document.getElementById('password').value || '';
+                document.getElementById('review-password').value = pwd || '';
                 const firstName = document.getElementById('first_name').value || '';
                 const lastName = document.getElementById('last_name').value || '';
                 document.getElementById('review-name').textContent = (firstName + ' ' + lastName).trim() || '-';
@@ -4403,6 +4527,7 @@ def create_new_hire():
     first_name = request.form.get('first_name', '').strip()
     last_name = request.form.get('last_name', '').strip()
     email = request.form.get('email', '').strip()
+    password = request.form.get('password', '').strip()
     department = request.form.get('department', '').strip()
     position = request.form.get('position', '').strip()
     start_date_str = request.form.get('start_date', '').strip()
@@ -4413,6 +4538,9 @@ def create_new_hire():
     
     if not username or not first_name or not last_name:
         flash('Username, first name, and last name are required.', 'error')
+        return redirect(url_for('add_new_hire'))
+    if not password or len(password) < 6:
+        flash('Password is required and must be at least 6 characters.', 'error')
         return redirect(url_for('add_new_hire'))
     
     if not required_videos:
@@ -4490,13 +4618,19 @@ def create_new_hire():
         db.session.add(new_hire)
         db.session.flush()  # Get the ID
         
-        # Ensure User exists with email so new hire can log in (email + password)
+        # Ensure User exists with email and password so new hire can log in (email + password)
         user = UserModel.query.filter_by(username=username).first()
         if not user:
-            user = UserModel(username=username, email=email, role='user')
+            user = UserModel(
+                username=username,
+                email=email,
+                role='user',
+                password_hash=generate_password_hash(password)
+            )
             db.session.add(user)
         else:
             user.email = email
+            user.password_hash = generate_password_hash(password)
         
         # Add required training videos
         for video_id in required_videos:
@@ -6108,34 +6242,6 @@ def manage_users():
             {% endwith %}
 
             <div class="card">
-                <h2>Add User</h2>
-                <form method="POST" action="{{ url_for('users_add') }}">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Username</label>
-                            <input type="text" name="username" placeholder="Username" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Email (for login)</label>
-                            <input type="email" name="email" placeholder="user@example.com">
-                        </div>
-                        <div class="form-group">
-                            <label>Password</label>
-                            <input type="password" name="password" placeholder="••••••••" required minlength="6">
-                        </div>
-                        <div class="form-group">
-                            <label>Full name (optional)</label>
-                            <input type="text" name="full_name" placeholder="Full Name">
-                        </div>
-                        <div class="form-group" style="flex: 0;">
-                            <label>&nbsp;</label>
-                            <button type="submit" class="btn btn-primary">Add User</button>
-                        </div>
-                    </div>
-                </form>
-            </div>
-
-            <div class="card">
                 <h2>Users</h2>
                 {% if users %}
                 <table>
@@ -6179,7 +6285,7 @@ def manage_users():
                     </tbody>
                 </table>
                 {% else %}
-                <p style="color: #666;">No users yet. Add one above.</p>
+                <p style="color: #666;">No users yet. Users are created when you add a new hire and they start onboarding.</p>
                 {% endif %}
             </div>
         </div>
@@ -6283,34 +6389,8 @@ def manage_users():
 @app.route('/admin/users/add', methods=['POST'])
 @admin_required
 def users_add():
-    """Add a new user (regular user, not admin)."""
-    username = (request.form.get('username') or '').strip()
-    email = (request.form.get('email') or '').strip()
-    password = (request.form.get('password') or '').strip()
-    full_name = (request.form.get('full_name') or '').strip()
-    if not username:
-        flash('Username is required.', 'error')
-        return redirect(url_for('manage_users'))
-    if not password or len(password) < 6:
-        flash('Password is required and must be at least 6 characters.', 'error')
-        return redirect(url_for('manage_users'))
-    if UserModel.query.filter_by(username=username).first():
-        flash(f'User "{username}" already exists.', 'error')
-        return redirect(url_for('manage_users'))
-    try:
-        user = UserModel(
-            username=username,
-            email=email or None,
-            full_name=full_name or None,
-            password_hash=generate_password_hash(password),
-            role='user'
-        )
-        db.session.add(user)
-        db.session.commit()
-        flash(f'User "{username}" added successfully.', 'success')
-    except Exception as e:
-        db.session.rollback()
-        flash(f'Error adding user: {str(e)}', 'error')
+    """User creation is disabled; users are only created when starting onboarding (add new hire)."""
+    flash('Users cannot be added here. Add a new hire from the New Hires / onboarding flow to create a user.', 'error')
     return redirect(url_for('manage_users'))
 
 
@@ -6751,34 +6831,42 @@ def manage_admins():
             .form-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 4px; }
             .form-group input {
                 width: 100%;
-                padding: 10px 12px;
+                padding: 8px 12px;
                 border: 1px solid #ddd;
-                border-radius: 0.5rem;
-                font-size: 16px;
-                min-height: 44px;
+                border-radius: 0.35rem;
+                font-size: 15px;
             }
             .btn {
-                padding: 10px 20px;
+                padding: 6px 12px;
                 border: none;
-                border-radius: 0.5rem;
+                border-radius: 0.35rem;
                 cursor: pointer;
-                font-size: 1em;
-                font-weight: 600;
+                font-size: 0.85em;
+                font-weight: 500;
                 text-decoration: none;
                 display: inline-block;
-                min-height: 44px;
+                white-space: nowrap;
             }
+            .btn-sm { padding: 4px 10px; font-size: 0.8em; }
             .btn-primary { background: #FE0100; color: white; }
             .btn-primary:hover { background: #cc0000; color: white; }
             .btn-success { background: #28a745; color: white; }
             .btn-success:hover { background: #218838; color: white; }
             .btn-secondary { background: #6c757d; color: white; }
+            .btn-secondary:hover { background: #5a6268; color: white; }
             .btn-danger { background: #dc3545; color: white; }
             .btn-danger:hover { background: #c82333; color: white; }
             table { width: 100%; border-collapse: collapse; }
-            th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #eee; }
-            th { background: #f8f9fa; font-weight: 600; font-size: 0.9em; }
-            .actions-cell { display: flex; flex-wrap: wrap; gap: 8px; }
+            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 0.95em; }
+            th { background: #f8f9fa; font-weight: 600; font-size: 0.85em; }
+            .actions-cell {
+                display: flex;
+                flex-wrap: nowrap;
+                gap: 6px;
+                align-items: center;
+            }
+            .actions-cell .btn { margin: 0; }
+            .actions-cell form { display: inline; margin: 0; }
             .modal {
                 display: none;
                 position: fixed;
@@ -6846,9 +6934,9 @@ def manage_admins():
                             <label>Full name (optional)</label>
                             <input type="text" name="full_name" placeholder="Full Name">
                         </div>
-                        <div class="form-group" style="flex: 0;">
+                        <div class="form-group" style="flex: 0; align-self: flex-end;">
                             <label>&nbsp;</label>
-                            <button type="submit" class="btn btn-primary">Add Admin</button>
+                            <button type="submit" class="btn btn-primary btn-sm">Add Admin</button>
                         </div>
                     </div>
                 </form>
@@ -6875,14 +6963,14 @@ def manage_admins():
                             <td>{{ admin.full_name or '-' }}</td>
                             <td>{{ admin.last_login.strftime('%Y-%m-%d %H:%M') if admin.last_login else 'Never' }}</td>
                             <td class="actions-cell">
-                                <button type="button" class="btn btn-secondary btn-edit-admin" data-id="{{ admin.id }}" data-username="{{ admin.username|e }}" data-email="{{ (admin.email or '')|e }}" data-full-name="{{ (admin.full_name or '')|e }}">Edit</button>
-                                <button type="button" class="btn btn-secondary btn-password-admin" data-id="{{ admin.id }}" data-username="{{ admin.username|e }}">Change Password</button>
+                                <button type="button" class="btn btn-secondary btn-sm btn-edit-admin" data-id="{{ admin.id }}" data-username="{{ admin.username|e }}" data-email="{{ (admin.email or '')|e }}" data-full-name="{{ (admin.full_name or '')|e }}">Edit</button>
+                                <button type="button" class="btn btn-secondary btn-sm btn-password-admin" data-id="{{ admin.id }}" data-username="{{ admin.username|e }}">Password</button>
                                 {% if admin.username != current_user.username %}
                                 <form method="POST" action="{{ url_for('manage_admins_remove', user_id=admin.id) }}" style="display: inline;" onsubmit="return confirm('Remove admin role from {{ admin.username }}? They will become a regular user.');">
-                                    <button type="submit" class="btn btn-danger">Remove Admin</button>
+                                    <button type="submit" class="btn btn-danger btn-sm">Remove</button>
                                 </form>
                                 {% else %}
-                                <span style="color: #999; font-size: 0.9em;">(you)</span>
+                                <span style="color: #999; font-size: 0.8em;">(you)</span>
                                 {% endif %}
                             </td>
                         </tr>
@@ -7722,6 +7810,9 @@ def manage_documents():
                                             </a>
                                             <a href="{{ url_for('rename_document', doc_id=doc.id) }}" class="actions-dropdown-item">
                                                 ✏️ Rename
+                                            </a>
+                                            <a href="{{ url_for('view_document_embed', doc_id=doc.id) }}" class="actions-dropdown-item" target="_blank" title="Open in new tab to print">
+                                                🖨️ Print
                                             </a>
                                             <form method="POST" action="{{ url_for('toggle_document_visibility') }}" style="display: block;">
                                                 <input type="hidden" name="doc_id" value="{{ doc.id }}">
@@ -16011,8 +16102,20 @@ def update_checklist_completion():
 @admin_required
 def view_user_checklists():
     """List all active users and allow admin to select one to view/update their checklist"""
-    all_new_hires = NewHire.query.filter(NewHire.status != 'removed').order_by(NewHire.first_name, NewHire.last_name).all()
-    
+    from datetime import date as _date
+    today = _date.today()
+    candidates = NewHire.query.filter(NewHire.status != 'removed').order_by(NewHire.first_name, NewHire.last_name).all()
+    # Exclude new hires whose user was revoked or deleted (same as dashboard / manage users)
+    all_new_hires = []
+    for nh in candidates:
+        user = UserModel.query.filter_by(username=nh.username).first()
+        if not user:
+            continue
+        revoked_at = getattr(user, 'access_revoked_at', None)
+        if revoked_at is not None and today >= revoked_at:
+            continue
+        all_new_hires.append(nh)
+
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -16188,7 +16291,27 @@ def view_user_checklist(username):
     user_completions = {}
     for completion in NewHireChecklist.query.filter_by(new_hire_id=new_hire.id).all():
         user_completions[completion.checklist_item_id] = completion
-    
+
+    # Documents for optional attachment to finale message
+    documents = Document.query.order_by(Document.original_filename).all()
+
+    # Default finale message (and optional document) for pre-filling the modal
+    default_finale_message = ''
+    default_finale_document_id = ''
+    try:
+        _ensure_admin_settings_table()
+        r = db.session.execute(text("SELECT value FROM admin_settings WHERE key = 'default_finale_message'")).fetchone()
+        if r is not None and r[0] is not None:
+            default_finale_message = (str(r[0]) or '').strip()
+        r = db.session.execute(text("SELECT value FROM admin_settings WHERE key = 'default_finale_document_id'")).fetchone()
+        if r is not None and r[0] is not None:
+            v = str(r[0]).strip()
+            if v.isdigit():
+                default_finale_document_id = v
+    except Exception:
+        db.session.rollback()
+        pass
+
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -16459,12 +16582,54 @@ def view_user_checklist(username):
                         </div>
                         {% endfor %}
                         <button type="submit" class="btn btn-success" style="margin-top: 20px;">💾 Save Checklist Status</button>
+                        <button type="button" class="btn" style="margin-top: 20px; margin-left: 10px; background: #17a2b8;" onclick="openFinaleModal()">📩 Send Finale Message</button>
                     {% else %}
                         <p style="color: #666;">No checklist items available. <a href="{{ url_for('manage_checklist') }}">Add some tasks</a> to get started.</p>
+                        <button type="button" class="btn" style="margin-top: 20px; background: #17a2b8;" onclick="openFinaleModal()">📩 Send Finale Message</button>
                     {% endif %}
                 </form>
             </div>
         </div>
+
+        <div id="finaleModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+            <div style="background: #fff; border-radius: 12px; padding: 24px; max-width: 500px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.2);">
+                <h3 style="margin-bottom: 16px;">Send Finale Message</h3>
+                <p style="color: #666; font-size: 0.9em; margin-bottom: 16px;">This message will appear in the center of the user's dashboard the next time they log in. You can optionally attach a document.</p>
+                <form method="POST" action="{{ url_for('send_finale_message', username=username) }}">
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; font-weight: 600; margin-bottom: 6px;">Message</label>
+                        <textarea name="finale_message" id="finaleMessageText" rows="4" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-family: inherit;" placeholder="e.g. Congratulations on completing onboarding! ..." required>{{ default_finale_message }}</textarea>
+                    </div>
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; font-weight: 600; margin-bottom: 6px;">Attach document (optional)</label>
+                        <select name="finale_document_id" id="finaleDocumentSelect" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px;">
+                            <option value="">— None —</option>
+                            {% for doc in documents %}
+                            <option value="{{ doc.id }}" {% if default_finale_document_id and doc.id == default_finale_document_id|int %}selected{% endif %}>{{ doc.name_for_users or doc.original_filename }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" name="save_as_default" value="1" style="width: 18px; height: 18px;">
+                            <span>Save this message as default for future finale messages</span>
+                        </label>
+                    </div>
+                    <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                        <button type="button" class="btn btn-secondary" style="background: #6c757d; color: white;" onclick="closeFinaleModal()">Cancel</button>
+                        <button type="submit" class="btn btn-success">Send Message</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script>
+            function openFinaleModal() {
+                document.getElementById('finaleModal').style.display = 'flex';
+            }
+            function closeFinaleModal() {
+                document.getElementById('finaleModal').style.display = 'none';
+            }
+        </script>
         
         <script>
             function updateProgress() {
@@ -16508,7 +16673,51 @@ def view_user_checklist(username):
         </script>
     </body>
     </html>
-    ''', new_hire=new_hire, checklist_items=checklist_items, user_completions=user_completions, username=username)
+    ''', new_hire=new_hire, checklist_items=checklist_items, user_completions=user_completions, username=username, documents=documents, default_finale_message=default_finale_message, default_finale_document_id=default_finale_document_id)
+
+
+@app.route('/admin/user-checklists/<username>/send-finale', methods=['POST'])
+@admin_required
+def send_finale_message(username):
+    """Save and send finale message to the new hire (shown on their dashboard)."""
+    new_hire = NewHire.query.filter_by(username=username).first()
+    if not new_hire:
+        flash('User not found.', 'error')
+        return redirect(url_for('view_user_checklists'))
+    message = (request.form.get('finale_message') or '').strip()
+    if not message:
+        flash('Please enter a message.', 'error')
+        return redirect(url_for('view_user_checklist', username=username))
+    doc_id = request.form.get('finale_document_id', '').strip()
+    new_hire.finale_message = message
+    new_hire.finale_message_sent_at = datetime.utcnow()
+    new_hire.finale_document_id = int(doc_id) if doc_id and doc_id.isdigit() else None
+    new_hire.finale_message_dismissed_at = None  # so user sees it again
+
+    try:
+        db.session.commit()
+        flash(f'Finale message sent to {new_hire.first_name} {new_hire.last_name}. They will see it on their next visit.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error saving message: {str(e)}', 'error')
+        return redirect(url_for('view_user_checklist', username=username))
+
+    # Optionally save as default for future finale messages (after commit so message send is not rolled back)
+    if request.form.get('save_as_default'):
+        try:
+            _ensure_admin_settings_table()
+            doc_val = doc_id if doc_id and doc_id.isdigit() else ''
+            for key, value in [('default_finale_message', message), ('default_finale_document_id', doc_val)]:
+                existing = db.session.execute(text("SELECT key FROM admin_settings WHERE key = :k"), {"k": key}).fetchone()
+                if existing:
+                    db.session.execute(text("UPDATE admin_settings SET value = :v WHERE key = :k"), {"v": value, "k": key})
+                else:
+                    db.session.execute(text("INSERT INTO admin_settings (key, value) VALUES (:k, :v)"), {"k": key, "v": value})
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            flash('Message was sent, but saving as default failed. You can set a default again next time.', 'warning')
+    return redirect(url_for('view_user_checklist', username=username))
 
 
 @app.route('/admin/user-checklists/<username>/update', methods=['POST'])
