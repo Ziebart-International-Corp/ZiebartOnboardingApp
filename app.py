@@ -2,13 +2,13 @@
 Onboarding App - Main Flask Application
 Email + password login with Admin and User roles
 """
-from flask import Flask, render_template_string, redirect, url_for, request, flash, jsonify, send_file, send_from_directory, make_response
+from flask import Flask, render_template_string, redirect, url_for, request, flash, jsonify, send_file, send_from_directory, make_response, abort
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from sqlalchemy import exists, or_, text
-from auth import login_required, admin_required, User, check_user_can_login_as_admin, authenticate_by_email_password
+from sqlalchemy import exists, or_, and_, text, bindparam
+from auth import login_required, admin_required, manager_required, User, check_user_can_login_as_admin, authenticate_by_email_password
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, document_stores)
 from membership import get_token_groups, get_local_groups
 from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, \
     MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
@@ -19,6 +19,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import generate_password_hash
 from io import BytesIO
 import base64
+from graphql_schema import schema as graphql_schema
 try:
     from pdf2image import convert_from_path
     PDF2IMAGE_AVAILABLE = True
@@ -151,6 +152,29 @@ def _ensure_users_access_revoked_at_column():
         _users_access_revoked_at_migrated = True
 
 
+_users_role_migrated = False
+
+
+def _ensure_users_role_column():
+    """Ensure users.role exists (one-time migration). Default 'user' for existing rows."""
+    global _users_role_migrated
+    if _users_role_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 role FROM users"))
+        _users_role_migrated = True
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text("ALTER TABLE users ADD role NVARCHAR(20) NULL"))
+            db.session.commit()
+            db.session.execute(text("UPDATE users SET role = 'user' WHERE role IS NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        _users_role_migrated = True
+
+
 _new_hires_finale_migrated = False
 
 
@@ -203,15 +227,86 @@ def _ensure_admin_settings_table():
         # Do not set migrated=True so we retry on next request
 
 
+_stores_migrated = False
+
+
+def _ensure_stores_and_store_id():
+    """Create stores table and add store_id to users, new_hires, documents; create manager_permissions."""
+    global _stores_migrated
+    if _stores_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 id FROM stores"))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text(
+                "CREATE TABLE stores (id INT PRIMARY KEY IDENTITY(1,1), name NVARCHAR(200) NOT NULL, code NVARCHAR(50) NULL, created_at DATETIME NULL)"
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    for table, col in [('users', 'store_id'), ('new_hires', 'store_id'), ('documents', 'store_id')]:
+        try:
+            db.session.execute(text(f"SELECT TOP 1 {col} FROM {table}"))
+        except Exception:
+            db.session.rollback()
+            try:
+                db.session.execute(text(f"ALTER TABLE {table} ADD {col} INT NULL"))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+    try:
+        db.session.execute(text("SELECT TOP 1 id FROM manager_permissions"))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text(
+                "CREATE TABLE manager_permissions (id INT PRIMARY KEY IDENTITY(1,1), user_id INT NOT NULL, permission_key NVARCHAR(80) NOT NULL)"
+            ))
+            db.session.commit()
+            try:
+                db.session.execute(text("CREATE UNIQUE INDEX uq_manager_permission ON manager_permissions (user_id, permission_key)"))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+        except Exception:
+            db.session.rollback()
+    try:
+        db.session.execute(text("SELECT TOP 1 document_id FROM document_stores"))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text(
+                "CREATE TABLE document_stores (document_id INT NOT NULL, store_id INT NOT NULL, "
+                "PRIMARY KEY (document_id, store_id), "
+                "FOREIGN KEY (document_id) REFERENCES documents(id), "
+                "FOREIGN KEY (store_id) REFERENCES stores(id))"
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        try:
+            db.session.execute(text(
+                "INSERT INTO document_stores (document_id, store_id) SELECT id, store_id FROM documents WHERE store_id IS NOT NULL"
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    _stores_migrated = True
+
+
 @app.before_request
 def _run_users_migration_if_needed():
-    """Run one-time migration for users.access_revoked_at, new_hires finale columns, admin_settings before any request."""
+    """Run one-time migration for users.access_revoked_at, new_hires finale columns, admin_settings, stores before any request."""
     if request.path.startswith('/static'):
         return
     try:
         _ensure_users_access_revoked_at_column()
+        _ensure_users_role_column()
         _ensure_new_hires_finale_columns()
         _ensure_admin_settings_table()
+        _ensure_stores_and_store_id()
     except Exception:
         pass
 
@@ -242,6 +337,90 @@ def check_authentication():
         return
     if not current_user.is_authenticated:
         return redirect(url_for('login', next=request.url))
+
+
+def get_current_user_store_id():
+    """Return store_id for current user (from User record), or None."""
+    if not current_user.is_authenticated:
+        return None
+    try:
+        u = UserModel.query.filter_by(username=current_user.username).first()
+        return getattr(u, 'store_id', None) if u else None
+    except Exception:
+        return None
+
+
+def documents_visible_to_store_query(store_id, base_filter=None):
+    """Return Document query filtered to is_visible and (all stores or store_id in document's stores).
+    If store_id is None, only is_visible is applied (admin view). base_filter is an optional extra filter (e.g. has signature fields)."""
+    q = Document.query.filter(Document.is_visible == True)
+    if store_id is not None:
+        # Document visible to this store if: no rows in document_stores (all stores) OR has row with this store_id
+        no_stores = ~exists().where(document_stores.c.document_id == Document.id)
+        in_store = exists().where(and_(document_stores.c.document_id == Document.id, document_stores.c.store_id == store_id))
+        q = q.filter(or_(no_stores, in_store))
+    if base_filter is not None:
+        q = q.filter(base_filter)
+    return q
+
+
+def document_visible_to_store(document, store_id):
+    """True if document is visible to the given store: is_visible and (all stores or store_id in document's stores)."""
+    if not document or not getattr(document, 'is_visible', False):
+        return False
+    store_ids = getattr(document, 'store_ids', None) or []
+    if not store_ids:
+        return True  # all stores
+    if store_id is None:
+        return True  # no store filter
+    return any(getattr(s, 'id', None) == store_id for s in store_ids)
+
+
+def get_visible_ordered_user_tasks(task_list):
+    """From a list of UserTask, return only tasks that are visible (dependency satisfied) and sorted by display_order then priority/due_date/created_at.
+    A task is visible if depends_on_task_id is None or the depended-on task is completed. Tasks are ordered so the next task appears only after the previous is done."""
+    from datetime import date as date_type
+    completed_ids = {t.id for t in task_list if t.status == 'completed'}
+    def visible(t):
+        dep = getattr(t, 'depends_on_task_id', None)
+        return dep is None or dep in completed_ids
+    visible_list = [t for t in task_list if visible(t)]
+    def sort_key(t):
+        order = getattr(t, 'display_order', 0)
+        prio = {'urgent': 3, 'high': 2, 'normal': 1, 'low': 0}.get((t.priority or 'normal').lower(), 1)
+        due = t.due_date or date_type.max
+        created = t.created_at or datetime.min
+        return (order, -prio, due, created)
+    visible_list.sort(key=sort_key)
+    return visible_list
+
+
+def manager_has_permission(permission_key):
+    """True if current user is admin, or is manager and has the given permission."""
+    if not current_user.is_authenticated:
+        return False
+    if current_user.is_admin():
+        return True
+    if not current_user.is_manager():
+        return False
+    try:
+        u = UserModel.query.filter_by(username=current_user.username).first()
+        if not u:
+            return False
+        return ManagerPermission.query.filter_by(user_id=u.id, permission_key=permission_key).first() is not None
+    except Exception:
+        return False
+
+
+# Permission keys for managers (used in Settings and when gating actions)
+MANAGER_PERMISSION_KEYS = [
+    ('start_onboarding', 'Start onboarding (add new hires)'),
+    ('manage_documents', 'Manage documents'),
+    ('manage_training', 'Manage training videos'),
+    ('manage_checklist', 'Manage onboarding checklist'),
+    ('view_reports', 'View reports'),
+    ('manage_user_checklists', 'Manage user checklists'),
+]
 
 
 def update_last_login(username):
@@ -280,6 +459,58 @@ def index():
     return redirect(url_for('login'))
 
 
+@app.route('/api/graphql', methods=['GET', 'POST'])
+@login_required
+def graphql_api():
+    """GraphQL API: all database access for the API goes through this endpoint."""
+    if request.method == 'GET':
+        # Serve a simple GraphiQL-style page for testing
+        return '''
+        <!DOCTYPE html>
+        <html><head><title>GraphQL API</title></head>
+        <body>
+        <h1>GraphQL API</h1>
+        <p>Send a POST request with JSON body: <code>{"query": "query { ... }"}</code></p>
+        <p>Example query:</p>
+        <pre>
+query {
+  newHires(limit: 5) {
+    username
+    firstName
+    lastName
+    email
+    status
+  }
+  roles { id name }
+}
+        </pre>
+        <form method="post" action="/api/graphql">
+        <textarea name="query" rows="12" cols="80" placeholder="query { newHires(limit: 2) { username firstName lastName } }"></textarea><br>
+        <button type="submit">Execute</button>
+        </form>
+        </body></html>
+        '''
+    data = request.get_json(silent=True) or {}
+    query = data.get('query') or request.form.get('query') or ''
+    variables = data.get('variables') or {}
+    operation_name = data.get('operationName')
+    if not query:
+        return jsonify({'errors': [{'message': 'Missing query'}]}), 400
+    result = graphql_schema.execute(
+        query,
+        context_value={'request': request, 'current_user': current_user},
+        variable_values=variables,
+        operation_name=operation_name,
+    )
+    status = 200
+    if result and result.errors:
+        status = 400
+    return jsonify({
+        'data': result.data if result else None,
+        'errors': [{'message': e.message} for e in (result.errors or [])],
+    }), status
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """Login with email and password."""
@@ -294,13 +525,13 @@ def login():
             login_user(user, remember=True)
             update_last_login(user.username)
             next_after = request.form.get('next') or request.args.get('next') or url_for('dashboard')
-            return redirect(next_after)
+            return redirect(url_for('welcome', next=next_after))
         flash('Invalid email or password. Please try again.', 'error')
     return render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Log in - Onboarding App</title>
+        <title>Log in - Ziebart Onboarding</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -475,6 +706,102 @@ def dismiss_finale_message():
     return redirect(url_for('dashboard'))
 
 
+@app.route('/welcome')
+@login_required
+def welcome():
+    """Welcome page shown after login; user clicks Continue to go to dashboard."""
+    next_url = request.args.get('next') or url_for('dashboard')
+    full_name = current_user.username
+    try:
+        nh = NewHire.query.filter_by(username=current_user.username).first()
+        if nh:
+            first = (nh.first_name or '').strip()
+            last = (nh.last_name or '').strip()
+            full_name = f"{first} {last}".strip() if last else (first or current_user.username)
+            if not full_name:
+                full_name = current_user.username
+    except Exception:
+        pass
+    user_record = UserModel.query.filter_by(username=current_user.username).first()
+    if user_record and getattr(user_record, 'full_name', None) and (not full_name or full_name == current_user.username):
+        full_name = (user_record.full_name or '').strip() or full_name
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Welcome - Ziebart Onboarding</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: 'URW Form', Arial, sans-serif;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: #1a1a1a;
+                color: #fff;
+            }
+            .welcome-card {
+                background: #fff;
+                color: #333;
+                max-width: 720px;
+                width: 92%;
+                padding: 56px 52px;
+                border-radius: 14px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+                text-align: center;
+            }
+            .welcome-card h1 {
+                font-size: 2em;
+                font-weight: 800;
+                margin-bottom: 28px;
+                color: #000;
+                line-height: 1.35;
+            }
+            .welcome-card p {
+                font-size: 1.2em;
+                line-height: 1.7;
+                color: #444;
+                margin-bottom: 36px;
+            }
+            .welcome-card .btn {
+                display: inline-block;
+                padding: 14px 32px;
+                background: #FE0100;
+                color: #fff;
+                text-decoration: none;
+                border-radius: 8px;
+                font-weight: 600;
+                font-size: 1.05em;
+                border: none;
+                cursor: pointer;
+            }
+            .welcome-card .btn:hover {
+                background: #cc0000;
+                color: #fff;
+            }
+            .welcome-card .welcome-logo {
+                display: block;
+                margin: 0 auto 28px;
+                height: 80px;
+                width: auto;
+                object-fit: contain;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="welcome-card">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart" class="welcome-logo">
+            <h1>Welcome to Ziebart International Corporation{{ ', ' + full_name if full_name else '' }}! Congratulations on your new role!</h1>
+            <p>We are honored to have you join the team and are committed to supporting your success from day one.</p>
+            <a href="{{ next_url }}" class="btn">Continue</a>
+        </div>
+    </body>
+    </html>
+    ''', full_name=full_name, next_url=next_url)
+
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -528,6 +855,11 @@ def dashboard():
         
         incomplete_training = [v for v in required_videos if v.id not in completed_required_videos]
         
+        # Ensure task order/dependency columns exist (for display_order, depends_on_task_id)
+        try:
+            _ensure_user_task_order_columns()
+        except Exception:
+            pass
         # Get user tasks assigned to current user
         try:
             all_user_tasks = UserTask.query.filter_by(username=current_user.username).all()
@@ -584,8 +916,9 @@ def dashboard():
             all_user_tasks = UserTask.query.filter_by(username=current_user.username).all()
         except Exception as e:
             all_user_tasks = []
-        # Filter out completed tasks for dashboard display
-        user_tasks = [t for t in all_user_tasks if t.status != 'completed']
+        # Only show tasks that are visible (dependency satisfied); then filter to incomplete for display
+        visible_ordered = get_visible_ordered_user_tasks(all_user_tasks)
+        user_tasks = [t for t in visible_ordered if t.status != 'completed']
         completed_user_tasks = [t for t in all_user_tasks if t.status == 'completed']
         
         # Check if all tasks are completed
@@ -1011,14 +1344,14 @@ def dashboard():
             .dashboard-page-wrap {
                 max-width: 1200px;
                 margin: 0 auto;
-                padding: 0 20px 24px;
+                padding: 24px 20px 40px;
             }
             .main-content {
                 display: grid;
                 grid-template-columns: 1fr 320px;
                 gap: 24px;
                 align-items: start;
-                margin-top: -24px;
+                margin-top: 24px;
                 position: relative;
                 z-index: 2;
             }
@@ -1036,10 +1369,9 @@ def dashboard():
                 padding: 1.5rem;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
                 min-height: 280px;
-                max-height: min(520px, 70vh);
                 display: flex;
                 flex-direction: column;
-                overflow: hidden;
+                overflow: visible;
             }
             .dashboard-card-header {
                 display: flex;
@@ -1097,16 +1429,15 @@ def dashboard():
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
                 padding: 1.5rem;
                 min-height: 280px;
-                max-height: min(520px, 70vh);
                 display: flex;
                 flex-direction: column;
-                overflow: hidden;
+                overflow: visible;
             }
             .sidebar-right .section-title-dash {
                 margin-bottom: 16px;
             }
             .sidebar-right .quick-links {
-                overflow-y: auto;
+                overflow-y: visible;
                 flex: 1;
                 min-height: 0;
             }
@@ -1505,6 +1836,8 @@ def dashboard():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% elif current_user.is_manager() %}
+                <a href="{{ url_for('manager_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Manager Console</a>
                 {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav">
@@ -1515,6 +1848,8 @@ def dashboard():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
+                {% elif current_user.is_manager() %}
+                <a href="{{ url_for('manager_dashboard') }}">Manager Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -1550,32 +1885,18 @@ def dashboard():
                     <span>▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
+                    {% if is_admin %}
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    {% endif %}
+                    {% if current_user.is_manager() %}
+                    <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                    {% endif %}
                     <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
         </div>
         
         <div class="dashboard-view">
-        <div class="dashboard-hero-full">
-            <div class="dashboard-hero-banner">
-                {% if hero_media_url %}
-                <div class="hero-confetti-bg">
-                    {% if hero_media_type == 'video' %}
-                    <video src="{{ hero_media_url }}" autoplay loop muted playsinline></video>
-                    {% else %}
-                    <img src="{{ hero_media_url }}" alt="" />
-                    {% endif %}
-                </div>
-                <div class="hero-overlay"></div>
-                {% endif %}
-                <div class="hero-inner">
-                    <h1 class="hero-title">Congrats on getting hired, {{ user_first_name }}!</h1>
-                    <p class="hero-subtitle">Complete your tasks below to continue onboarding.</p>
-                </div>
-            </div>
-        </div>
-
         <div class="dashboard-container">
         <div class="dashboard-page-wrap">
             <div class="main-content{% if not external_links %} main-content-two-col{% endif %}">
@@ -1912,22 +2233,55 @@ def dashboard():
         ''')
 
 
+def _ensure_user_task_order_columns():
+    """Ensure user_tasks has display_order and depends_on_task_id for ordering and dependencies."""
+    try:
+        db.session.execute(text("SELECT TOP 1 display_order FROM user_tasks"))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text("ALTER TABLE user_tasks ADD display_order INT NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    try:
+        db.session.execute(text("SELECT TOP 1 depends_on_task_id FROM user_tasks"))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text("ALTER TABLE user_tasks ADD depends_on_task_id INT NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+
 @app.route('/tasks')
 @login_required
 def user_tasks():
-    """User tasks page - shows tasks assigned to the current user"""
+    """User tasks page - shows tasks assigned to the current user. Tasks are ordered by display_order and only visible when their dependency is completed."""
     try:
         is_admin = current_user.is_admin()
+        _ensure_user_task_order_columns()
         
-        # Get tasks assigned to current user
+        # Get tasks assigned to current user (order by display_order then priority/due_date)
         try:
             user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+                UserTask.display_order.asc(),
                 UserTask.priority.desc(),
                 UserTask.due_date.asc(),
                 UserTask.created_at.desc()
             ).all()
         except Exception as e:
-            user_tasks = []
+            err_str = (str(e) or '').lower()
+            if 'display_order' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
+                _ensure_user_task_order_columns()
+                user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+                    UserTask.priority.desc(),
+                    UserTask.due_date.asc(),
+                    UserTask.created_at.desc()
+                ).all()
+            else:
+                user_tasks = []
         
         # Get new hire record for current user
         try:
@@ -1982,12 +2336,20 @@ def user_tasks():
         # Refresh tasks list after potential additions
         try:
             user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+                UserTask.display_order.asc(),
                 UserTask.priority.desc(),
                 UserTask.due_date.asc(),
                 UserTask.created_at.desc()
             ).all()
         except Exception as e:
-            user_tasks = []
+            try:
+                user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+                    UserTask.priority.desc(),
+                    UserTask.due_date.asc(),
+                    UserTask.created_at.desc()
+                ).all()
+            except Exception:
+                user_tasks = []
         
         # Check document tasks and update completion status
         for task in user_tasks:
@@ -2063,12 +2425,22 @@ def user_tasks():
         # Re-query tasks so we have fresh objects (commit() above expires session objects)
         try:
             user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+                UserTask.display_order.asc(),
                 UserTask.priority.desc(),
                 UserTask.due_date.asc(),
                 UserTask.created_at.desc()
             ).all()
         except Exception as e:
-            user_tasks = []
+            try:
+                user_tasks = UserTask.query.filter_by(username=current_user.username).order_by(
+                    UserTask.priority.desc(),
+                    UserTask.due_date.asc(),
+                    UserTask.created_at.desc()
+                ).all()
+            except Exception:
+                user_tasks = []
+        # Only show tasks that are visible (dependency satisfied); order by display_order so next task appears after previous is done
+        user_tasks = get_visible_ordered_user_tasks(user_tasks)
 
         # Safe user display names (guard None first/last name from NewHire)
         try:
@@ -2615,6 +2987,8 @@ def user_tasks():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% elif current_user.is_manager() %}
+                <a href="{{ url_for('manager_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Manager Console</a>
                 {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav">
@@ -2625,6 +2999,8 @@ def user_tasks():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
+                {% elif current_user.is_manager() %}
+                <a href="{{ url_for('manager_dashboard') }}">Manager Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -2635,7 +3011,12 @@ def user_tasks():
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
+                    {% if is_admin %}
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    {% endif %}
+                    {% if current_user.is_manager() %}
+                    <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                    {% endif %}
                     <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
@@ -3421,6 +3802,8 @@ def profile():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% elif current_user.is_manager() %}
+                <a href="{{ url_for('manager_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Manager Console</a>
                 {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav">
@@ -3431,6 +3814,8 @@ def profile():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
+                {% elif current_user.is_manager() %}
+                <a href="{{ url_for('manager_dashboard') }}">Manager Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -3440,7 +3825,12 @@ def profile():
                     <span>▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
+                    {% if is_admin %}
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    {% endif %}
+                    {% if current_user.is_manager() %}
+                    <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                    {% endif %}
                     <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
@@ -3505,9 +3895,11 @@ def profile():
 
 
 @app.route('/admin/new-hires')
-@admin_required
+@login_required
 def view_all_new_hires():
-    """View all new hires with progress information"""
+    """View all new hires with progress information. Admin sees all; managers see their store only."""
+    if not current_user.is_admin() and not current_user.is_manager():
+        abort(403)
     import traceback
     try:
         return _view_all_new_hires_impl()
@@ -3518,9 +3910,12 @@ def view_all_new_hires():
 
 
 def _view_all_new_hires_impl():
-    """Implementation for admin new-hires list."""
-    # Get all new hires with their progress (exclude removed / flaked-out users)
-    all_new_hires = NewHire.query.filter(NewHire.status != 'removed').order_by(NewHire.created_at.desc()).all()
+    """Implementation for admin/manager new-hires list. Managers see only their store."""
+    q = NewHire.query.filter(NewHire.status != 'removed')
+    store_id = get_current_user_store_id()
+    if current_user.is_manager() and store_id is not None:
+        q = q.filter(NewHire.store_id == store_id)
+    all_new_hires = q.order_by(NewHire.created_at.desc()).all()
     new_hires_with_progress = []
     
     for new_hire in all_new_hires:
@@ -3744,7 +4139,7 @@ def _view_all_new_hires_impl():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -3793,14 +4188,17 @@ def _view_all_new_hires_impl():
 
 
 @app.route('/admin/new-hire/add')
-@admin_required
+@login_required
 def add_new_hire():
-    """Add a new hire with step-by-step onboarding wizard"""
+    """Add a new hire with step-by-step onboarding wizard. Admin or manager with start_onboarding permission."""
+    if not current_user.is_admin() and not manager_has_permission('start_onboarding'):
+        abort(403)
     videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.title).all()
-    # Get documents that are visible and have signature fields
-    documents = Document.query.filter(
-        Document.is_visible == True,
-        exists().where(DocumentSignatureField.document_id == Document.id)
+    # Get documents visible to this store (or all visible for admin) that have signature fields
+    store_id = get_current_user_store_id() if current_user.is_manager() else None
+    documents = documents_visible_to_store_query(
+        store_id,
+        base_filter=exists().where(DocumentSignatureField.document_id == Document.id)
     ).order_by(Document.original_filename).all()
     checklist_items = ChecklistItem.query.filter_by(is_active=True).order_by(ChecklistItem.order).all()
     # Roles for default-document pre-selection
@@ -3810,7 +4208,12 @@ def add_new_hire():
     except Exception:
         roles = []
         role_default_documents = {}
-    
+    stores = Store.query.order_by(Store.name).all()
+    default_store_id = get_current_user_store_id() if current_user.is_manager() else None
+    default_store_code = ''
+    if default_store_id:
+        store = Store.query.get(default_store_id)
+        default_store_code = (store.code or '').strip().lower() if store else ''
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -3975,6 +4378,29 @@ def add_new_hire():
                 font-size: 0.85em;
                 display: block;
                 margin-top: 5px;
+            }
+            .password-input-wrap {
+                position: relative;
+                display: block;
+            }
+            .password-input-wrap input {
+                padding-right: 44px;
+            }
+            .password-toggle {
+                position: absolute;
+                right: 8px;
+                top: 50%;
+                transform: translateY(-50%);
+                background: none;
+                border: none;
+                padding: 6px 8px;
+                cursor: pointer;
+                font-size: 1.1em;
+                color: #666;
+                line-height: 1;
+            }
+            .password-toggle:hover {
+                color: #333;
             }
             .form-row {
                 display: grid;
@@ -4157,7 +4583,7 @@ def add_new_hire():
             <div class="header-content">
                 <h1>🚀 New Hire Onboarding Wizard</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -4195,14 +4621,36 @@ def add_new_hire():
                                 <input type="text" name="username" id="username" required placeholder="e.g., jdoe (without domain)">
                                 <small>Internal ID; new hire logs in with their email and this password</small>
                             </div>
+                            {% if current_user.is_manager() and default_store_id %}
+                            <input type="hidden" name="store_id" value="{{ default_store_id }}">
+                            <input type="hidden" id="manager_store_code" value="{{ default_store_code }}">
+                            <p class="form-group" style="margin-bottom: 1rem; color: #666; font-size: 0.95em;">New hire will be added to your store. Password will auto-fill as store code + &quot;password&quot; (e.g. il71password). You can change it below.</p>
+                            {% elif stores %}
+                            <div class="form-group">
+                                <label for="store_id">Store *</label>
+                                <select name="store_id" id="store_id" required>
+                                    <option value="">— Choose store —</option>
+                                    {% for store in stores %}
+                                    <option value="{{ store.id }}" data-code="{{ (store.code or '')|lower }}" {% if default_store_id and store.id == default_store_id %}selected{% endif %}>{{ store.name }} ({{ store.code }})</option>
+                                    {% endfor %}
+                                </select>
+                                <small>Password will auto-fill as store code + "password" (e.g. il97password). You can change it below.</small>
+                            </div>
+                            {% endif %}
                             <div class="form-row">
                                 <div class="form-group">
                                     <label for="password">Password (for login) *</label>
-                                    <input type="password" name="password" id="password" required minlength="6" placeholder="Min 6 characters">
+                                    <div class="password-input-wrap">
+                                        <input type="password" name="password" id="password" required minlength="6" placeholder="Min 6 characters">
+                                        <button type="button" class="password-toggle" id="password_toggle" title="Show password" aria-label="Show password">👁</button>
+                                    </div>
                                 </div>
                                 <div class="form-group">
                                     <label for="password_confirm">Confirm Password *</label>
-                                    <input type="password" name="password_confirm" id="password_confirm" required minlength="6" placeholder="Same as above">
+                                    <div class="password-input-wrap">
+                                        <input type="password" name="password_confirm" id="password_confirm" required minlength="6" placeholder="Same as above">
+                                        <button type="button" class="password-toggle" id="password_confirm_toggle" title="Show password" aria-label="Show password">👁</button>
+                                    </div>
                                 </div>
                             </div>
                             
@@ -4256,7 +4704,6 @@ def add_new_hire():
                                 </select>
                                 <small>Optional. Choosing a role pre-selects default documents in Step 3.</small>
                             </div>
-                            
                             <div class="wizard-actions">
                                 <div></div>
                                 <button type="button" class="btn" onclick="nextStep()">Next: Training Videos →</button>
@@ -4380,6 +4827,54 @@ def add_new_hire():
             let currentStep = 1;
             const totalSteps = 4;
             var roleDefaultDocuments = {{ role_default_documents|tojson }};
+            
+            function fillPasswordFromStore() {
+                var storeSelect = document.getElementById('store_id');
+                var passwordInput = document.getElementById('password');
+                var confirmInput = document.getElementById('password_confirm');
+                if (!storeSelect || !passwordInput || !confirmInput) return;
+                var opt = storeSelect.options[storeSelect.selectedIndex];
+                var code = opt ? (opt.getAttribute('data-code') || '').toLowerCase() : '';
+                var pwd = code ? (code + 'password') : '';
+                passwordInput.value = pwd;
+                confirmInput.value = pwd;
+            }
+            
+            document.addEventListener('DOMContentLoaded', function() {
+                var storeSelect = document.getElementById('store_id');
+                var passwordInput = document.getElementById('password');
+                var confirmInput = document.getElementById('password_confirm');
+                var managerCodeEl = document.getElementById('manager_store_code');
+                var managerStoreCode = (managerCodeEl && managerCodeEl.value) ? managerCodeEl.value.trim().toLowerCase() : '';
+                if (storeSelect && storeSelect.tagName === 'SELECT') {
+                    storeSelect.addEventListener('change', fillPasswordFromStore);
+                    fillPasswordFromStore();
+                } else if (managerStoreCode && passwordInput && confirmInput) {
+                    var pwd = managerStoreCode + 'password';
+                    passwordInput.value = pwd;
+                    confirmInput.value = pwd;
+                }
+                function setupPasswordToggle(inputId, btnId) {
+                    var input = document.getElementById(inputId);
+                    var btn = document.getElementById(btnId);
+                    if (!input || !btn) return;
+                    btn.addEventListener('click', function() {
+                        if (input.type === 'password') {
+                            input.type = 'text';
+                            btn.textContent = 'Hide';
+                            btn.title = 'Hide password';
+                            btn.setAttribute('aria-label', 'Hide password');
+                        } else {
+                            input.type = 'password';
+                            btn.textContent = String.fromCodePoint(0x1F441);
+                            btn.title = 'Show password';
+                            btn.setAttribute('aria-label', 'Show password');
+                        }
+                    });
+                }
+                setupPasswordToggle('password', 'password_toggle');
+                setupPasswordToggle('password_confirm', 'password_confirm_toggle');
+            });
             
             function applyRoleDefaultsWhenEnteringStep3() {
                 var roleId = document.getElementById('role_id').value;
@@ -4516,13 +5011,15 @@ def add_new_hire():
         </script>
     </body>
     </html>
-    ''', videos=videos, documents=documents, checklist_items=checklist_items, roles=roles, role_default_documents=role_default_documents)
+    ''', videos=videos, documents=documents, checklist_items=checklist_items, roles=roles, role_default_documents=role_default_documents, stores=stores, default_store_id=default_store_id, default_store_code=default_store_code)
 
 
 @app.route('/admin/new-hire/create', methods=['POST'])
-@admin_required
+@login_required
 def create_new_hire():
-    """Create a new hire with required training videos and documents"""
+    """Create a new hire with required training videos and documents. Admin or manager with start_onboarding."""
+    if not current_user.is_admin() and not manager_has_permission('start_onboarding'):
+        abort(403)
     username = request.form.get('username', '').strip()
     first_name = request.form.get('first_name', '').strip()
     last_name = request.form.get('last_name', '').strip()
@@ -4601,6 +5098,20 @@ def create_new_hire():
             except (ValueError, TypeError):
                 role_id = None
         
+        # Store: admin can choose from form; manager uses their store
+        store_id = None
+        if current_user.is_admin():
+            store_id_raw = request.form.get('store_id', '').strip()
+            if store_id_raw.isdigit():
+                try:
+                    store_id = int(store_id_raw)
+                    if Store.query.get(store_id) is None:
+                        store_id = None
+                except (ValueError, TypeError):
+                    store_id = None
+        else:
+            store_id = get_current_user_store_id()
+        
         # Create new hire
         new_hire = NewHire(
             username=username,
@@ -4615,6 +5126,8 @@ def create_new_hire():
         )
         if role_id is not None and hasattr(NewHire, 'role_id'):
             new_hire.role_id = role_id
+        if hasattr(NewHire, 'store_id'):
+            new_hire.store_id = store_id
         db.session.add(new_hire)
         db.session.flush()  # Get the ID
         
@@ -4631,15 +5144,17 @@ def create_new_hire():
         else:
             user.email = email
             user.password_hash = generate_password_hash(password)
+        if hasattr(user, 'store_id'):
+            user.store_id = store_id
         
-        # Add required training videos
+        # Add required training videos and create tasks with display_order and dependencies
+        training_tasks_created = []
+        display_order = 0
         for video_id in required_videos:
             video = TrainingVideo.query.get(int(video_id))
             if video:
                 new_hire.required_training_videos.append(video)
                 
-                # Create a UserTask for this training video
-                # Check if task already exists
                 existing_task = UserTask.query.filter_by(
                     username=username,
                     task_type='training',
@@ -4655,15 +5170,20 @@ def create_new_hire():
                         priority='normal',
                         status='pending',
                         assigned_by=current_user.username,
-                        notes=f'video_id:{video_id}'
+                        notes=f'video_id:{video_id}',
+                        display_order=display_order,
+                        depends_on_task_id=training_tasks_created[-1].id if training_tasks_created else None
                     )
                     db.session.add(task)
+                    db.session.flush()
+                    training_tasks_created.append(task)
+                    display_order += 1
         
-        # Assign documents if selected
+        # Assign documents if selected; each doc task depends on the previous task (training or doc)
+        prev_task = training_tasks_created[-1] if training_tasks_created else None
         for doc_id in required_documents:
             document = Document.query.get(int(doc_id))
             if document:
-                # Check if assignment already exists
                 existing = DocumentAssignment.query.filter_by(
                     document_id=doc_id,
                     username=username
@@ -4677,7 +5197,6 @@ def create_new_hire():
                     )
                     db.session.add(assignment)
                     
-                    # Create a UserTask for this document assignment
                     task = UserTask(
                         username=username,
                         task_title=f"Sign Document: {document.name_for_users}",
@@ -4686,9 +5205,14 @@ def create_new_hire():
                         document_id=doc_id,
                         priority='normal',
                         status='pending',
-                        assigned_by=current_user.username
+                        assigned_by=current_user.username,
+                        display_order=display_order,
+                        depends_on_task_id=prev_task.id if prev_task else None
                     )
                     db.session.add(task)
+                    db.session.flush()
+                    prev_task = task
+                    display_order += 1
         
         db.session.commit()
         
@@ -4700,6 +5224,8 @@ def create_new_hire():
         msg_parts.append('.')
         
         flash(' '.join(msg_parts), 'success')
+        if current_user.is_manager():
+            return redirect(url_for('manager_dashboard'))
         return redirect(url_for('admin_dashboard'))
     except Exception as e:
         db.session.rollback()
@@ -5943,16 +6469,21 @@ def _admin_dashboard_impl():
                             <span class="quick-link-text">Training Library</span>
                             <span class="quick-link-count">→</span>
                         </a>
+                        {% if current_user.is_admin() or manager_has_permission('manage_documents') %}
                         <a href="{{ url_for('manage_documents') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">📄</span>
                             <span class="quick-link-text">Manage Forms</span>
                             <span class="quick-link-count">→</span>
                         </a>
+                        {% endif %}
+                        {% if current_user.is_admin() or manager_has_permission('start_onboarding') %}
                         <a href="{{ url_for('add_new_hire') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">➕</span>
                             <span class="quick-link-text">Start Onboarding</span>
                             <span class="quick-link-count">→</span>
                         </a>
+                        {% endif %}
+                        {% if current_user.is_admin() %}
                         <a href="{{ url_for('manage_users') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">👥</span>
                             <span class="quick-link-text">Manage Users</span>
@@ -5963,6 +6494,17 @@ def _admin_dashboard_impl():
                             <span class="quick-link-text">Manage Admins</span>
                             <span class="quick-link-count">→</span>
                         </a>
+                        <a href="{{ url_for('manage_stores') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">🏪</span>
+                            <span class="quick-link-text">Manage Stores</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
+                        <a href="{{ url_for('settings_page') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">⚙️</span>
+                            <span class="quick-link-text">Settings</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
+                        {% endif %}
                         <a href="{{ url_for('manage_roles') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">🎭</span>
                             <span class="quick-link-text">Manage Roles</span>
@@ -6146,29 +6688,620 @@ def _admin_dashboard_impl():
     ''', total_users=total_users, total_new_hires=total_new_hires, admin_users=admin_users,
          forms_completed=forms_completed, total_checklist_items=total_checklist_items,
          new_hires_with_progress=new_hires_with_progress, recent_activity=recent_activity,
-         form_status_data=form_status_data, admin_name=admin_name, pending_count=pending_count, notifications=notifications)
+         form_status_data=form_status_data,          admin_name=admin_name, pending_count=pending_count, notifications=notifications)
+
+
+@app.route('/manager')
+@manager_required
+def manager_dashboard():
+    """Manager Console: store-scoped onboarding, new hires, and documents."""
+    store_id = get_current_user_store_id()
+    store_name = None
+    if store_id:
+        store = Store.query.get(store_id)
+        store_name = store.name if store else f'Store #{store_id}'
+    else:
+        store_name = 'Not assigned'
+
+    # Counts for this store only
+    new_hires_count = 0
+    documents_count = 0
+    try:
+        q = NewHire.query.filter(NewHire.status != 'removed')
+        if store_id is not None:
+            q = q.filter(NewHire.store_id == store_id)
+        new_hires_count = q.count()
+    except Exception:
+        pass
+    try:
+        q = documents_visible_to_store_query(store_id)
+        documents_count = q.count()
+    except Exception:
+        pass
+
+    manager_name = current_user.username if current_user else 'Manager'
+    can_start = manager_has_permission('start_onboarding')
+    can_documents = manager_has_permission('manage_documents')
+    can_training = manager_has_permission('manage_training')
+    can_checklist = manager_has_permission('manage_checklist')
+    can_user_checklists = manager_has_permission('manage_user_checklists')
+
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manager Console - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; color: #000; }
+            .top-header {
+                background: #000;
+                color: white;
+                padding: 12px 30px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .logo-section { display: flex; align-items: center; gap: 12px; font-size: 1.4em; font-weight: 800; color: #fff; }
+            .logo-section img { height: 80px; width: auto; align-self: flex-end; margin-bottom: -40px; }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #fff;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-weight: 500;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .container { max-width: 1000px; margin: 30px auto; padding: 0 20px; }
+            .store-banner {
+                background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
+                color: #fff;
+                padding: 24px;
+                border-radius: 12px;
+                margin-bottom: 24px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            }
+            .store-banner h1 { font-size: 1.75em; margin-bottom: 8px; }
+            .store-banner .store-name { font-size: 1.1em; opacity: 0.9; }
+            .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; margin-bottom: 24px; }
+            .card {
+                background: white;
+                border-radius: 12px;
+                padding: 24px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                text-decoration: none;
+                color: inherit;
+                display: block;
+                transition: transform 0.2s, box-shadow 0.2s;
+                border: 1px solid #eee;
+            }
+            .card:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
+            .card h3 { font-size: 1.1em; margin-bottom: 8px; color: #000; }
+            .card .number { font-size: 2em; font-weight: 800; color: #FE0100; }
+            .card .hint { font-size: 0.85em; color: #666; margin-top: 8px; }
+            .card.disabled { opacity: 0.7; pointer-events: none; }
+        </style>
+    </head>
+    <body>
+        <div class="top-header">
+            <div class="logo-section">
+                <img src="{{ url_for('serve_ziebart_logo') }}" alt="Logo">
+                <span>Manager Console</span>
+            </div>
+            <a href="{{ url_for('dashboard') }}" class="back-btn">← User Dashboard</a>
+        </div>
+        <div class="container">
+            <div class="store-banner">
+                <h1>Your store</h1>
+                <p class="store-name">{{ store_name }}</p>
+                <p style="font-size: 0.9em; margin-top: 8px; opacity: 0.85;">All actions and data below are for this store only.</p>
+            </div>
+            <div class="cards">
+                {% if can_start %}
+                <a href="{{ url_for('add_new_hire') }}" class="card">
+                    <h3>Start onboarding</h3>
+                    <div class="number">+</div>
+                    <p class="hint">Add a new hire for this store and assign training & documents.</p>
+                </a>
+                {% endif %}
+                <a href="{{ url_for('view_all_new_hires') }}" class="card">
+                    <h3>New hires</h3>
+                    <div class="number">{{ new_hires_count }}</div>
+                    <p class="hint">View and track onboarding progress for this store.</p>
+                </a>
+                {% if can_documents %}
+                <a href="{{ url_for('manage_documents') }}" class="card">
+                    <h3>Forms / documents</h3>
+                    <div class="number">{{ documents_count }}</div>
+                    <p class="hint">Forms visible to this store. Upload and manage visibility.</p>
+                </a>
+                {% endif %}
+                {% if can_training %}
+                <a href="{{ url_for('manage_training') }}" class="card">
+                    <h3>Training library</h3>
+                    <div class="number">→</div>
+                    <p class="hint">Manage training videos for onboarding.</p>
+                </a>
+                {% endif %}
+                {% if can_checklist or can_user_checklists %}
+                <a href="{{ url_for('view_user_checklists') }}" class="card">
+                    <h3>Onboarding checklists</h3>
+                    <div class="number">→</div>
+                    <p class="hint">View checklist progress for new hires at your store.</p>
+                </a>
+                {% endif %}
+            </div>
+        </div>
+    </body>
+    </html>
+    ''', store_name=store_name, new_hires_count=new_hires_count, documents_count=documents_count,
+         manager_name=manager_name, can_start=can_start, can_documents=can_documents,
+         can_training=can_training, can_checklist=can_checklist, can_user_checklists=can_user_checklists)
+
+
+@app.route('/admin/settings')
+@admin_required
+def settings_page():
+    """Settings: stores (locations), manager permissions info. Assign store/role/permissions via Manage Users."""
+    stores = Store.query.order_by(Store.name).all()
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Settings - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .container { max-width: 900px; margin: 24px auto; padding: 0 20px; }
+            .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
+            .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
+            .form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+            .form-group { flex: 1; min-width: 140px; }
+            .form-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 4px; }
+            .form-group input { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 0.35rem; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background: #f8f9fa; font-weight: 600; font-size: 0.85em; }
+            .btn { display: inline-block; padding: 6px 12px; border-radius: 0.35rem; border: none; cursor: pointer; font-size: 0.85em; text-decoration: none; }
+            .btn-primary { background: #FE0100; color: white; }
+            .btn-danger { background: #dc3545; color: white; }
+            .btn-secondary { background: #6c757d; color: white; }
+            p { margin-bottom: 12px; color: #444; }
+            ul { margin-left: 20px; margin-bottom: 12px; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>⚙️ Settings</h1>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+        </div>
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <div style="margin-bottom: 20px;">
+                {% for category, msg in messages %}
+                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% endwith %}
+            <div class="card">
+                <h2>Store locations</h2>
+                <p>Stores are used to scope what managers and users see. Assign a store to users in <a href="{{ url_for('manage_users') }}">Manage Users</a>. Documents can be visible to all stores or to one store.</p>
+                <form method="POST" action="{{ url_for('settings_add_store') }}" style="margin-bottom: 20px;">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Store name</label>
+                            <input type="text" name="name" placeholder="e.g. Downtown" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Code (optional)</label>
+                            <input type="text" name="code" placeholder="e.g. STORE01">
+                        </div>
+                        <div class="form-group" style="flex: 0;">
+                            <button type="submit" class="btn btn-primary">Add store</button>
+                        </div>
+                    </div>
+                </form>
+                {% if stores %}
+                <table>
+                    <thead><tr><th>Name</th><th>Code</th><th></th></tr></thead>
+                    <tbody>
+                        {% for store in stores %}
+                        <tr>
+                            <td>{{ store.name }}</td>
+                            <td>{{ store.code or '-' }}</td>
+                            <td>
+                                <a href="{{ url_for('settings_edit_store', store_id=store.id) }}" class="btn btn-secondary" style="margin-right: 8px;">Edit</a>
+                                <form method="POST" action="{{ url_for('settings_delete_store', store_id=store.id) }}" style="display: inline;" onsubmit="return confirm('Delete {{ store.name }}? Users and documents linked to it will have store cleared.');">
+                                    <button type="submit" class="btn btn-danger">Delete</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p style="color: #666;">No stores yet. Add one above; then assign stores to users and documents.</p>
+                {% endif %}
+            </div>
+            <div class="card">
+                <h2>Manager permissions</h2>
+                <p>Managers can be given limited access. When you set a user's role to <strong>Manager</strong> in <a href="{{ url_for('manage_users') }}">Manage Users</a>, you can choose what they can do:</p>
+                <ul>
+                    {% for key, label in manager_permission_keys %}
+                    <li><strong>{{ key }}</strong>: {{ label }}</li>
+                    {% endfor %}
+                </ul>
+                <p>Managers and users only see data for their assigned store. Documents with "all stores" are visible to everyone. Admins see everything.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    ''', stores=stores, manager_permission_keys=MANAGER_PERMISSION_KEYS)
+
+
+@app.route('/admin/settings/stores/<int:store_id>/edit', methods=['GET', 'POST'])
+@admin_required
+def settings_edit_store(store_id):
+    """Edit store name and code."""
+    store = Store.query.get(store_id)
+    if not store:
+        flash('Store not found.', 'error')
+        return redirect(url_for('settings_page'))
+    if request.method == 'POST':
+        name = (request.form.get('name') or '').strip()
+        if not name:
+            flash('Store name is required.', 'error')
+            return redirect(url_for('settings_edit_store', store_id=store_id))
+        code = (request.form.get('code') or '').strip() or None
+        try:
+            store.name = name
+            store.code = code
+            db.session.commit()
+            flash(f'Store "{name}" updated.', 'success')
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error updating store: {str(e)}', 'error')
+        return redirect(url_for('settings_page'))
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Edit Store - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .container { max-width: 500px; margin: 24px auto; padding: 0 20px; }
+            .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
+            .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
+            .form-group { margin-bottom: 16px; }
+            .form-group label { display: block; font-size: 0.9em; font-weight: 600; color: #333; margin-bottom: 6px; }
+            .form-group input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.35rem; font-size: 1em; }
+            .btn { display: inline-block; padding: 10px 20px; border-radius: 0.35rem; border: none; cursor: pointer; font-size: 1em; text-decoration: none; }
+            .btn-primary { background: #FE0100; color: white; }
+            .btn-secondary { background: #6c757d; color: white; margin-left: 8px; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>✏️ Edit Store</h1>
+            <a href="{{ url_for('settings_page') }}" class="back-btn">← Back to Settings</a>
+        </div>
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <div style="margin-bottom: 20px;">
+                {% for category, msg in messages %}
+                <div style="padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% endwith %}
+            <div class="card">
+                <h2>{{ store.name }}</h2>
+                <form method="POST" action="{{ url_for('settings_edit_store', store_id=store.id) }}">
+                    <div class="form-group">
+                        <label for="name">Store name</label>
+                        <input type="text" name="name" id="name" value="{{ store.name }}" required placeholder="e.g. Downtown">
+                    </div>
+                    <div class="form-group">
+                        <label for="code">Code (optional)</label>
+                        <input type="text" name="code" id="code" value="{{ store.code or '' }}" placeholder="e.g. STORE01">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                    <a href="{{ url_for('settings_page') }}" class="btn btn-secondary">Cancel</a>
+                </form>
+            </div>
+        </div>
+    </body>
+    </html>
+    ''', store=store)
+
+
+@app.route('/admin/settings/stores/add', methods=['POST'])
+@admin_required
+def settings_add_store():
+    name = (request.form.get('name') or '').strip()
+    if not name:
+        flash('Store name is required.', 'error')
+        return redirect(url_for('settings_page'))
+    code = (request.form.get('code') or '').strip() or None
+    try:
+        store = Store(name=name, code=code)
+        db.session.add(store)
+        db.session.commit()
+        flash(f'Store "{name}" added.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error adding store: {str(e)}', 'error')
+    return redirect(url_for('settings_page'))
+
+
+@app.route('/admin/settings/stores/<int:store_id>/delete', methods=['POST'])
+@admin_required
+def settings_delete_store(store_id):
+    store = Store.query.get(store_id)
+    if not store:
+        flash('Store not found.', 'error')
+        return redirect(url_for('settings_page'))
+    try:
+        UserModel.query.filter_by(store_id=store_id).update({UserModel.store_id: None})
+        NewHire.query.filter_by(store_id=store_id).update({NewHire.store_id: None})
+        Document.query.filter_by(store_id=store_id).update({Document.store_id: None})
+        db.session.delete(store)
+        db.session.commit()
+        flash('Store deleted. User and document store links were cleared.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error: {str(e)}', 'error')
+    return redirect(url_for('settings_page'))
+
+
+@app.route('/admin/stores')
+@admin_required
+def manage_stores():
+    """List all stores with counts of managers, users, and store-scoped forms. Link to store detail."""
+    stores = Store.query.order_by(Store.name).all()
+    store_stats = []
+    for store in stores:
+        managers_count = UserModel.query.filter_by(store_id=store.id, role='manager').count()
+        users_count = UserModel.query.filter_by(store_id=store.id, role='user').count()
+        forms_count = Document.query.filter_by(store_id=store.id).count()
+        store_stats.append({
+            'store': store,
+            'managers_count': managers_count,
+            'users_count': users_count,
+            'forms_count': forms_count,
+        })
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manage Stores - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .container { max-width: 1000px; margin: 24px auto; padding: 0 20px; }
+            .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
+            .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background: #f8f9fa; font-weight: 600; font-size: 0.9em; }
+            .btn { display: inline-block; padding: 8px 16px; border-radius: 0.35rem; border: none; cursor: pointer; font-size: 0.9em; text-decoration: none; }
+            .btn-primary { background: #FE0100; color: white; }
+            .btn-primary:hover { background: #cc0000; color: white; }
+            .btn-secondary { background: #6c757d; color: white; }
+            .btn-secondary:hover { background: #5a6268; color: white; }
+            .count { font-weight: 600; color: #333; }
+            .count-muted { color: #666; font-weight: normal; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🏪 Manage Stores</h1>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+        </div>
+        <div class="container">
+            <div class="card">
+                <h2>Stores</h2>
+                <p style="margin-bottom: 16px; color: #555;">View each store's managers, users, and forms. Add or delete stores in <a href="{{ url_for('settings_page') }}">Settings</a>.</p>
+                {% if store_stats %}
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Store</th>
+                            <th>Code</th>
+                            <th>Managers</th>
+                            <th>Users</th>
+                            <th>Forms (store only)</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for s in store_stats %}
+                        <tr>
+                            <td><strong>{{ s.store.name }}</strong></td>
+                            <td>{{ s.store.code or '-' }}</td>
+                            <td><span class="count">{{ s.managers_count }}</span></td>
+                            <td><span class="count">{{ s.users_count }}</span></td>
+                            <td><span class="count">{{ s.forms_count }}</span></td>
+                            <td><a href="{{ url_for('store_detail', store_id=s.store.id) }}" class="btn btn-primary">View details</a></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p style="color: #666;">No stores yet. <a href="{{ url_for('settings_page') }}">Add stores in Settings</a>.</p>
+                {% endif %}
+            </div>
+        </div>
+    </body>
+    </html>
+    ''', store_stats=store_stats)
+
+
+@app.route('/admin/stores/<int:store_id>')
+@admin_required
+def store_detail(store_id):
+    """One store: managers, users, and forms visible only for this store."""
+    store = Store.query.get(store_id)
+    if not store:
+        flash('Store not found.', 'error')
+        return redirect(url_for('manage_stores'))
+    managers = UserModel.query.filter_by(store_id=store_id, role='manager').order_by(UserModel.username).all()
+    users = UserModel.query.filter_by(store_id=store_id, role='user').order_by(UserModel.username).all()
+    forms = Document.query.filter_by(store_id=store_id).order_by(Document.original_filename).all()
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>{{ store.name }} - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .container { max-width: 900px; margin: 24px auto; padding: 0 20px; }
+            .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
+            .card h2 { font-size: 1.2em; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #E0E0E0; }
+            .card p.sub { color: #666; font-size: 0.9em; margin-bottom: 16px; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background: #f8f9fa; font-weight: 600; font-size: 0.85em; }
+            .btn { display: inline-block; padding: 6px 12px; border-radius: 0.35rem; font-size: 0.85em; text-decoration: none; border: none; cursor: pointer; }
+            .btn-primary { background: #FE0100; color: white; }
+            .btn-secondary { background: #6c757d; color: white; }
+            .empty { color: #999; font-style: italic; padding: 12px 0; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🏪 {{ store.name }}{% if store.code %} ({{ store.code }}){% endif %}</h1>
+            <a href="{{ url_for('manage_stores') }}" class="back-btn">← All stores</a>
+        </div>
+        <div class="container">
+            <div class="card">
+                <h2>Managers</h2>
+                <p class="sub">Users with role Manager assigned to this store. Edit in Manage Users.</p>
+                {% if managers %}
+                <table>
+                    <thead><tr><th>Username</th><th>Email</th><th>Full name</th><th></th></tr></thead>
+                    <tbody>
+                        {% for u in managers %}
+                        <tr>
+                            <td>{{ u.username }}</td>
+                            <td>{{ u.email or '-' }}</td>
+                            <td>{{ u.full_name or '-' }}</td>
+                            <td><a href="{{ url_for('manage_users') }}" class="btn btn-secondary">Edit in Manage Users</a></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="empty">No managers assigned to this store.</p>
+                {% endif %}
+            </div>
+            <div class="card">
+                <h2>Users</h2>
+                <p class="sub">Users (new hires) assigned to this store.</p>
+                <p class="sub" style="margin-bottom: 12px;"><a href="{{ url_for('manage_users') }}" class="btn btn-secondary" style="text-decoration: none;">→ Assign users to this store (Manage Users)</a></p>
+                {% if users %}
+                <table>
+                    <thead><tr><th>Username</th><th>Email</th><th>Full name</th><th></th></tr></thead>
+                    <tbody>
+                        {% for u in users %}
+                        <tr>
+                            <td>{{ u.username }}</td>
+                            <td>{{ u.email or '-' }}</td>
+                            <td>{{ u.full_name or '-' }}</td>
+                            <td><a href="{{ url_for('manage_users') }}" class="btn btn-secondary">Edit in Manage Users</a></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="empty">No users assigned to this store.</p>
+                {% endif %}
+            </div>
+            <div class="card">
+                <h2>Forms visible only for this store</h2>
+                <p class="sub">Documents scoped to this store. Set a form to this store when uploading or editing in Manage Forms.</p>
+                <p class="sub" style="margin-bottom: 12px;"><a href="{{ url_for('manage_documents') }}" class="btn btn-secondary" style="text-decoration: none;">→ Change which forms this store can see (Manage Forms)</a></p>
+                {% if forms %}
+                <table>
+                    <thead><tr><th>Document</th><th>Description</th><th></th></tr></thead>
+                    <tbody>
+                        {% for doc in forms %}
+                        <tr>
+                            <td><strong>{{ doc.display_name or doc.original_filename }}</strong></td>
+                            <td>{{ doc.description or '-' }}</td>
+                            <td><a href="{{ url_for('rename_document', doc_id=doc.id) }}" class="btn btn-secondary">Edit in Manage Forms</a></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="empty">No forms scoped only to this store. Forms set to "All stores" are visible to everyone. Use the link above to add or edit forms.</p>
+                {% endif %}
+            </div>
+        </div>
+    </body>
+    </html>
+    ''', store=store, managers=managers, users=users, forms=forms)
 
 
 @app.route('/admin/users')
 @admin_required
 def manage_users():
-    """Manage users: add, edit, reset password, revoke/restore access. Admin roles are managed on Manage Admins."""
+    """Manage users and managers: edit store, role, permissions; reset password; revoke. Admins are on Manage Admins."""
     try:
+        _ensure_stores_and_store_id()
         users = []
         try:
-            users = UserModel.query.filter_by(role='user').order_by(UserModel.username).all()
+            users = UserModel.query.filter(UserModel.role.in_(['user', 'manager'])).order_by(UserModel.username).all()
         except Exception as e:
             db.session.rollback()
             try:
-                db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
-                db.session.commit()
-            except Exception:
-                db.session.rollback()
-            try:
-                users = UserModel.query.filter_by(role='user').order_by(UserModel.username).all()
+                users = UserModel.query.filter(UserModel.role.in_(['user', 'manager'])).order_by(UserModel.username).all()
             except Exception:
                 db.session.rollback()
                 users = []
+        stores = Store.query.order_by(Store.name).all()
+        store_by_id = {s.id: s.name for s in stores}
+        user_store_name = {}
+        user_manager_permissions = {}
+        for u in users:
+            sid = getattr(u, 'store_id', None)
+            user_store_name[u.id] = store_by_id.get(sid, '-') if sid else '-'
+            if getattr(u, 'role', None) == 'manager':
+                perms = ManagerPermission.query.filter_by(user_id=u.id).all()
+                user_manager_permissions[u.id] = [p.permission_key for p in perms]
+            else:
+                user_manager_permissions[u.id] = []
         today = datetime.utcnow().date()
         for u in users:
             revoked_at = getattr(u, 'access_revoked_at', None)
@@ -6176,7 +7309,6 @@ def manage_users():
                 u.is_revoked = bool(revoked_at is not None and today >= revoked_at)
             except (TypeError, ValueError):
                 u.is_revoked = False
-        # Only show active users (revoked users are removed from list; revoke = delete)
         users = [u for u in users if not getattr(u, 'is_revoked', False)]
         return render_template_string('''
     <!DOCTYPE html>
@@ -6209,7 +7341,9 @@ def manage_users():
             table { width: 100%; border-collapse: collapse; }
             th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #eee; }
             th { background: #f8f9fa; font-weight: 600; font-size: 0.9em; }
-            .actions-cell { display: flex; flex-wrap: wrap; gap: 8px; }
+            .actions-cell { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; }
+            .actions-cell .btn { white-space: nowrap; flex-shrink: 0; }
+            .actions-cell form { display: inline-flex; margin: 0; flex-shrink: 0; }
             .badge { padding: 4px 10px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
             .badge-admin { background: #FE0100; color: white; }
             .badge-user { background: #6c757d; color: white; }
@@ -6220,6 +7354,9 @@ def manage_users():
             .modal-content { background: white; border-radius: 0.5rem; padding: 24px; max-width: 420px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
             .modal-content h3 { margin-bottom: 16px; }
             .modal-content .form-group { margin-bottom: 16px; }
+            #managerPermsGroup > label { color: #333; font-weight: 600; font-size: 1em; }
+            #managerPerms label { display: flex; align-items: center; margin: 6px 0; color: #333; font-weight: 500; font-size: 0.95em; cursor: pointer; gap: 8px; }
+            #managerPerms input[type="checkbox"] { width: 16px; height: 16px; min-width: 16px; min-height: 0; margin: 0; padding: 0; flex-shrink: 0; cursor: pointer; }
             .modal-actions { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
             .flash { padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; }
             .flash.success { background: #d4edda; color: #155724; }
@@ -6230,7 +7367,7 @@ def manage_users():
     <body>
         <div class="header">
             <h1>👥 Manage Users</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -6250,6 +7387,8 @@ def manage_users():
                             <th>Username</th>
                             <th>Email</th>
                             <th>Full Name</th>
+                            <th>Role</th>
+                            <th>Store</th>
                             <th>Access</th>
                             <th>Last Login</th>
                             <th>Actions</th>
@@ -6261,6 +7400,8 @@ def manage_users():
                             <td>{{ user.username }}</td>
                             <td>{{ user.email or '-' }}</td>
                             <td>{{ user.full_name or '-' }}</td>
+                            <td>{{ user.role or 'user' }}</td>
+                            <td>{{ user_store_name.get(user.id, '-') }}</td>
                             <td>
                                 {% if user.is_revoked %}
                                 <span class="badge badge-revoked">Revoked</span>
@@ -6270,7 +7411,7 @@ def manage_users():
                             </td>
                             <td>{{ user.last_login.strftime('%Y-%m-%d %H:%M') if user.last_login else 'Never' }}</td>
                             <td class="actions-cell">
-                                <button type="button" class="btn btn-secondary btn-edit-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}" data-email="{{ (user.email or '')|e }}" data-full-name="{{ (user.full_name or '')|e }}">Edit</button>
+                                <button type="button" class="btn btn-secondary btn-edit-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}" data-email="{{ (user.email or '')|e }}" data-full-name="{{ (user.full_name or '')|e }}" data-store-id="{{ user.store_id or '' }}" data-role="{{ user.role or 'user' }}" data-permissions="{{ user_manager_permissions.get(user.id, [])|join(',') }}">Edit</button>
                                 <button type="button" class="btn btn-secondary btn-password-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}">Reset Password</button>
                                 {% if user.username != current_user.username and not user.is_revoked %}
                                     <form method="POST" action="{{ url_for('users_revoke', user_id=user.id) }}" style="display: inline;" onsubmit="return confirm('Remove {{ user.username }}? This will delete their account and they will no longer be able to log in.');">
@@ -6307,6 +7448,30 @@ def manage_users():
                         <label>Full name</label>
                         <input type="text" name="full_name" id="editUserFullName" placeholder="Full Name">
                     </div>
+                    <div class="form-group">
+                        <label>Store</label>
+                        <select name="store_id" id="editUserStoreId">
+                            <option value="">— No store —</option>
+                            {% for store in stores %}
+                            <option value="{{ store.id }}">{{ store.name }} ({{ store.code }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Role</label>
+                        <select name="role" id="editUserRole">
+                            <option value="user">User</option>
+                            <option value="manager">Manager</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="managerPermsGroup" style="display: none;">
+                        <label>Manager permissions</label>
+                        <div id="managerPerms">
+                            {% for key, label in manager_permission_keys %}
+                            <label><input type="checkbox" name="perm_{{ key }}" value="1"> {{ label }}</label>
+                            {% endfor %}
+                        </div>
+                    </div>
                     <div class="modal-actions">
                         <button type="button" class="btn btn-secondary" onclick="document.getElementById('editModal').classList.remove('show')">Cancel</button>
                         <button type="submit" class="btn btn-primary">Save</button>
@@ -6338,13 +7503,29 @@ def manage_users():
         </div>
 
         <script>
+            function toggleManagerPerms() {
+                var role = document.getElementById('editUserRole').value;
+                document.getElementById('managerPermsGroup').style.display = role === 'manager' ? 'block' : 'none';
+            }
+            document.getElementById('editUserRole').addEventListener('change', toggleManagerPerms);
             document.querySelectorAll('.btn-edit-user').forEach(function(btn) {
                 btn.addEventListener('click', function() {
                     var id = this.getAttribute('data-id');
+                    var storeId = this.getAttribute('data-store-id') || '';
+                    var role = this.getAttribute('data-role') || 'user';
+                    var permsStr = this.getAttribute('data-permissions') || '';
+                    var perms = permsStr ? permsStr.split(',') : [];
                     document.getElementById('editUserId').value = id;
                     document.getElementById('editUsername').value = this.getAttribute('data-username') || '';
                     document.getElementById('editUserEmail').value = this.getAttribute('data-email') || '';
                     document.getElementById('editUserFullName').value = this.getAttribute('data-full-name') || '';
+                    document.getElementById('editUserStoreId').value = storeId;
+                    document.getElementById('editUserRole').value = role;
+                    toggleManagerPerms();
+                    document.querySelectorAll('#managerPerms input[type="checkbox"]').forEach(function(cb) {
+                        var key = cb.name.replace('perm_', '');
+                        cb.checked = perms.indexOf(key) !== -1;
+                    });
                     document.getElementById('editUserForm').action = '/admin/users/' + id + '/update';
                     document.getElementById('editModal').classList.add('show');
                 });
@@ -6376,7 +7557,7 @@ def manage_users():
         </script>
     </body>
     </html>
-    ''', users=users)
+    ''', users=users, stores=stores, manager_permission_keys=MANAGER_PERMISSION_KEYS, user_store_name=user_store_name, user_manager_permissions=user_manager_permissions)
     except Exception as e:
         import traceback
         app.logger.error(f'Error in manage_users: {str(e)}')
@@ -6397,15 +7578,31 @@ def users_add():
 @app.route('/admin/users/<int:user_id>/update', methods=['POST'])
 @admin_required
 def users_update(user_id):
-    """Update user email and full name."""
+    """Update user email, full name, store, role, and manager permissions."""
     user = UserModel.query.get(user_id)
     if not user:
         flash('User not found.', 'error')
         return redirect(url_for('manage_users'))
     email = (request.form.get('email') or '').strip()
     full_name = (request.form.get('full_name') or '').strip()
+    store_id_raw = request.form.get('store_id') or ''
+    role = (request.form.get('role') or 'user').strip().lower()
+    if role not in ('user', 'manager'):
+        role = 'user'
     user.email = email or None
     user.full_name = full_name or None
+    try:
+        user.store_id = int(store_id_raw) if store_id_raw.isdigit() else None
+    except (ValueError, TypeError):
+        user.store_id = None
+    user.role = role
+    if role == 'manager':
+        ManagerPermission.query.filter_by(user_id=user.id).delete()
+        for key, _label in MANAGER_PERMISSION_KEYS:
+            if request.form.get('perm_' + key) == '1':
+                db.session.add(ManagerPermission(user_id=user.id, permission_key=key))
+    else:
+        ManagerPermission.query.filter_by(user_id=user.id).delete()
     try:
         db.session.commit()
         flash(f'User "{user.username}" updated.', 'success')
@@ -6547,7 +7744,7 @@ def manage_roles():
     <body>
         <div class="header">
             <h1>🎭 Manage Roles</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         <div class="container">
             <div class="panel">
@@ -6646,10 +7843,11 @@ def role_default_documents(role_id):
     if not role:
         flash('Role not found.', 'error')
         return redirect(url_for('manage_roles'))
-    # Documents that have signature fields (same as onboarding)
-    documents = Document.query.filter(
-        Document.is_visible == True,
-        exists().where(DocumentSignatureField.document_id == Document.id)
+    # Documents visible to this store (or all visible for admin) that have signature fields
+    store_id = get_current_user_store_id() if current_user.is_manager() else None
+    documents = documents_visible_to_store_query(
+        store_id,
+        base_filter=exists().where(DocumentSignatureField.document_id == Document.id)
     ).order_by(Document.original_filename).all()
     default_doc_ids = set(d.id for d in role.default_documents.all())
     if request.method == 'POST':
@@ -6903,7 +8101,7 @@ def manage_admins():
     <body>
         <div class="header">
             <h1>🛡️ Manage Admins</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -7197,11 +8395,20 @@ def manage_admins_remove(user_id):
 
 
 @app.route('/admin/documents')
-@admin_required
+@login_required
 def manage_documents():
-    """Manage documents - upload and manage new hire paperwork"""
+    """Manage documents - upload and manage new hire paperwork. Admin or manager with manage_documents permission. Managers see only forms for their store, view/download only."""
+    if not current_user.is_admin() and not manager_has_permission('manage_documents'):
+        abort(403)
+    is_manager_view = current_user.is_manager()
     try:
-        documents = Document.query.order_by(Document.created_at.desc()).all()
+        store_id = get_current_user_store_id()
+        if current_user.is_manager() and store_id is not None:
+            # Only documents visible to this store (is_visible and assigned to this store or all stores)
+            q = documents_visible_to_store_query(store_id).order_by(Document.created_at.desc())
+            documents = q.all()
+        else:
+            documents = Document.query.order_by(Document.created_at.desc()).all()
     except Exception as e:
         # If display_name column is missing (existing DBs), add it and retry
         db.session.rollback()
@@ -7213,18 +8420,28 @@ def manage_documents():
             except Exception as alter_e:
                 db.session.rollback()
                 flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL;', 'error')
-                return redirect(url_for('admin_dashboard'))
-            documents = Document.query.order_by(Document.created_at.desc()).all()
+                return redirect(url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard'))
+            if current_user.is_manager() and get_current_user_store_id() is not None:
+                sid = get_current_user_store_id()
+                documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
+            else:
+                documents = Document.query.order_by(Document.created_at.desc()).all()
         else:
             raise
+    # For managers: only count signatures from users at their store
+    store_usernames = None
+    if is_manager_view and store_id is not None:
+        store_usernames = set(nh.username for nh in NewHire.query.filter_by(store_id=store_id).all())
     try:
         # Get signature status for each document
         for doc in documents:
             signature_fields = DocumentSignatureField.query.filter_by(document_id=doc.id).all()
             doc.signature_fields_count = len(signature_fields)
-            # Count how many users have signed
+            # Count how many users have signed (for managers: only users at their store)
             try:
                 signatures = DocumentSignature.query.filter_by(document_id=doc.id).all()
+                if store_usernames is not None:
+                    signatures = [s for s in signatures if s.username in store_usernames]
                 doc.signatures_count = len(signatures)
                 # Get unique users who signed
                 signed_users = set(sig.username for sig in signatures)
@@ -7235,12 +8452,17 @@ def manage_documents():
                 doc.signed_users_count = 0
     except Exception as e:
         # If anything fails, provide default values
-        documents = Document.query.order_by(Document.created_at.desc()).all()
+        if current_user.is_manager() and get_current_user_store_id() is not None:
+            sid = get_current_user_store_id()
+            documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
+        else:
+            documents = Document.query.order_by(Document.created_at.desc()).all()
         for doc in documents:
             doc.signature_fields_count = 0
             doc.signatures_count = 0
             doc.signed_users_count = 0
-    
+    stores = Store.query.order_by(Store.name).all()
+    store_by_id = {s.id: s.name for s in stores}
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -7330,14 +8552,31 @@ def manage_documents():
             .btn-primary {
                 background: #007bff;
             }
-            .btn-view {
-                background: white;
-                color: #000000;
-                border: 2px solid #000000;
-                border-radius: 0.5rem;
+            .collapsible-upload-panel .collapsible-header {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                width: 100%;
+                padding: 0;
+                border: none;
+                background: none;
+                cursor: pointer;
+                text-align: left;
+                font-family: inherit;
             }
-            .btn-view:hover {
-                background: #f5f5f5;
+            .collapsible-upload-panel .collapsible-chevron {
+                font-size: 0.75em;
+                transition: transform 0.2s ease;
+                color: #333;
+            }
+            .collapsible-upload-panel .collapsible-header[aria-expanded="false"] .collapsible-chevron {
+                transform: rotate(-90deg);
+            }
+            .collapsible-upload-panel .collapsible-body {
+                overflow: hidden;
+            }
+            .collapsible-upload-panel .collapsible-body.collapsed {
+                display: none;
             }
             .upload-form {
                 background: #f8f9fa;
@@ -7387,6 +8626,7 @@ def manage_documents():
                 padding: 15px;
                 text-align: left;
                 border-bottom: 1px solid #eee;
+                vertical-align: middle;
             }
             td {
                 position: relative;
@@ -7397,28 +8637,70 @@ def manage_documents():
             }
             .badge {
                 padding: 5px 10px;
-                border-radius: 15px;
+                border-radius: 0.35rem;
                 font-size: 0.85em;
-                font-weight: bold;
+                font-weight: 500;
             }
             .badge-visible {
-                background: #28a745;
+                background: #5a6268;
                 color: white;
             }
             .badge-hidden {
-                background: #808080;
+                background: #868e96;
                 color: white;
             }
+            .store-cell { position: relative; }
+            .store-dropdown { position: relative; }
+            .store-dropdown-btn {
+                padding: 6px 12px;
+                background: #5a6268;
+                color: white;
+                border: none;
+                border-radius: 0.35rem;
+                cursor: pointer;
+                font-size: 0.85em;
+                font-weight: 500;
+                white-space: nowrap;
+            }
+            .store-dropdown-btn:hover {
+                background: #495057;
+                color: white;
+            }
+            .store-dropdown-panel {
+                position: absolute;
+                left: 0;
+                top: 100%;
+                margin-top: 4px;
+                background: white;
+                border: 1px solid #ccc;
+                border-radius: 0.5rem;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                padding: 12px;
+                min-width: 220px;
+                max-height: 320px;
+                overflow-y: auto;
+                z-index: 1000;
+            }
+            .store-check-row { display: block; margin: 6px 0; font-size: 0.9em; cursor: pointer; }
+            .store-check-row input { margin-right: 8px; }
+            .store-form .btn-sm { padding: 6px 12px; font-size: 0.85em; }
             .action-btn {
                 padding: 6px 12px;
                 border: none;
-                border-radius: 0.5rem;
+                border-radius: 0.35rem;
                 cursor: pointer;
                 font-size: 0.85em;
                 text-decoration: none;
                 display: inline-block;
                 margin: 2px 3px;
                 white-space: nowrap;
+                background: #5a6268;
+                color: white;
+                font-weight: 500;
+            }
+            .action-btn:hover {
+                background: #495057;
+                color: white;
             }
             .actions-group {
                 display: flex;
@@ -7442,15 +8724,16 @@ def manage_documents():
             }
             .actions-menu-btn {
                 padding: 6px 12px;
-                background: #6c757d;
+                background: #5a6268;
                 color: white;
                 border: none;
-                border-radius: 0.5rem;
+                border-radius: 0.35rem;
                 cursor: pointer;
                 font-size: 0.85em;
+                font-weight: 500;
             }
             .actions-menu-btn:hover {
-                background: #5a6268;
+                background: #495057;
             }
             .actions-dropdown {
                 display: none;
@@ -7500,12 +8783,18 @@ def manage_documents():
             }
             .signature-status-badge {
                 display: inline-block;
-                padding: 4px 8px;
-                border-radius: 12px;
-                font-size: 0.8em;
-                background: #e7f3ff;
-                color: #0066cc;
-                margin-top: 3px;
+                padding: 5px 10px;
+                border-radius: 0.35rem;
+                font-size: 0.85em;
+                font-weight: 500;
+                background: #5a6268;
+                color: white;
+                margin-top: 2px;
+            }
+            .signature-status-signed {
+                font-size: 0.75em;
+                color: #6c757d;
+                margin-top: 4px;
             }
             .file-size {
                 color: #808080;
@@ -7705,13 +8994,24 @@ def manage_documents():
             <div class="header-content">
                 <h1>📄 Manage Documents</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            
-            <div class="admin-panel">
-                <h2>Upload New Document</h2>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
+            {% if not is_manager_view %}
+            <div class="admin-panel collapsible-upload-panel">
+                <button type="button" class="collapsible-header" id="upload-section-toggle" aria-expanded="true" aria-controls="upload-form-body">
+                    <span class="collapsible-chevron" aria-hidden="true">▼</span>
+                    <h2 style="margin: 0; display: inline;">Upload New Document</h2>
+                </button>
+                <div class="collapsible-body" id="upload-form-body">
                 <form method="POST" action="{{ url_for('upload_document') }}" enctype="multipart/form-data" class="upload-form">
                     <div class="form-group">
                         <label for="file">Select File:</label>
@@ -7733,12 +9033,23 @@ def manage_documents():
                             <label for="is_visible">Make visible to regular users</label>
                         </div>
                     </div>
+                    <div class="form-group">
+                        <label for="store_id">Visible to</label>
+                        <select name="store_id" id="store_id" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem;">
+                            <option value="">All stores</option>
+                            {% for store in stores %}
+                            <option value="{{ store.id }}">{{ store.name }} ({{ store.code }})</option>
+                            {% endfor %}
+                        </select>
+                        <small style="color: #666;">Leave "All stores" so every location can see this document; or choose one store.</small>
+                    </div>
                     <button type="submit" class="btn btn-success">Upload Document</button>
                 </form>
+                </div>
             </div>
-            
+            {% endif %}
             <div class="admin-panel">
-                <h2>Uploaded Documents</h2>
+                <h2>{% if is_manager_view %}Forms for your location (view only){% else %}Uploaded Documents{% endif %}</h2>
                 {% if documents %}
                 <table>
                     <thead>
@@ -7746,9 +9057,14 @@ def manage_documents():
                             <th>Filename</th>
                             <th>Description</th>
                             <th>Size</th>
+                            {% if not is_manager_view %}
                             <th>Visibility</th>
+                            <th>Store</th>
+                            {% endif %}
                             <th>Signature Status</th>
+                            {% if not is_manager_view %}
                             <th>Uploaded By</th>
+                            {% endif %}
                             <th>Uploaded</th>
                             <th>Actions</th>
                         </tr>
@@ -7771,31 +9087,55 @@ def manage_documents():
                                     -
                                 {% endif %}
                             </td>
+                            {% if not is_manager_view %}
                             <td>
-                                <span class="badge badge-{{ 'visible' if doc.is_visible else 'hidden' }}">
-                                    {{ 'Visible' if doc.is_visible else 'Hidden' }}
-                                </span>
+                                <form method="POST" action="{{ url_for('toggle_document_visibility') }}" class="visibility-toggle-form" data-doc-id="{{ doc.id }}" style="display: inline;">
+                                    <input type="hidden" name="doc_id" value="{{ doc.id }}">
+                                    <button type="submit" class="badge badge-{{ 'visible' if doc.is_visible else 'hidden' }}" style="border: none; cursor: pointer; font-size: inherit; padding: 5px 10px; border-radius: 0.35rem; font-weight: 500;" title="{{ 'Click to hide from all stores' if doc.is_visible else 'Click to show for stores in Store column' }}">
+                                        {{ 'Visible' if doc.is_visible else 'Hidden' }}
+                                    </button>
+                                </form>
                             </td>
+                            <td class="store-cell">
+                                <div class="store-dropdown">
+                                    <button type="button" class="store-dropdown-btn" onclick="toggleStoreDropdown({{ doc.id }})" title="Change which stores can see this form">
+                                        <span class="store-dropdown-label" id="store-label-{{ doc.id }}">{% if not doc.store_ids %}All stores{% else %}{{ doc.store_ids|length }} store(s){% endif %}</span> ▾
+                                    </button>
+                                    <div class="store-dropdown-panel" id="store-panel-{{ doc.id }}" style="display: none;">
+                                        <form method="POST" action="{{ url_for('document_update_stores', doc_id=doc.id) }}" class="store-form store-update-form" data-doc-id="{{ doc.id }}">
+                                            <label class="store-check-row"><input type="checkbox" name="all" value="1" {% if not doc.store_ids %}checked{% endif %} onchange="toggleAllStores({{ doc.id }})"> <strong>All stores</strong></label>
+                                            {% for store in stores %}
+                                            <label class="store-check-row"><input type="checkbox" name="store_ids" value="{{ store.id }}" class="store-cb-{{ doc.id }}" {% if store.id in (doc.store_ids|map(attribute='id')|list) %}checked{% endif %}> {{ store.name }} ({{ store.code }})</label>
+                                            {% endfor %}
+                                            <button type="submit" class="btn btn-primary btn-sm" style="margin-top: 8px;">Save</button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </td>
+                            {% endif %}
                             <td class="signature-status">
                                 {% if doc.signature_fields_count > 0 %}
                                     <div class="signature-status-badge">
                                         ✍️ {{ doc.signature_fields_count }} field(s)
                                     </div>
-                                    <div style="font-size: 0.75em; color: #666; margin-top: 2px;">
+                                    <div class="signature-status-signed">
                                         {{ doc.signed_users_count }} user(s) signed
                                     </div>
                                 {% else %}
                                     <span style="color: #999;">-</span>
                                 {% endif %}
                             </td>
+                            {% if not is_manager_view %}
                             <td>{{ doc.uploaded_by }}</td>
+                            {% endif %}
                             <td>{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '-' }}</td>
                             <td>
                                 <div class="actions-group">
                                     <div class="actions-primary">
-                                        <button onclick="openDocumentModal({{ doc.id }}, '{{ doc.original_filename }}', '{{ doc.file_type or '' }}')" class="action-btn btn-view" title="View Document">👁️ View</button>
-                                        <a href="{{ url_for('download_document', doc_id=doc.id) }}" class="action-btn btn-primary" title="Download Document">⬇️ Download</a>
-                                        <a href="{{ url_for('set_signature_fields', doc_id=doc.id) }}" class="action-btn btn-success" title="Set Signature Fields">✍️ Signatures</a>
+                                        <button type="button" onclick="openDocumentModal({{ doc.id }}, '{{ doc.original_filename }}', '{{ doc.file_type or '' }}')" class="action-btn" title="View Document">👁️ View</button>
+                                        <a href="{{ url_for('download_document', doc_id=doc.id) }}" class="action-btn" title="Download Document">⬇️ Download</a>
+                                        {% if not is_manager_view %}
+                                        <a href="{{ url_for('set_signature_fields', doc_id=doc.id) }}" class="action-btn" title="Set Signature Fields">✍️ Signatures</a>
                                     </div>
                                     <div class="actions-secondary">
                                         <button class="actions-menu-btn" onclick="toggleActionsMenu({{ doc.id }})" title="More Options">⋮</button>
@@ -7814,12 +9154,6 @@ def manage_documents():
                                             <a href="{{ url_for('view_document_embed', doc_id=doc.id) }}" class="actions-dropdown-item" target="_blank" title="Open in new tab to print">
                                                 🖨️ Print
                                             </a>
-                                            <form method="POST" action="{{ url_for('toggle_document_visibility') }}" style="display: block;">
-                                                <input type="hidden" name="doc_id" value="{{ doc.id }}">
-                                                <button type="submit" class="actions-dropdown-item" style="width: 100%; text-align: left; border: none; background: none; cursor: pointer;">
-                                                    {{ '👁️ Make Visible' if not doc.is_visible else '🙈 Make Hidden' }}
-                                                </button>
-                                            </form>
                                             <form method="POST" action="{{ url_for('delete_document') }}" style="display: block;">
                                                 <input type="hidden" name="doc_id" value="{{ doc.id }}">
                                                 <button type="submit" class="actions-dropdown-item danger" style="width: 100%; text-align: left; border: none; background: none; cursor: pointer;" 
@@ -7829,6 +9163,7 @@ def manage_documents():
                                             </form>
                                         </div>
                                     </div>
+                                    {% endif %}
                                 </div>
                             </td>
                         </tr>
@@ -7836,7 +9171,7 @@ def manage_documents():
                     </tbody>
                 </table>
                 {% else %}
-                <p>No documents uploaded yet.</p>
+                <p>{% if is_manager_view %}No forms available for your location.{% else %}No documents uploaded yet.{% endif %}</p>
                 {% endif %}
             </div>
         </div>
@@ -7936,6 +9271,79 @@ def manage_documents():
                 }
             });
             
+            // Collapsible Upload New Document section
+            (function() {
+                var toggle = document.getElementById('upload-section-toggle');
+                var body = document.getElementById('upload-form-body');
+                if (toggle && body) {
+                    toggle.addEventListener('click', function() {
+                        var isExpanded = toggle.getAttribute('aria-expanded') === 'true';
+                        toggle.setAttribute('aria-expanded', isExpanded ? 'false' : 'true');
+                        body.classList.toggle('collapsed', isExpanded);
+                    });
+                }
+            })();
+            
+            // Visibility toggle via AJAX so page does not reload (stays at same scroll position)
+            document.querySelectorAll('.visibility-toggle-form').forEach(function(form) {
+                form.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    var docId = form.getAttribute('data-doc-id');
+                    var btn = form.querySelector('button[type="submit"]');
+                    var formData = new FormData(form);
+                    var action = form.getAttribute('action');
+                    fetch(action, { method: 'POST', body: formData, credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                        .then(function(res) {
+                            if (res.redirected || res.ok) {
+                                if (btn.classList.contains('badge-visible')) {
+                                    btn.textContent = 'Hidden';
+                                    btn.classList.remove('badge-visible');
+                                    btn.classList.add('badge-hidden');
+                                    btn.title = 'Click to show for stores in Store column';
+                                } else {
+                                    btn.textContent = 'Visible';
+                                    btn.classList.remove('badge-hidden');
+                                    btn.classList.add('badge-visible');
+                                    btn.title = 'Click to hide from all stores';
+                                }
+                                var menuBtn = document.querySelector('#menu-' + docId + ' .visibility-dropdown-btn');
+                                if (menuBtn) {
+                                    menuBtn.textContent = btn.textContent === 'Visible' ? '🙈 Make Hidden' : '👁️ Make Visible';
+                                }
+                            }
+                        })
+                        .catch(function() { form.submit(); });
+                });
+            });
+            
+            // Store selection form via AJAX so page does not reload (stays at same scroll position)
+            document.querySelectorAll('.store-update-form').forEach(function(form) {
+                form.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    var docId = form.getAttribute('data-doc-id');
+                    var formData = new FormData(form);
+                    var action = form.getAttribute('action');
+                    fetch(action, { method: 'POST', body: formData, credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                        .then(function(res) {
+                            if (res.redirected || res.ok) {
+                                var allCb = form.querySelector('input[name="all"]');
+                                var labelEl = document.getElementById('store-label-' + docId);
+                                if (labelEl) {
+                                    if (allCb && allCb.checked) {
+                                        labelEl.textContent = 'All stores';
+                                    } else {
+                                        var checked = form.querySelectorAll('input[name="store_ids"]:checked');
+                                        labelEl.textContent = checked.length + ' store(s)';
+                                    }
+                                }
+                                var panel = document.getElementById('store-panel-' + docId);
+                                if (panel) panel.style.display = 'none';
+                            }
+                        })
+                        .catch(function() { form.submit(); });
+                });
+            });
+            
             // Toggle actions dropdown menu
             function toggleActionsMenu(docId) {
                 var menu = document.getElementById('menu-' + docId);
@@ -7971,16 +9379,49 @@ def manage_documents():
                     }, 10);
                 }
             }
+            
+            // Toggle store dropdown panel (which stores can see this form)
+            function toggleStoreDropdown(docId) {
+                var panel = document.getElementById('store-panel-' + docId);
+                if (!panel) return;
+                var isHidden = panel.style.display === 'none';
+                document.querySelectorAll('.store-dropdown-panel').forEach(function(p) {
+                    p.style.display = 'none';
+                });
+                panel.style.display = isHidden ? 'block' : 'none';
+            }
+            
+            function toggleAllStores(docId) {
+                var panel = document.getElementById('store-panel-' + docId);
+                if (!panel) return;
+                var allCb = panel.querySelector('input[name="all"]');
+                var checkboxes = document.querySelectorAll('.store-cb-' + docId);
+                if (allCb.checked) {
+                    checkboxes.forEach(function(cb) { cb.checked = true; });
+                } else {
+                    checkboxes.forEach(function(cb) { cb.checked = false; });
+                }
+            }
+            
+            document.addEventListener('click', function(event) {
+                if (!event.target.closest('.store-dropdown') && !event.target.closest('.store-dropdown-panel')) {
+                    document.querySelectorAll('.store-dropdown-panel').forEach(function(p) {
+                        p.style.display = 'none';
+                    });
+                }
+            });
         </script>
     </body>
     </html>
-    ''', documents=documents)
+    ''', documents=documents, stores=stores, store_by_id=store_by_id, is_manager_view=is_manager_view)
 
 
 @app.route('/admin/upload-document', methods=['POST'])
-@admin_required
+@login_required
 def upload_document():
-    """Upload a new document"""
+    """Upload a new document. Admin or manager with manage_documents permission."""
+    if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
+        abort(403)
     if 'file' not in request.files:
         flash('No file selected.', 'error')
         return redirect(url_for('manage_documents'))
@@ -8012,6 +9453,17 @@ def upload_document():
         # Get file size
         file_size = file_path.stat().st_size
         
+        # Store: who can see this document (null = all stores)
+        store_id = None
+        store_id_raw = (request.form.get('store_id') or '').strip()
+        if store_id_raw and store_id_raw.isdigit():
+            sid = int(store_id_raw)
+            if Store.query.get(sid):
+                if current_user.is_manager():
+                    my_sid = get_current_user_store_id()
+                    if my_sid is not None and sid != my_sid:
+                        sid = my_sid  # managers can only assign their store or all
+                store_id = sid
         # Create document record
         display_name = request.form.get('display_name', '').strip() or None
         document = Document(
@@ -8025,7 +9477,8 @@ def upload_document():
             is_visible=request.form.get('is_visible') == '1',
             uploaded_by=current_user.username
         )
-        
+        if hasattr(Document, 'store_id'):
+            document.store_id = store_id
         db.session.add(document)
         db.session.commit()
         
@@ -8037,10 +9490,51 @@ def upload_document():
     return redirect(url_for('manage_documents'))
 
 
+@app.route('/admin/documents/<int:doc_id>/update-stores', methods=['POST'])
+@login_required
+def document_update_stores(doc_id):
+    """Update which stores can see this document. Form: all=1 for all stores, or store_ids list."""
+    if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
+        abort(403)
+    document = Document.query.get(doc_id)
+    if not document:
+        flash('Document not found.', 'error')
+        return redirect(url_for('manage_documents'))
+    if current_user.is_manager():
+        my_sid = get_current_user_store_id()
+        if my_sid is None:
+            flash('You must be assigned to a store to change document visibility.', 'error')
+            return redirect(url_for('manage_documents'))
+    try:
+        if request.form.get('all') == '1':
+            document.store_ids = []
+        else:
+            ids_raw = request.form.getlist('store_ids')
+            store_ids = []
+            for sid in ids_raw:
+                try:
+                    sid = int(sid)
+                    if Store.query.get(sid):
+                        if current_user.is_manager() and sid != my_sid:
+                            continue
+                        store_ids.append(Store.query.get(sid))
+                except (ValueError, TypeError):
+                    pass
+            document.store_ids = store_ids
+        db.session.commit()
+        flash('Document store visibility updated.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating: {str(e)}', 'error')
+    return redirect(url_for('manage_documents'))
+
+
 @app.route('/admin/toggle-document-visibility', methods=['POST'])
-@admin_required
+@login_required
 def toggle_document_visibility():
-    """Toggle document visibility"""
+    """Toggle document visibility. Hidden = not visible to any store. Visible = visible only to stores selected in the Store dropdown."""
+    if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
+        abort(403)
     doc_id = request.form.get('doc_id')
     
     if not doc_id:
@@ -8054,6 +9548,7 @@ def toggle_document_visibility():
     
     document.is_visible = not document.is_visible
     document.updated_at = datetime.utcnow()
+    # Hidden = not visible to any store (is_visible=False). Visible = only stores in Store dropdown see it (is_visible=True + store_ids).
     db.session.commit()
     
     status = 'visible' if document.is_visible else 'hidden'
@@ -8116,30 +9611,50 @@ def delete_document():
 
 
 @app.route('/admin/documents/<int:doc_id>/rename', methods=['GET', 'POST'])
-@admin_required
+@login_required
 def rename_document(doc_id):
-    """Rename a document (set the name visible to users)"""
+    """Rename a document and set store visibility. Admin or manager with manage_documents."""
+    if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
+        abort(403)
     document = Document.query.get(doc_id)
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('manage_documents'))
-    
+    # Managers can only edit documents they can see (all stores or their store)
+    if current_user.is_manager():
+        sid = get_current_user_store_id()
+        if document.store_id is not None and (sid is None or document.store_id != sid):
+            abort(403)
     current_name = document.display_name or document.original_filename or ''
+    stores = Store.query.order_by(Store.name).all()
     
     if request.method == 'POST':
         new_name = (request.form.get('display_name') or '').strip()
+        store_id_raw = (request.form.get('store_id') or '').strip()
         try:
             if not new_name or new_name == document.original_filename:
-                document.display_name = None  # use file name
-                db.session.commit()
-                flash('Document now uses the file name.', 'success')
+                document.display_name = None
             else:
                 document.display_name = new_name
-                db.session.commit()
-                flash(f'Document renamed to "{new_name}".', 'success')
+            # Update store visibility
+            if hasattr(document, 'store_id'):
+                if not store_id_raw or not store_id_raw.isdigit():
+                    document.store_id = None
+                else:
+                    sid = int(store_id_raw)
+                    if current_user.is_manager():
+                        my_sid = get_current_user_store_id()
+                        if my_sid is not None and sid != my_sid:
+                            document.store_id = my_sid
+                        else:
+                            document.store_id = sid if Store.query.get(sid) else None
+                    else:
+                        document.store_id = sid if Store.query.get(sid) else None
+            db.session.commit()
+            flash('Document updated.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error renaming: {str(e)}', 'error')
+            flash(f'Error updating: {str(e)}', 'error')
         return redirect(url_for('manage_documents'))
     
     return render_template_string('''
@@ -8220,6 +9735,16 @@ def rename_document(doc_id):
                         <input type="text" name="display_name" id="display_name" value="{{ current_name }}" maxlength="255" placeholder="e.g. Employee Handbook">
                         <small>This is the title users see. Leave blank (or match the file name) to use the file name.</small>
                     </div>
+                    <div class="form-group">
+                        <label for="store_id">Visible to</label>
+                        <select name="store_id" id="store_id" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem;">
+                            <option value="" {% if not document.store_id %}selected{% endif %}>All stores</option>
+                            {% for store in stores %}
+                            <option value="{{ store.id }}" {% if document.store_id == store.id %}selected{% endif %}>{{ store.name }} ({{ store.code }})</option>
+                            {% endfor %}
+                        </select>
+                        <small>All stores = every location can see this document.</small>
+                    </div>
                     <button type="submit" class="btn">Save</button>
                     <a href="{{ url_for('manage_documents') }}" class="btn btn-secondary" style="margin-left: 10px; text-decoration: none;">Cancel</a>
                 </form>
@@ -8227,7 +9752,7 @@ def rename_document(doc_id):
         </div>
     </body>
     </html>
-    ''', document=document, current_name=current_name)
+    ''', document=document, current_name=current_name, stores=stores)
 
 
 @app.route('/admin/documents/<int:doc_id>/signature-fields')
@@ -10112,7 +11637,7 @@ def assign_document_submit(doc_id):
                 )
                 db.session.add(assignment)
                 
-                # Create a UserTask for this document assignment
+                # Create a UserTask for this document assignment (display_order high so it appears after any ordered onboarding tasks)
                 task = UserTask(
                     username=username,
                     task_title=f"Sign Document: {document.name_for_users}",
@@ -10123,7 +11648,9 @@ def assign_document_submit(doc_id):
                     status='pending',
                     due_date=due_date,
                     assigned_by=current_user.username,
-                    notes=notes
+                    notes=notes,
+                    display_order=9999,
+                    depends_on_task_id=None
                 )
                 db.session.add(task)
                 assigned_count += 1
@@ -10846,6 +12373,11 @@ def view_document(doc_id):
         if not assignment:
             flash('This document has not been assigned to you.', 'error')
             return redirect(url_for('dashboard'))
+        # Document must be visible and (if user has a store) visible to that store
+        user_store_id = get_current_user_store_id()
+        if not document_visible_to_store(document, user_store_id):
+            flash('This document is not available.', 'error')
+            return redirect(url_for('dashboard'))
     
     # Check if file exists
     if not os.path.exists(document.file_path):
@@ -10887,12 +12419,20 @@ def view_document_embed(doc_id, username=None):
     if not document:
         return "Document not found.", 404
     
-    # Check permissions - only allow if document is assigned to user (unless admin)
+    # Check permissions: admin can view all; manager with manage_documents can view store-visible docs; others need assignment
     if not current_user.is_admin():
-        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
-        if not assignment:
-            return "This document has not been assigned to you.", 403
-    
+        if current_user.is_manager() and manager_has_permission('manage_documents'):
+            user_store_id = get_current_user_store_id()
+            if not document_visible_to_store(document, user_store_id):
+                return "This document is not available.", 403
+        else:
+            assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+            if not assignment:
+                return "This document has not been assigned to you.", 403
+            user_store_id = get_current_user_store_id()
+            if not document_visible_to_store(document, user_store_id):
+                return "This document is not available.", 403
+
     # If username is provided and current user is admin OR it's their own username, show signed version
     # Otherwise, show original blank document
     show_signed = False
@@ -13063,21 +14603,30 @@ def download_document(doc_id):
         flash('Document not found.', 'error')
         return redirect(url_for('dashboard'))
     
-    # Check permissions - only allow if document is assigned to user (unless admin)
+    # Check permissions: admin can download all; manager with manage_documents can download store-visible docs; others need assignment
     if not current_user.is_admin():
-        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
-        if not assignment:
-            flash('This document has not been assigned to you.', 'error')
-            return redirect(url_for('dashboard'))
+        if current_user.is_manager() and manager_has_permission('manage_documents'):
+            user_store_id = get_current_user_store_id()
+            if not document_visible_to_store(document, user_store_id):
+                flash('This document is not available.', 'error')
+                return redirect(url_for('manage_documents'))
+        else:
+            assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+            if not assignment:
+                flash('This document has not been assigned to you.', 'error')
+                return redirect(url_for('dashboard'))
+            user_store_id = get_current_user_store_id()
+            if not document_visible_to_store(document, user_store_id):
+                flash('This document is not available.', 'error')
+                return redirect(url_for('dashboard'))
     
     # Check if file exists
     if not os.path.exists(document.file_path):
-        flash('File not found on server.', 'error')
+        flash('Document not found on server.', 'error')
         return redirect(url_for('dashboard'))
     
-    # For regular users, generate and download their signed version
-    # For admins, download the original document
-    if not current_user.is_admin():
+    # For regular users, generate and download their signed version; for admins and managers (viewing from forms page), download original
+    if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         # Generate signed PDF for this user
         try:
             # Get user's signatures for this document
@@ -13922,7 +15471,7 @@ def view_form_signatures(doc_id):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -14269,14 +15818,30 @@ def download_signed_document(doc_id, username):
 
 
 @app.route('/admin/new-hire/<username>/details')
-@admin_required
+@login_required
 def view_new_hire_details(username):
-    """View detailed information about a new hire including quiz results and signed forms"""
+    """View detailed information about a new hire including quiz results and signed forms. Managers can only view new hires at their store."""
+    if not current_user.is_admin() and not current_user.is_manager():
+        abort(403)
     try:
         new_hire = NewHire.query.filter_by(username=username).first()
         if not new_hire:
             flash('New hire not found.', 'error')
-            return redirect(url_for('admin_dashboard'))
+            return redirect(url_for('view_all_new_hires') if current_user.is_manager() else url_for('admin_dashboard'))
+        # Managers can only view new hires that appear on their store's list
+        if current_user.is_manager():
+            store_id = get_current_user_store_id()
+            if store_id is None:
+                flash('You can only view new hires at your store.', 'error')
+                return redirect(url_for('view_all_new_hires'))
+            allowed = NewHire.query.filter(
+                NewHire.status != 'removed',
+                NewHire.store_id == store_id,
+                NewHire.username == username
+            ).first()
+            if not allowed:
+                flash('You can only view new hires at your store.', 'error')
+                return redirect(url_for('view_all_new_hires'))
         
         # Get training video progress and quiz results
         required_videos = list(new_hire.required_training_videos)
@@ -14733,10 +16298,21 @@ def view_new_hire_details(username):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <div style="margin-bottom: 20px;">
+                {% for category, msg in messages %}
+                <div class="flash-msg" style="padding: 12px 20px; border-radius: 8px; margin-bottom: 10px; background: {% if category == 'success' %}#d4edda; color: #155724; border: 1px solid #c3e6cb{% elif category == 'error' %}#f8d7da; color: #721c24; border: 1px solid #f5c6cb{% else %}#d1ecf1; color: #0c5460; border: 1px solid #bee5eb{% endif %};">
+                    {{ msg }}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% endwith %}
             <div class="user-header">
                 <h1>{{ new_hire.first_name }} {{ new_hire.last_name }}</h1>
                 <form id="newHireForm" method="POST" action="{{ url_for('update_new_hire_details', username=username) }}">
@@ -14744,6 +16320,14 @@ def view_new_hire_details(username):
                         <tr>
                             <td>Username</td>
                             <td><div class="info-value">{{ new_hire.username }}</div></td>
+                        </tr>
+                        <tr>
+                            <td>First Name</td>
+                            <td><input type="text" name="first_name" value="{{ new_hire.first_name or '' }}" placeholder="First name" required></td>
+                        </tr>
+                        <tr>
+                            <td>Last Name</td>
+                            <td><input type="text" name="last_name" value="{{ new_hire.last_name or '' }}" placeholder="Last name" required></td>
                         </tr>
                         <tr>
                             <td>Email</td>
@@ -14906,7 +16490,7 @@ def view_new_hire_details(username):
         app.logger.error(f'Error in view_new_hire_details for {username}: {str(e)}')
         app.logger.error(traceback.format_exc())
         flash(f'Error loading new hire details: {str(e)}', 'error')
-        return redirect(url_for('admin_dashboard'))
+        return redirect(url_for('view_all_new_hires') if current_user.is_manager() else url_for('admin_dashboard'))
 
 
 @app.route('/admin/tasks/<int:task_id>/remove', methods=['POST'])
@@ -14930,16 +16514,46 @@ def remove_user_task(task_id):
     return redirect(url_for('view_new_hire_details', username=username))
 
 
+def _manager_can_act_on_new_hire(username):
+    """True if current user is admin, or is manager and this new hire is at their store."""
+    if current_user.is_admin():
+        return True
+    if not current_user.is_manager():
+        return False
+    store_id = get_current_user_store_id()
+    if store_id is None:
+        return False
+    allowed = NewHire.query.filter(
+        NewHire.status != 'removed',
+        NewHire.store_id == store_id,
+        NewHire.username == username
+    ).first()
+    return allowed is not None
+
+
 @app.route('/admin/new-hire/<username>/update', methods=['POST'])
-@admin_required
+@login_required
 def update_new_hire_details(username):
-    """Update new hire details"""
+    """Update new hire details. Managers can only update new hires at their store."""
+    if not current_user.is_admin() and not current_user.is_manager():
+        abort(403)
     new_hire = NewHire.query.filter_by(username=username).first()
     if not new_hire:
         flash('New hire not found.', 'error')
-        return redirect(url_for('admin_dashboard'))
+        return redirect(url_for('view_all_new_hires') if current_user.is_manager() else url_for('admin_dashboard'))
+    if not _manager_can_act_on_new_hire(username):
+        flash('You can only update new hires at your store.', 'error')
+        return redirect(url_for('view_all_new_hires'))
     
     try:
+        # Update first name and last name (required on model; keep existing if blank)
+        first_name = request.form.get('first_name', '').strip() or (new_hire.first_name or '')
+        last_name = request.form.get('last_name', '').strip() or (new_hire.last_name or '')
+        if first_name:
+            new_hire.first_name = first_name
+        if last_name:
+            new_hire.last_name = last_name
+
         # Update email
         email = request.form.get('email', '').strip()
         if email:
@@ -14985,9 +16599,14 @@ def update_new_hire_details(username):
 
 
 @app.route('/admin/new-hire/<username>/cancel-access', methods=['POST'])
-@admin_required
+@login_required
 def new_hire_cancel_access(username):
-    """Cancel (revoke) access for this new hire so they can no longer log in. Reversible via Restore access."""
+    """Cancel (revoke) access for this new hire so they can no longer log in. Managers can only for their store."""
+    if not current_user.is_admin() and not current_user.is_manager():
+        abort(403)
+    if not _manager_can_act_on_new_hire(username):
+        flash('You can only revoke access for new hires at your store.', 'error')
+        return redirect(url_for('view_all_new_hires'))
     user = UserModel.query.filter_by(username=username).first()
     if not user:
         flash('No login account found for this user.', 'error')
@@ -15022,9 +16641,14 @@ def new_hire_cancel_access(username):
 
 
 @app.route('/admin/new-hire/<username>/restore-access', methods=['POST'])
-@admin_required
+@login_required
 def new_hire_restore_access(username):
-    """Restore access for this new hire so they can log in again."""
+    """Restore access for this new hire so they can log in again. Managers can only for their store."""
+    if not current_user.is_admin() and not current_user.is_manager():
+        abort(403)
+    if not _manager_can_act_on_new_hire(username):
+        flash('You can only restore access for new hires at your store.', 'error')
+        return redirect(url_for('view_all_new_hires'))
     user = UserModel.query.filter_by(username=username).first()
     if not user:
         flash('No login account found for this user.', 'error')
@@ -15052,12 +16676,17 @@ def new_hire_restore_access(username):
 
 
 @app.route('/admin/new-hire/<username>/remove-user', methods=['GET', 'POST'])
-@admin_required
+@login_required
 def remove_new_hire_user(username):
-    """GET: show confirmation. POST: remove new hire's user account (e.g. withdrew or did not complete onboarding)."""
+    """GET: show confirmation. POST: remove new hire's user account. Managers can only for new hires at their store."""
+    if not current_user.is_admin() and not current_user.is_manager():
+        abort(403)
     new_hire = NewHire.query.filter_by(username=username).first()
     if not new_hire:
         flash('New hire not found.', 'error')
+        return redirect(url_for('view_all_new_hires'))
+    if not _manager_can_act_on_new_hire(username):
+        flash('You can only remove new hires at your store.', 'error')
         return redirect(url_for('view_all_new_hires'))
     if new_hire.status == 'removed':
         flash('This user has already been removed.', 'info')
@@ -15134,9 +16763,11 @@ def remove_new_hire_user(username):
 
 
 @app.route('/admin/checklist')
-@admin_required
+@login_required
 def manage_checklist():
-    """Manage new hire checklist items"""
+    """Manage new hire checklist items. Admin or manager with manage_checklist permission."""
+    if not current_user.is_admin() and not manager_has_permission('manage_checklist'):
+        abort(403)
     checklist_items = ChecklistItem.query.order_by(ChecklistItem.order, ChecklistItem.id).all()
     
     return render_template_string('''
@@ -15334,7 +16965,7 @@ def manage_checklist():
             <div class="header-content">
                 <h1>✅ Manage New Hire Checklist</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -15926,7 +17557,7 @@ def view_checklist():
             <div class="header-content">
                 <h1>✅ New Hire Checklist</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -16098,13 +17729,75 @@ def update_checklist_completion():
     return redirect(url_for('view_checklist'))
 
 
+@app.route('/admin/sync-new-hires', methods=['POST'])
+@login_required
+def sync_new_hires_from_users():
+    """Create missing NewHire records for Users so they appear on the checklist list. Admin only."""
+    if not current_user.is_admin():
+        abort(403)
+    created = 0
+    restored = 0
+    default_store_id = None
+    try:
+        first_store = Store.query.first()
+        if first_store:
+            default_store_id = first_store.id
+    except Exception:
+        pass
+    for user in UserModel.query.filter(UserModel.role == 'user').all():
+        nh = NewHire.query.filter_by(username=user.username).first()
+        if nh:
+            if nh.status != 'removed':
+                continue
+            nh.status = 'pending'
+            nh.email = getattr(user, 'email', None) or nh.email
+            if hasattr(user, 'full_name') and user.full_name:
+                parts = (user.full_name or '').strip().split(None, 1)
+                nh.first_name = parts[0] or nh.first_name
+                nh.last_name = (parts[1] if len(parts) > 1 else '') or nh.last_name
+            if getattr(nh, 'store_id', None) is None and default_store_id is not None:
+                nh.store_id = default_store_id
+            restored += 1
+            continue
+        full = (getattr(user, 'full_name', None) or '').strip() or user.username
+        parts = full.split(None, 1)
+        first = parts[0] or user.username
+        last = (parts[1] if len(parts) > 1 else '') or ''
+        email = getattr(user, 'email', None) or f'{user.username}@example.com'
+        store_id = getattr(user, 'store_id', None)
+        if store_id is None:
+            store_id = default_store_id
+        db.session.add(NewHire(
+            username=user.username,
+            first_name=first,
+            last_name=last,
+            email=email,
+            status='pending',
+            created_by=current_user.username,
+            store_id=store_id,
+        ))
+        created += 1
+    if created or restored:
+        db.session.commit()
+        flash(f'Synced new hires: {created} created, {restored} restored. User checklist list updated.', 'success')
+    else:
+        flash('All users already have a new hire record. No changes made.', 'info')
+    return redirect(url_for('view_user_checklists'))
+
+
 @app.route('/admin/user-checklists')
-@admin_required
+@login_required
 def view_user_checklists():
-    """List all active users and allow admin to select one to view/update their checklist"""
+    """List active users and their checklist progress. Admin sees all; managers see their store only."""
+    if not current_user.is_admin() and not manager_has_permission('manage_user_checklists') and not manager_has_permission('manage_checklist'):
+        abort(403)
     from datetime import date as _date
     today = _date.today()
-    candidates = NewHire.query.filter(NewHire.status != 'removed').order_by(NewHire.first_name, NewHire.last_name).all()
+    store_id = get_current_user_store_id()
+    q = NewHire.query.filter(NewHire.status != 'removed')
+    if current_user.is_manager() and store_id is not None:
+        q = q.filter(NewHire.store_id == store_id)
+    candidates = q.order_by(NewHire.first_name, NewHire.last_name).all()
     # Exclude new hires whose user was revoked or deleted (same as dashboard / manage users)
     all_new_hires = []
     for nh in candidates:
@@ -16116,12 +17809,28 @@ def view_user_checklists():
             continue
         all_new_hires.append(nh)
 
-    return render_template_string('''
+    # Re-fetch display fields with a fresh query so names are always current (bypasses ORM/session cache)
+    from types import SimpleNamespace
+    if all_new_hires:
+        usernames = [nh.username for nh in all_new_hires]
+        try:
+            stmt = text(
+                "SELECT username, first_name, last_name, department FROM new_hires WHERE status != 'removed' AND username IN :usernames ORDER BY first_name, last_name"
+            ).bindparams(bindparam("usernames", expanding=True))
+            result = db.session.execute(stmt, {"usernames": usernames})
+            rows = result.fetchall()
+            all_new_hires = [SimpleNamespace(username=r[0], first_name=r[1] or '', last_name=r[2] or '', department=r[3]) for r in rows]
+        except Exception:
+            pass  # keep original all_new_hires if raw query fails (e.g. dialect)
+    resp = render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
         <title>User Checklists - Onboarding App</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
@@ -16247,12 +17956,24 @@ def view_user_checklists():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
             <div class="section">
                 <h2 class="section-title">Select User to View/Update Checklist</h2>
+                {% if current_user.is_admin() %}
+                <form method="POST" action="{{ url_for('sync_new_hires_from_users') }}" style="margin-bottom: 20px;">
+                    <button type="submit" class="btn" style="background: #6c757d; color: white; font-size: 0.9em;">Fix missing: create New Hire records for users who don&apos;t have one</button>
+                </form>
+                {% endif %}
                 {% if all_new_hires %}
                     <div class="user-list">
                         {% for new_hire in all_new_hires %}
@@ -16267,22 +17988,46 @@ def view_user_checklists():
                     </div>
                 {% else %}
                     <p style="color: #666;">No new hires found.</p>
+                    {% if current_user.is_admin() %}
+                    <p style="color: #555; font-size: 0.95em; margin-top: 10px;">If you have users who can log in but don&apos;t appear here (e.g. Marcus Johnson), they may only exist in Users and not in New Hires. Click the gray button above to create missing New Hire records so they appear in this list and have a checklist.</p>
+                    {% endif %}
                 {% endif %}
             </div>
         </div>
     </body>
     </html>
     ''', all_new_hires=all_new_hires)
+    resp = make_response(resp)
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = 'Thu, 01 Jan 1970 00:00:00 GMT'
+    return resp
 
 
 @app.route('/admin/user-checklists/<username>')
-@admin_required
+@login_required
 def view_user_checklist(username):
-    """View and update checklist for a specific user"""
+    """View and update checklist for a specific user. Managers can only access new hires at their store."""
+    if not current_user.is_admin() and not manager_has_permission('manage_user_checklists') and not manager_has_permission('manage_checklist'):
+        abort(403)
     new_hire = NewHire.query.filter_by(username=username).first()
     if not new_hire:
         flash('User not found.', 'error')
         return redirect(url_for('view_user_checklists'))
+    # Managers can only access new hires that appear on their store's list (same filter as view_user_checklists)
+    if current_user.is_manager():
+        store_id = get_current_user_store_id()
+        if store_id is None:
+            flash('You can only view checklists for new hires at your store.', 'error')
+            return redirect(url_for('view_user_checklists'))
+        allowed = NewHire.query.filter(
+            NewHire.status != 'removed',
+            NewHire.store_id == store_id,
+            NewHire.username == username
+        ).first()
+        if not allowed:
+            flash('You can only view checklists for new hires at your store.', 'error')
+            return redirect(url_for('view_user_checklists'))
     
     # Get all active checklist items
     checklist_items = ChecklistItem.query.filter_by(is_active=True).order_by(ChecklistItem.order, ChecklistItem.id).all()
@@ -16677,13 +18422,29 @@ def view_user_checklist(username):
 
 
 @app.route('/admin/user-checklists/<username>/send-finale', methods=['POST'])
-@admin_required
+@login_required
 def send_finale_message(username):
-    """Save and send finale message to the new hire (shown on their dashboard)."""
+    """Save and send finale message to the new hire (shown on their dashboard). Managers only for their store."""
+    if not current_user.is_admin() and not manager_has_permission('manage_user_checklists') and not manager_has_permission('manage_checklist'):
+        abort(403)
     new_hire = NewHire.query.filter_by(username=username).first()
     if not new_hire:
         flash('User not found.', 'error')
         return redirect(url_for('view_user_checklists'))
+    # Managers can only send finale to new hires at their store (same as list)
+    if current_user.is_manager():
+        store_id = get_current_user_store_id()
+        if store_id is None:
+            flash('You can only send finale to new hires at your store.', 'error')
+            return redirect(url_for('view_user_checklists'))
+        allowed = NewHire.query.filter(
+            NewHire.status != 'removed',
+            NewHire.store_id == store_id,
+            NewHire.username == username
+        ).first()
+        if not allowed:
+            flash('You can only send finale to new hires at your store.', 'error')
+            return redirect(url_for('view_user_checklists'))
     message = (request.form.get('finale_message') or '').strip()
     if not message:
         flash('Please enter a message.', 'error')
@@ -16721,13 +18482,29 @@ def send_finale_message(username):
 
 
 @app.route('/admin/user-checklists/<username>/update', methods=['POST'])
-@admin_required
+@login_required
 def update_user_checklist(username):
-    """Update checklist completion status for a specific user"""
+    """Update checklist completion status for a specific user. Managers only for their store."""
+    if not current_user.is_admin() and not manager_has_permission('manage_user_checklists') and not manager_has_permission('manage_checklist'):
+        abort(403)
     new_hire = NewHire.query.filter_by(username=username).first()
     if not new_hire:
         flash('User not found.', 'error')
         return redirect(url_for('view_user_checklists'))
+    # Managers can only update checklists for new hires at their store (same as list)
+    if current_user.is_manager():
+        store_id = get_current_user_store_id()
+        if store_id is None:
+            flash('You can only update checklists for new hires at your store.', 'error')
+            return redirect(url_for('view_user_checklists'))
+        allowed = NewHire.query.filter(
+            NewHire.status != 'removed',
+            NewHire.store_id == store_id,
+            NewHire.username == username
+        ).first()
+        if not allowed:
+            flash('You can only update checklists for new hires at your store.', 'error')
+            return redirect(url_for('view_user_checklists'))
     
     completed_item_ids = [int(id) for id in request.form.getlist('completed_items')]
     
@@ -17070,7 +18847,7 @@ def manage_external_links():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -18813,7 +20590,7 @@ def admin_reports():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -19203,17 +20980,48 @@ def admin_reports():
                 <strong>⚠️ Reports Page Error</strong>
                 <p>There was an error loading the reports. Please refresh the page or contact support if the problem persists.</p>
             </div>
-            <p><a href="{{ url_for('admin_reports') }}">Refresh Reports</a> | <a href="{{ url_for('admin_dashboard') }}">Back to Dashboard</a></p>
+            <p><a href="{{ url_for('admin_reports') }}">Refresh Reports</a> | <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}">Back to Dashboard</a></p>
         </body>
         </html>
         ''')
 
 
 @app.route('/admin/training')
-@admin_required
+@login_required
 def manage_training():
-    """Manage harassment training videos and quizzes"""
+    """Manage harassment training videos and quizzes. Admin: full edit. Manager: view only, watch videos, see who watched and scores."""
+    if not current_user.is_admin() and not manager_has_permission('manage_training'):
+        abort(403)
     videos = TrainingVideo.query.order_by(TrainingVideo.created_at.desc()).all()
+    is_manager_view = current_user.is_manager()
+    videos_with_progress = []  # used for manager view only
+    if is_manager_view:
+        store_id = get_current_user_store_id()
+        store_usernames = None
+        if store_id is not None:
+            store_usernames = set(nh.username for nh in NewHire.query.filter_by(store_id=store_id).all())
+        for video in videos:
+            progress_records = UserTrainingProgress.query.filter_by(video_id=video.id).order_by(
+                UserTrainingProgress.username, UserTrainingProgress.attempt_number.desc()
+            ).all()
+            # Latest attempt per user; filter by store if manager has store
+            seen = set()
+            progress_list = []
+            for p in progress_records:
+                if store_usernames is not None and p.username not in store_usernames:
+                    continue
+                if p.username in seen:
+                    continue
+                seen.add(p.username)
+                progress_list.append({
+                    'username': p.username,
+                    'time_watched': p.time_watched or 0,
+                    'score': p.score,
+                    'is_passed': p.is_passed,
+                    'is_completed': p.is_completed,
+                    'completed_at': p.completed_at,
+                })
+            videos_with_progress.append({'video': video, 'progress_list': progress_list})
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -19370,11 +21178,11 @@ def manage_training():
             <div class="header-content">
                 <h1>🎓 Training Management</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
-            
+            {% if not is_manager_view %}
             <div class="admin-panel">
                 <h2>Upload Training Video</h2>
                 <form method="POST" action="{{ url_for('upload_training_video') }}" enctype="multipart/form-data">
@@ -19400,9 +21208,56 @@ def manage_training():
                     <button type="submit" class="btn btn-success">Upload Video</button>
                 </form>
             </div>
-            
+            {% endif %}
             <div class="admin-panel">
-                <h2>Training Videos ({{ videos|length }} total)</h2>
+                <h2>{% if is_manager_view %}Training Library (view only){% else %}Training Videos ({{ videos|length }} total){% endif %}</h2>
+                {% if is_manager_view %}
+                {% if videos_with_progress %}
+                    {% for item in videos_with_progress %}
+                    <div style="margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid #eee;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+                            <h3 style="font-size: 1.2em; margin: 0;">{{ item.video.title }}</h3>
+                            <a href="{{ url_for('view_training_video', video_id=item.video.id) }}" class="btn btn-primary btn-small">Watch</a>
+                        </div>
+                        {% if item.video.description %}
+                        <p style="color: #666; font-size: 0.9em; margin-bottom: 12px;">{{ item.video.description[:120] }}{% if item.video.description|length > 120 %}...{% endif %}</p>
+                        {% endif %}
+                        <p style="font-size: 0.85em; color: #888; margin-bottom: 8px;">Passing score: {{ item.video.passing_score }}%</p>
+                        <table style="width: 100%; margin-top: 10px; font-size: 0.9em;">
+                            <thead>
+                                <tr>
+                                    <th style="text-align: left; padding: 8px; background: #f8f9fa;">User</th>
+                                    <th style="text-align: left; padding: 8px; background: #f8f9fa;">Time watched</th>
+                                    <th style="text-align: left; padding: 8px; background: #f8f9fa;">Score</th>
+                                    <th style="text-align: left; padding: 8px; background: #f8f9fa;">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for p in item.progress_list %}
+                                <tr>
+                                    <td style="padding: 8px;">{{ p.username }}</td>
+                                    <td style="padding: 8px;">{{ "%.0f"|format(p.time_watched) }} sec</td>
+                                    <td style="padding: 8px;">{{ "%.0f"|format(p.score or 0) }}%</td>
+                                    <td style="padding: 8px;">
+                                        {% if p.is_completed %}
+                                        <span class="badge badge-{{ 'active' if p.is_passed else 'inactive' }}">{{ 'Passed' if p.is_passed else 'Failed' }}</span>
+                                        {% else %}
+                                        <span style="color: #888;">In progress</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                                {% if not item.progress_list %}
+                                <tr><td colspan="4" style="padding: 12px; color: #999;">No one from your store has watched this video yet.</td></tr>
+                                {% endif %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                <p>No training videos available.</p>
+                {% endif %}
+                {% else %}
                 {% if videos %}
                 <table>
                     <thead>
@@ -19445,11 +21300,12 @@ def manage_training():
                 {% else %}
                 <p>No training videos uploaded yet.</p>
                 {% endif %}
+                {% endif %}
             </div>
         </div>
     </body>
     </html>
-    ''', videos=videos)
+    ''', videos=videos, is_manager_view=is_manager_view, videos_with_progress=videos_with_progress)
 
 
 @app.route('/admin/training/upload', methods=['POST'])
@@ -21360,6 +23216,8 @@ def list_training_videos():
                 <a href="{{ url_for('profile') }}">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
+                {% elif current_user.is_manager() %}
+                <a href="{{ url_for('manager_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Manager Console</a>
                 {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: #000000; flex-direction: column; padding: 20px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
@@ -21370,6 +23228,8 @@ def list_training_videos():
                 <a href="{{ url_for('profile') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Profile</a>
                 {% if is_admin %}
                 <a href="{{ url_for('admin_dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em;">Admin Console</a>
+                {% elif current_user.is_manager() %}
+                <a href="{{ url_for('manager_dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em;">Manager Console</a>
                 {% endif %}
             </div>
             <div class="user-section">
@@ -21380,7 +23240,12 @@ def list_training_videos():
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
+                    {% if is_admin %}
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    {% endif %}
+                    {% if current_user.is_manager() %}
+                    <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                    {% endif %}
                     <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
