@@ -1,14 +1,24 @@
 /**
- * Neon Data API (REST) client. Uses NEON_API_URL and NEON_API_KEY.
- * No direct DB connection — all access via HTTP to the Neon REST endpoint.
+ * Database access: uses direct Postgres (DATABASE_URL) when set, otherwise Neon Data API.
+ * Direct connection works on Vercel without JWT; Data API requires Neon Auth JWT.
  */
 
+import { neon } from "@neondatabase/serverless";
+
+const useDirect = () => !!process.env.DATABASE_URL;
+
+function getSql() {
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL is required when using direct connection");
+  return neon(url);
+}
+
+// --- Data API helpers (used only when DATABASE_URL is not set) ---
 const getBase = () => {
   const url = process.env.NEON_API_URL?.replace(/\/$/, "");
   if (!url) throw new Error("NEON_API_URL is required");
   return url;
 };
-
 const getKey = () => {
   const key = process.env.NEON_API_KEY;
   if (!key) throw new Error("NEON_API_KEY is required");
@@ -22,9 +32,7 @@ async function fetchApi<T>(
   const base = getBase();
   const key = getKey();
   const { method = "GET", body, searchParams, prefer } = opts;
-  const qs = searchParams
-    ? "?" + new URLSearchParams(searchParams).toString()
-    : "";
+  const qs = searchParams ? "?" + new URLSearchParams(searchParams).toString() : "";
   const headers: Record<string, string> = {
     Accept: "application/json",
     "Content-Type": "application/json",
@@ -41,24 +49,17 @@ async function fetchApi<T>(
     const t = await res.text();
     throw new Error(`Neon API ${res.status}: ${t}`);
   }
-  if (res.status === 204 || res.headers.get("content-length") === "0")
-    return undefined as T;
+  if (res.status === 204 || res.headers.get("content-length") === "0") return undefined as T;
   return res.json() as Promise<T>;
 }
 
-/** Get total count via GET + Prefer: count=exact, parse Content-Range (e.g. "0-9/42" => 42) */
 async function fetchCount(path: string, searchParams: Record<string, string> = {}): Promise<number> {
   const base = getBase();
   const key = getKey();
   const qs = new URLSearchParams({ ...searchParams, select: "id", limit: "1" }).toString();
   const res = await fetch(`${base}${path}?${qs}`, {
     method: "GET",
-    headers: {
-      Accept: "application/json",
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      Prefer: "count=exact",
-    },
+    headers: { Accept: "application/json", apikey: key, Authorization: `Bearer ${key}`, Prefer: "count=exact" },
   });
   const range = res.headers.get("content-range");
   if (range) {
@@ -68,7 +69,7 @@ async function fetchCount(path: string, searchParams: Record<string, string> = {
   return 0;
 }
 
-// --- Users (table: users) ---
+// --- Users ---
 export interface DbUser {
   id: number;
   username: string;
@@ -80,11 +81,19 @@ export interface DbUser {
 }
 
 export async function getUserByEmail(email: string): Promise<DbUser | null> {
-  const encoded = encodeURIComponent(email.trim().toLowerCase());
-  const rows = await fetchApi<DbUser[]>(
-    "/users",
-    { searchParams: { email: `eq.${encoded}`, access_revoked_at: "is.null", select: "id,username,email,password_hash,full_name,role" } }
-  );
+  const normalized = email.trim().toLowerCase();
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = await sql`
+      SELECT id, username, email, password_hash, full_name, role
+      FROM users WHERE lower(email) = ${normalized} AND access_revoked_at IS NULL LIMIT 1
+    `;
+    return (rows as DbUser[])[0] ?? null;
+  }
+  const encoded = encodeURIComponent(normalized);
+  const rows = await fetchApi<DbUser[]>("/users", {
+    searchParams: { email: `eq.${encoded}`, access_revoked_at: "is.null", select: "id,username,email,password_hash,full_name,role" },
+  });
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
@@ -95,6 +104,17 @@ export async function createUser(data: {
   full_name?: string;
   role?: string;
 }): Promise<DbUser> {
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = await sql`
+      INSERT INTO users (username, email, password_hash, full_name, role)
+      VALUES (${data.username}, ${data.email}, ${data.password_hash}, ${data.full_name ?? null}, ${data.role ?? "user"})
+      RETURNING id, username, email, password_hash, full_name, role
+    `;
+    const row = (rows as DbUser[])[0];
+    if (!row) throw new Error("Insert did not return user");
+    return row;
+  }
   const rows = await fetchApi<DbUser | DbUser[]>("/users", {
     method: "POST",
     body: {
@@ -112,7 +132,22 @@ export async function createUser(data: {
   return row;
 }
 
-// --- New hires (table: new_hires) ---
+export async function updateUserPasswordByEmail(email: string, password_hash: string): Promise<void> {
+  const normalized = email.trim().toLowerCase();
+  if (useDirect()) {
+    const sql = getSql();
+    await sql`UPDATE users SET password_hash = ${password_hash} WHERE lower(email) = ${normalized}`;
+    return;
+  }
+  const encoded = encodeURIComponent(normalized);
+  await fetchApi<unknown>("/users", {
+    method: "PATCH",
+    body: { password_hash },
+    searchParams: { email: `eq.${encoded}` },
+  });
+}
+
+// --- New hires ---
 export interface DbNewHire {
   id: number;
   username: string;
@@ -127,6 +162,20 @@ export interface DbNewHire {
 }
 
 export async function getNewHires(whereNotRemoved = true): Promise<DbNewHire[]> {
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = whereNotRemoved
+      ? await sql`
+          SELECT id, username, first_name, last_name, email, department, position, status, start_date, created_at
+          FROM new_hires WHERE status <> 'removed'
+          ORDER BY last_name ASC, first_name ASC
+        `
+      : await sql`
+          SELECT id, username, first_name, last_name, email, department, position, status, start_date, created_at
+          FROM new_hires ORDER BY last_name ASC, first_name ASC
+        `;
+    return rows as DbNewHire[];
+  }
   const params: Record<string, string> = {
     select: "id,username,first_name,last_name,email,department,position,status,start_date,created_at",
     order: "last_name.asc,first_name.asc",
@@ -137,10 +186,15 @@ export async function getNewHires(whereNotRemoved = true): Promise<DbNewHire[]> 
 }
 
 export async function getNewHiresCount(): Promise<number> {
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = await sql`SELECT count(*)::int AS c FROM new_hires WHERE status <> 'removed'`;
+    return (rows as { c: number }[])[0]?.c ?? 0;
+  }
   return fetchCount("/new_hires", { status: "neq.removed" });
 }
 
-// --- Documents (table: documents) ---
+// --- Documents ---
 export interface DbDocument {
   id: number;
   filename: string;
@@ -151,15 +205,25 @@ export interface DbDocument {
 }
 
 export async function getDocuments(): Promise<DbDocument[]> {
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = await sql`
+      SELECT id, filename, original_filename, display_name, is_visible, created_at
+      FROM documents ORDER BY created_at DESC
+    `;
+    return rows as DbDocument[];
+  }
   const rows = await fetchApi<DbDocument[]>("/documents", {
-    searchParams: {
-      select: "id,filename,original_filename,display_name,is_visible,created_at",
-      order: "created_at.desc",
-    },
+    searchParams: { select: "id,filename,original_filename,display_name,is_visible,created_at", order: "created_at.desc" },
   });
   return Array.isArray(rows) ? rows : [];
 }
 
 export async function getDocumentsCount(): Promise<number> {
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = await sql`SELECT count(*)::int AS c FROM documents`;
+    return (rows as { c: number }[])[0]?.c ?? 0;
+  }
   return fetchCount("/documents");
 }
