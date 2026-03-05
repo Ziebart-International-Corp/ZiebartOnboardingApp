@@ -1,9 +1,37 @@
 "use client";
 
+import { useState, Suspense } from "react";
+import { signIn } from "next-auth/react";
 import Link from "next/link";
-import { loginUrl, welcomeUrl } from "@/lib/api";
+import { useSearchParams } from "next/navigation";
 
-export default function LoginPage() {
+function LoginForm() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const searchParams = useSearchParams();
+  const callbackUrl = searchParams.get("callbackUrl") ?? "/dashboard";
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    const res = await signIn("credentials", {
+      email: email.trim(),
+      password,
+      redirect: false,
+      callbackUrl,
+    });
+    setLoading(false);
+    if (res?.error) {
+      setError("Invalid email or password. Please try again.");
+      return;
+    }
+    if (res?.url) window.location.href = res.url;
+    else window.location.href = callbackUrl;
+  };
+
   return (
     <main className="min-h-screen flex flex-col items-center justify-center p-6 bg-zinc-950">
       <div className="w-full max-w-sm space-y-8">
@@ -12,13 +40,7 @@ export default function LoginPage() {
           <p className="mt-2 text-zinc-400 text-sm">Sign in with your email</p>
         </div>
 
-        {/* Form POSTs directly to Flask so session cookie and redirect work without CORS */}
-        <form
-          method="post"
-          action={loginUrl()}
-          className="space-y-4"
-        >
-          <input type="hidden" name="next" value={welcomeUrl()} />
+        <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label htmlFor="email" className="block text-sm font-medium text-zinc-300 mb-1">
               Email
@@ -29,6 +51,8 @@ export default function LoginPage() {
               type="email"
               autoComplete="email"
               required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
               placeholder="you@ziebart.com"
             />
@@ -43,14 +67,18 @@ export default function LoginPage() {
               type="password"
               autoComplete="current-password"
               required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
               className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-700 text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-500"
             />
           </div>
+          {error && <p className="text-sm text-red-400">{error}</p>}
           <button
             type="submit"
-            className="w-full py-3 px-4 rounded-lg bg-amber-500 text-black font-semibold hover:bg-amber-400 transition"
+            disabled={loading}
+            className="w-full py-3 px-4 rounded-lg bg-amber-500 text-black font-semibold hover:bg-amber-400 disabled:opacity-50 transition"
           >
-            Sign in
+            {loading ? "Signing in…" : "Sign in"}
           </button>
         </form>
 
@@ -59,5 +87,17 @@ export default function LoginPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <main className="min-h-screen flex items-center justify-center bg-zinc-950">
+        <p className="text-zinc-400">Loading…</p>
+      </main>
+    }>
+      <LoginForm />
+    </Suspense>
   );
 }

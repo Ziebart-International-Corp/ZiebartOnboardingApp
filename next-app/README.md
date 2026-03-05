@@ -1,34 +1,59 @@
-# Ziebart Onboarding – Next.js frontend
+# Ziebart Onboarding – Next.js (full-stack)
 
-This Next.js app is the **frontend** for the Ziebart Onboarding app. It uses the existing **Flask backend** as the API.
+Full-stack Next.js app with **Neon** (serverless PostgreSQL). No Flask backend.
 
-## How it works
+## Stack
 
-- **Next.js** (this app): Login page and home. Runs on port 3000 by default.
-- **Flask**: All other app features (dashboard, new hires, documents, etc.). Must run on the URL set in `NEXT_PUBLIC_API_URL` (default `http://127.0.0.1:5000`).
-
-After you sign in on the Next.js login page, you are redirected to the Flask app for the rest of the session.
+- **Next.js 14** (App Router), TypeScript, Tailwind
+- **Neon** (serverless PostgreSQL) via Prisma ORM
+- **NextAuth.js** (credentials: email + password)
 
 ## Setup
 
-1. Copy env example and set your Flask URL (if different from default):
+1. **Environment**
+
+   Copy env example and set your Neon URL and NextAuth secret:
+
    ```bash
    cp .env.local.example .env.local
-   # Edit .env.local: NEXT_PUBLIC_API_URL=http://127.0.0.1:5000
    ```
 
-2. Install and run:
+   Edit `.env.local` (or `.env`):
+
+   - `DATABASE_URL` – Neon connection string from [Neon Console](https://console.neon.tech) → your project → Connection details (e.g. `postgresql://user:password@ep-xxx.region.aws.neon.tech/neondb?sslmode=require`)
+   - `NEXTAUTH_SECRET` – random string (e.g. `openssl rand -base64 32`)
+   - `NEXTAUTH_URL` – app URL (e.g. `http://localhost:3000` in dev)
+
+2. **Database (Neon)**
+
+   Push the Prisma schema to Neon and seed an admin user:
+
    ```bash
    npm install
+   npm run db:push
+   SEED_ADMIN_EMAIL=admin@ziebart.com SEED_ADMIN_PASSWORD=YourPassword npm run db:seed
+   ```
+
+3. **Run**
+
+   ```bash
    npm run dev
    ```
 
-3. Run the **Flask** backend from the project root (e.g. `python app.py` on port 5000).
-
-4. Open [http://localhost:3000](http://localhost:3000), sign in, and you’ll be redirected to Flask.
+   Open [http://localhost:3000](http://localhost:3000), sign in with the seeded admin email/password.
 
 ## Scripts
 
-- `npm run dev` – Start Next.js dev server (port 3000)
-- `npm run build` – Production build
-- `npm run start` – Run production server
+| Command        | Description                    |
+|----------------|--------------------------------|
+| `npm run dev`  | Start dev server (port 3000)   |
+| `npm run build`| Build for production           |
+| `npm run start`| Run production server          |
+| `npm run db:push` | Push Prisma schema to DB   |
+| `npm run db:studio` | Open Prisma Studio        |
+| `npm run db:seed`   | Create admin user (set `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`) |
+
+## Vercel
+
+- Set **Root Directory** to `next-app` (if the repo root is the monorepo).
+- Add env vars: `DATABASE_URL` (Neon connection string), `NEXTAUTH_SECRET`, `NEXTAUTH_URL` (e.g. `https://your-app.vercel.app`).

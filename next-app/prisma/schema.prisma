@@ -1,0 +1,418 @@
+// Ziebart Onboarding - Neon (serverless PostgreSQL)
+// https://neon.tech | DATABASE_URL from Neon dashboard
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---- Core ----
+model User {
+  id               Int       @id @default(autoincrement())
+  username         String    @unique
+  domain           String?
+  fullName         String?   @map("full_name")
+  email            String?   @unique
+  passwordHash     String?   @map("password_hash")
+  role             String    @default("user")
+  storeId          Int?      @map("store_id")
+  accessRevokedAt  DateTime? @map("access_revoked_at") @db.Date
+  createdAt        DateTime  @default(now()) @map("created_at")
+  lastLogin        DateTime? @map("last_login")
+
+  store            Store?    @relation(fields: [storeId], references: [id])
+  managerPermissions ManagerPermission[]
+
+  @@map("users")
+}
+
+model Store {
+  id        Int      @id @default(autoincrement())
+  name      String
+  code      String?
+  createdAt DateTime? @map("created_at")
+
+  users     User[]
+  newHires  NewHire[]
+  documents Document[]
+  documentStores DocumentStore[]
+
+  @@map("stores")
+}
+
+model ManagerPermission {
+  id            Int    @id @default(autoincrement())
+  userId        Int    @map("user_id")
+  permissionKey String @map("permission_key")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, permissionKey])
+  @@map("manager_permissions")
+}
+
+model Role {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  newHires    NewHire[]
+  roleDocuments RoleDocument[]
+
+  @@map("roles")
+}
+
+model NewHire {
+  id                      Int       @id @default(autoincrement())
+  username                String
+  firstName               String    @map("first_name")
+  lastName                String    @map("last_name")
+  email                   String
+  department              String?
+  position                String?
+  roleId                  Int?      @map("role_id")
+  storeId                 Int?      @map("store_id")
+  startDate               DateTime? @map("start_date") @db.Date
+  accessRevokedAt         DateTime? @map("access_revoked_at") @db.Date
+  status                  String    @default("pending")
+  createdBy               String?   @map("created_by")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+  notes                   String?   @db.Text
+  finaleMessage           String?   @map("finale_message") @db.Text
+  finaleMessageSentAt     DateTime? @map("finale_message_sent_at")
+  finaleDocumentId        Int?      @map("finale_document_id")
+  finaleMessageDismissedAt DateTime? @map("finale_message_dismissed_at")
+
+  role        Role?    @relation(fields: [roleId], references: [id])
+  store       Store?   @relation(fields: [storeId], references: [id])
+  finaleDocument Document? @relation("NewHireFinaleDocument", fields: [finaleDocumentId], references: [id])
+
+  @@index([username])
+  @@index([storeId])
+  @@map("new_hires")
+}
+
+model Document {
+  id              Int      @id @default(autoincrement())
+  filename        String
+  originalFilename String  @map("original_filename")
+  displayName     String?  @map("display_name")
+  filePath        String   @map("file_path")
+  fileSize        Int?     @map("file_size")
+  fileType        String?  @map("file_type")
+  description     String?  @db.Text
+  isVisible       Boolean  @default(false) @map("is_visible")
+  storeId         Int?     @map("store_id")
+  uploadedBy      String?  @map("uploaded_by")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  store             Store?   @relation(fields: [storeId], references: [id])
+  documentStores    DocumentStore[]
+  roleDocuments     RoleDocument[]
+  newHiresFinale    NewHire[] @relation("NewHireFinaleDocument")
+  signatureFields   DocumentSignatureField[]
+  signatures        DocumentSignature[]
+  typedFields       DocumentTypedField[]
+  typedFieldValues  DocumentTypedFieldValue[]
+
+  @@map("documents")
+}
+
+model DocumentStore {
+  documentId Int @map("document_id")
+  storeId    Int @map("store_id")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  store    Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@id([documentId, storeId])
+  @@map("document_stores")
+}
+
+model RoleDocument {
+  roleId     Int
+  documentId Int @map("document_id")
+
+  role     Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, documentId])
+  @@map("role_documents")
+}
+
+model ChecklistItem {
+  id          Int      @id @default(autoincrement())
+  taskName    String   @map("task_name")
+  description String?  @db.Text
+  assignedTo  String?  @map("assigned_to")
+  order       Int      @default(0)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdBy   String?  @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("checklist_items")
+}
+
+model NewHireChecklist {
+  id               Int       @id @default(autoincrement())
+  newHireId        Int       @map("new_hire_id")
+  checklistItemId  Int       @map("checklist_item_id")
+  isCompleted      Boolean   @default(false) @map("is_completed")
+  completedBy      String?   @map("completed_by")
+  completedAt      DateTime? @map("completed_at")
+  notes            String?   @db.Text
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@map("new_hire_checklists")
+}
+
+model AdminSetting {
+  key   String  @id
+  value String? @db.Text
+
+  @@map("admin_settings")
+}
+
+// Training & quizzes (simplified - add relations as needed)
+model TrainingVideo {
+  id               Int      @id @default(autoincrement())
+  title            String
+  description      String?  @db.Text
+  filename         String
+  originalFilename String   @map("original_filename")
+  filePath         String   @map("file_path")
+  fileSize         Int?     @map("file_size")
+  duration         Float?
+  videoType        String   @default("harassment") @map("video_type")
+  isActive         Boolean  @default(true) @map("is_active")
+  passingScore     Int      @default(80) @map("passing_score")
+  maxAttempts      Int      @default(3) @map("max_attempts")
+  uploadedBy       String?  @map("uploaded_by")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("training_videos")
+}
+
+model UserTask {
+  id           Int       @id @default(autoincrement())
+  username     String
+  taskTitle    String    @map("task_title")
+  taskDescription String? @map("task_description") @db.Text
+  taskType     String    @default("general") @map("task_type")
+  documentId   Int?      @map("document_id")
+  priority     String    @default("normal")
+  status       String    @default("pending")
+  dueDate      DateTime? @map("due_date") @db.Date
+  assignedBy   String?   @map("assigned_by")
+  assignedAt   DateTime  @default(now()) @map("assigned_at")
+  completedAt  DateTime? @map("completed_at")
+  notes        String?   @db.Text
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@index([username])
+  @@map("user_tasks")
+}
+
+model DocumentAssignment {
+  id          Int       @id @default(autoincrement())
+  documentId  Int       @map("document_id")
+  username    String
+  assignedBy  String?   @map("assigned_by")
+  assignedAt  DateTime  @default(now()) @map("assigned_at")
+  dueDate     DateTime? @map("due_date") @db.Date
+  isCompleted Boolean   @default(false) @map("is_completed")
+  completedAt DateTime? @map("completed_at")
+  notes       String?   @db.Text
+
+  @@index([username])
+  @@map("document_assignments")
+}
+
+model ExternalLink {
+  id          Int      @id @default(autoincrement())
+  title       String
+  url         String
+  description String?  @db.Text
+  icon        String   @default("🔗")
+  imageFilename String? @map("image_filename")
+  order       Int      @default(0)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdBy   String?  @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("external_links")
+}
+
+// ---- Quiz (training videos) ----
+model QuizQuestion {
+  id            Int     @id @default(autoincrement())
+  videoId       Int     @map("video_id")
+  questionText  String  @map("question_text") @db.Text
+  questionType  String  @default("mid") @map("question_type")
+  videoTimestamp Decimal? @map("video_timestamp") @db.Decimal(10, 2)
+  order         Int     @default(0)
+  points        Int     @default(1)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("quiz_questions")
+}
+
+model QuizAnswer {
+  id          Int     @id @default(autoincrement())
+  questionId  Int     @map("question_id")
+  answerText  String  @map("answer_text") @db.Text
+  isCorrect   Boolean @default(false) @map("is_correct")
+  order       Int     @default(0)
+
+  @@map("quiz_answers")
+}
+
+model UserTrainingProgress {
+  id             Int      @id @default(autoincrement())
+  username       String
+  videoId        Int      @map("video_id")
+  attemptNumber  Int      @default(1) @map("attempt_number")
+  score          Decimal? @db.Decimal(5, 2)
+  totalQuestions Int      @default(0) @map("total_questions")
+  correctAnswers Int      @default(0) @map("correct_answers")
+  timeWatched    Decimal  @default(0) @map("time_watched") @db.Decimal(12, 2)
+  isPassed       Boolean  @default(false) @map("is_passed")
+  isCompleted    Boolean  @default(false) @map("is_completed")
+  startedAt      DateTime @default(now()) @map("started_at")
+  completedAt    DateTime? @map("completed_at")
+  lastUpdated    DateTime @updatedAt @map("last_updated")
+
+  @@index([username])
+  @@map("user_training_progress")
+}
+
+model UserQuizResponse {
+  id          Int      @id @default(autoincrement())
+  progressId  Int      @map("progress_id")
+  questionId  Int      @map("question_id")
+  answerId    Int      @map("answer_id")
+  isCorrect   Boolean  @default(false) @map("is_correct")
+  respondedAt DateTime @default(now()) @map("responded_at")
+
+  @@map("user_quiz_responses")
+}
+
+// ---- Document signatures & typed fields ----
+model DocumentSignatureField {
+  id             Int      @id @default(autoincrement())
+  documentId     Int      @map("document_id")
+  pageNumber     Int      @default(1) @map("page_number")
+  xPosition      Decimal  @map("x_position") @db.Decimal(10, 2)
+  yPosition      Decimal  @map("y_position") @db.Decimal(10, 2)
+  width          Decimal  @default(200) @db.Decimal(10, 2)
+  height         Decimal  @default(80) @db.Decimal(10, 2)
+  fieldLabel     String?  @map("field_label")
+  isRequired     Boolean  @default(true) @map("is_required")
+  signatureType  String   @default("image") @map("signature_type")
+  createdBy      String?  @map("created_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  signatures DocumentSignature[]
+
+  @@map("document_signature_fields")
+}
+
+model DocumentSignature {
+  id                Int      @id @default(autoincrement())
+  documentId        Int      @map("document_id")
+  signatureFieldId  Int?     @map("signature_field_id")
+  username          String
+  signatureImage    String?  @map("signature_image") @db.Text
+  signatureHash     String?  @map("signature_hash")
+  certificateSerial String?  @map("certificate_serial")
+  signatureType     String   @default("image") @map("signature_type")
+  signedAt          DateTime @default(now()) @map("signed_at")
+  ipAddress         String?  @map("ip_address")
+  userAgent         String?  @map("user_agent")
+  consentGiven      Boolean  @default(false) @map("consent_given")
+  fieldPageNumber   Int?     @map("field_page_number")
+  fieldXPosition    Decimal? @map("field_x_position") @db.Decimal(10, 2)
+  fieldYPosition    Decimal? @map("field_y_position") @db.Decimal(10, 2)
+  fieldWidth        Decimal? @map("field_width") @db.Decimal(10, 2)
+  fieldHeight       Decimal? @map("field_height") @db.Decimal(10, 2)
+  fieldLabel        String?  @map("field_label")
+
+  document       Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  signatureField DocumentSignatureField? @relation(fields: [signatureFieldId], references: [id], onDelete: SetNull)
+
+  @@index([username])
+  @@map("document_signatures")
+}
+
+model DocumentTypedField {
+  id          Int      @id @default(autoincrement())
+  documentId  Int      @map("document_id")
+  pageNumber  Int      @default(1) @map("page_number")
+  xPosition   Decimal  @map("x_position") @db.Decimal(10, 2)
+  yPosition   Decimal  @map("y_position") @db.Decimal(10, 2)
+  width       Decimal  @default(200) @db.Decimal(10, 2)
+  height      Decimal  @default(30) @db.Decimal(10, 2)
+  fieldLabel  String?  @map("field_label")
+  fieldType   String   @default("text") @map("field_type")
+  isRequired  Boolean  @default(true) @map("is_required")
+  placeholder String?
+  createdBy   String?  @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  values   DocumentTypedFieldValue[]
+
+  @@map("document_typed_fields")
+}
+
+model DocumentTypedFieldValue {
+  id           Int      @id @default(autoincrement())
+  documentId   Int      @map("document_id")
+  typedFieldId Int      @map("typed_field_id")
+  username     String
+  fieldValue   String   @map("field_value") @db.Text
+  filledAt     DateTime @default(now()) @map("filled_at")
+  ipAddress    String?  @map("ip_address")
+  userAgent    String?  @map("user_agent")
+
+  document   Document         @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  typedField DocumentTypedField @relation(fields: [typedFieldId], references: [id], onDelete: Cascade)
+
+  @@index([username])
+  @@map("document_typed_field_values")
+}
+
+model UserNotification {
+  id               Int      @id @default(autoincrement())
+  username         String
+  notificationType String   @map("notification_type")
+  notificationId   String   @map("notification_id")
+  isRead           Boolean  @default(false) @map("is_read")
+  readAt           DateTime? @map("read_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@unique([username, notificationType, notificationId])
+  @@index([username])
+  @@map("user_notifications")
+}
+
+// Join: new hires <-> required training videos
+model NewHireRequiredTraining {
+  newHireId Int @map("new_hire_id")
+  videoId   Int @map("video_id")
+
+  @@id([newHireId, videoId])
+  @@map("new_hire_required_training")
+}

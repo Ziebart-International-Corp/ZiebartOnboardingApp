@@ -23,7 +23,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# env (keep example)
+# env (keep example; never commit .env with secrets)
+.env
 .env*.local
 !.env.local.example
 
