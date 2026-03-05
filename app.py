@@ -140,12 +140,12 @@ def _ensure_users_access_revoked_at_column():
     if _users_access_revoked_at_migrated:
         return
     try:
-        db.session.execute(text("SELECT TOP 1 access_revoked_at FROM users"))
+        db.session.execute(text("SELECT access_revoked_at FROM users LIMIT 1"))
         _users_access_revoked_at_migrated = True
     except Exception:
         db.session.rollback()
         try:
-            db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN access_revoked_at DATE NULL"))
             db.session.commit()
         except Exception:
             db.session.rollback()
@@ -161,12 +161,12 @@ def _ensure_users_role_column():
     if _users_role_migrated:
         return
     try:
-        db.session.execute(text("SELECT TOP 1 role FROM users"))
+        db.session.execute(text("SELECT role FROM users LIMIT 1"))
         _users_role_migrated = True
     except Exception:
         db.session.rollback()
         try:
-            db.session.execute(text("ALTER TABLE users ADD role NVARCHAR(20) NULL"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR(20) NULL"))
             db.session.commit()
             db.session.execute(text("UPDATE users SET role = 'user' WHERE role IS NULL"))
             db.session.commit()
@@ -184,17 +184,17 @@ def _ensure_new_hires_finale_columns():
     if _new_hires_finale_migrated:
         return
     for col, sql_type in [
-        ('finale_message', 'NVARCHAR(MAX) NULL'),
-        ('finale_message_sent_at', 'DATETIME NULL'),
-        ('finale_document_id', 'INT NULL'),
-        ('finale_message_dismissed_at', 'DATETIME NULL'),
+        ('finale_message', 'TEXT NULL'),
+        ('finale_message_sent_at', 'TIMESTAMP NULL'),
+        ('finale_document_id', 'INTEGER NULL'),
+        ('finale_message_dismissed_at', 'TIMESTAMP NULL'),
     ]:
         try:
-            db.session.execute(text(f"SELECT TOP 1 {col} FROM new_hires"))
+            db.session.execute(text(f"SELECT {col} FROM new_hires LIMIT 1"))
         except Exception:
             db.session.rollback()
             try:
-                db.session.execute(text(f"ALTER TABLE new_hires ADD {col} {sql_type}"))
+                db.session.execute(text(f"ALTER TABLE new_hires ADD COLUMN {col} {sql_type}"))
                 db.session.commit()
             except Exception:
                 db.session.rollback()
@@ -210,14 +210,14 @@ def _ensure_admin_settings_table():
     if _admin_settings_table_migrated:
         return
     try:
-        db.session.execute(text("SELECT TOP 1 key FROM admin_settings"))
+        db.session.execute(text("SELECT key FROM admin_settings LIMIT 1"))
         _admin_settings_table_migrated = True
         return
     except Exception:
         db.session.rollback()
     try:
         db.session.execute(text(
-            "CREATE TABLE admin_settings (key NVARCHAR(100) PRIMARY KEY, value NVARCHAR(MAX) NULL)"
+            "CREATE TABLE admin_settings (key VARCHAR(100) PRIMARY KEY, value TEXT NULL)"
         ))
         db.session.commit()
         _admin_settings_table_migrated = True
@@ -236,33 +236,33 @@ def _ensure_stores_and_store_id():
     if _stores_migrated:
         return
     try:
-        db.session.execute(text("SELECT TOP 1 id FROM stores"))
+        db.session.execute(text("SELECT id FROM stores LIMIT 1"))
     except Exception:
         db.session.rollback()
         try:
             db.session.execute(text(
-                "CREATE TABLE stores (id INT PRIMARY KEY IDENTITY(1,1), name NVARCHAR(200) NOT NULL, code NVARCHAR(50) NULL, created_at DATETIME NULL)"
+                "CREATE TABLE stores (id SERIAL PRIMARY KEY, name VARCHAR(200) NOT NULL, code VARCHAR(50) NULL, created_at TIMESTAMP NULL)"
             ))
             db.session.commit()
         except Exception:
             db.session.rollback()
     for table, col in [('users', 'store_id'), ('new_hires', 'store_id'), ('documents', 'store_id')]:
         try:
-            db.session.execute(text(f"SELECT TOP 1 {col} FROM {table}"))
+            db.session.execute(text(f"SELECT {col} FROM {table} LIMIT 1"))
         except Exception:
             db.session.rollback()
             try:
-                db.session.execute(text(f"ALTER TABLE {table} ADD {col} INT NULL"))
+                db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER NULL"))
                 db.session.commit()
             except Exception:
                 db.session.rollback()
     try:
-        db.session.execute(text("SELECT TOP 1 id FROM manager_permissions"))
+        db.session.execute(text("SELECT id FROM manager_permissions LIMIT 1"))
     except Exception:
         db.session.rollback()
         try:
             db.session.execute(text(
-                "CREATE TABLE manager_permissions (id INT PRIMARY KEY IDENTITY(1,1), user_id INT NOT NULL, permission_key NVARCHAR(80) NOT NULL)"
+                "CREATE TABLE manager_permissions (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, permission_key VARCHAR(80) NOT NULL)"
             ))
             db.session.commit()
             try:
@@ -273,12 +273,12 @@ def _ensure_stores_and_store_id():
         except Exception:
             db.session.rollback()
     try:
-        db.session.execute(text("SELECT TOP 1 document_id FROM document_stores"))
+        db.session.execute(text("SELECT document_id FROM document_stores LIMIT 1"))
     except Exception:
         db.session.rollback()
         try:
             db.session.execute(text(
-                "CREATE TABLE document_stores (document_id INT NOT NULL, store_id INT NOT NULL, "
+                "CREATE TABLE document_stores (document_id INTEGER NOT NULL, store_id INTEGER NOT NULL, "
                 "PRIMARY KEY (document_id, store_id), "
                 "FOREIGN KEY (document_id) REFERENCES documents(id), "
                 "FOREIGN KEY (store_id) REFERENCES stores(id))"
@@ -2236,20 +2236,20 @@ def dashboard():
 def _ensure_user_task_order_columns():
     """Ensure user_tasks has display_order and depends_on_task_id for ordering and dependencies."""
     try:
-        db.session.execute(text("SELECT TOP 1 display_order FROM user_tasks"))
+        db.session.execute(text("SELECT display_order FROM user_tasks LIMIT 1"))
     except Exception:
         db.session.rollback()
         try:
-            db.session.execute(text("ALTER TABLE user_tasks ADD display_order INT NULL"))
+            db.session.execute(text("ALTER TABLE user_tasks ADD COLUMN display_order INTEGER NULL"))
             db.session.commit()
         except Exception:
             db.session.rollback()
     try:
-        db.session.execute(text("SELECT TOP 1 depends_on_task_id FROM user_tasks"))
+        db.session.execute(text("SELECT depends_on_task_id FROM user_tasks LIMIT 1"))
     except Exception:
         db.session.rollback()
         try:
-            db.session.execute(text("ALTER TABLE user_tasks ADD depends_on_task_id INT NULL"))
+            db.session.execute(text("ALTER TABLE user_tasks ADD COLUMN depends_on_task_id INTEGER NULL"))
             db.session.commit()
         except Exception:
             db.session.rollback()
@@ -5051,7 +5051,7 @@ def create_new_hire():
         except Exception:
             db.session.rollback()
             try:
-                db.session.execute(text("ALTER TABLE new_hires ADD access_revoked_at DATE NULL"))
+                db.session.execute(text("ALTER TABLE new_hires ADD COLUMN access_revoked_at DATE NULL"))
                 db.session.commit()
             except Exception:
                 db.session.rollback()
@@ -5060,7 +5060,7 @@ def create_new_hire():
         except Exception:
             db.session.rollback()
             try:
-                db.session.execute(text("ALTER TABLE new_hires ADD role_id INT NULL"))
+                db.session.execute(text("ALTER TABLE new_hires ADD COLUMN role_id INTEGER NULL"))
                 db.session.commit()
             except Exception:
                 db.session.rollback()
@@ -7682,7 +7682,7 @@ def users_restore(user_id):
         err_str = (str(e) or '').lower()
         if 'access_revoked_at' in err_str or 'invalid column' in err_str:
             try:
-                db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+                db.session.execute(text("ALTER TABLE users ADD COLUMN access_revoked_at DATE NULL"))
                 db.session.commit()
                 user.access_revoked_at = None
                 db.session.commit()
@@ -7707,7 +7707,7 @@ def manage_roles():
             db.create_all()
             roles = Role.query.order_by(Role.name).all()
         except Exception as e:
-            flash(f'Database setup needed for roles. Run: CREATE TABLE roles (id INT PRIMARY KEY IDENTITY(1,1), name NVARCHAR(150) NOT NULL UNIQUE, description NVARCHAR(500), created_at DATETIME); CREATE TABLE role_documents (role_id INT NOT NULL, document_id INT NOT NULL, PRIMARY KEY (role_id, document_id)); ALTER TABLE new_hires ADD role_id INT NULL;', 'error')
+            flash(f'Database setup needed for roles. Run: CREATE TABLE roles (id SERIAL PRIMARY KEY, name VARCHAR(150) NOT NULL UNIQUE, description VARCHAR(500), created_at TIMESTAMP); CREATE TABLE role_documents (role_id INTEGER NOT NULL, document_id INTEGER NOT NULL, PRIMARY KEY (role_id, document_id)); ALTER TABLE new_hires ADD COLUMN role_id INTEGER NULL;', 'error')
             roles = []
     return render_template_string('''
     <!DOCTYPE html>
@@ -8415,11 +8415,11 @@ def manage_documents():
         err_str = (str(e) or '').lower()
         if 'display_name' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
             try:
-                db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
+                db.session.execute(text("ALTER TABLE documents ADD COLUMN display_name VARCHAR(255) NULL"))
                 db.session.commit()
             except Exception as alter_e:
                 db.session.rollback()
-                flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL;', 'error')
+                flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD COLUMN display_name VARCHAR(255) NULL;', 'error')
                 return redirect(url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard'))
             if current_user.is_manager() and get_current_user_store_id() is not None:
                 sid = get_current_user_store_id()
@@ -11760,7 +11760,7 @@ def _view_documents_impl():
         # Try adding display_name if missing (MSSQL/pyodbc error text can vary)
         err_str = (str(e) or '').lower()
         try:
-            db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
+            db.session.execute(text("ALTER TABLE documents ADD COLUMN display_name VARCHAR(255) NULL"))
             db.session.commit()
         except Exception:
             db.session.rollback()
@@ -16627,7 +16627,7 @@ def new_hire_cancel_access(username):
         err_str = (str(e) or '').lower()
         if 'access_revoked_at' in err_str or 'invalid column' in err_str:
             try:
-                db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+                db.session.execute(text("ALTER TABLE users ADD COLUMN access_revoked_at DATE NULL"))
                 db.session.commit()
                 user.access_revoked_at = date.today()
                 db.session.commit()
@@ -16662,7 +16662,7 @@ def new_hire_restore_access(username):
         err_str = (str(e) or '').lower()
         if 'access_revoked_at' in err_str or 'invalid column' in err_str:
             try:
-                db.session.execute(text("ALTER TABLE users ADD access_revoked_at DATE NULL"))
+                db.session.execute(text("ALTER TABLE users ADD COLUMN access_revoked_at DATE NULL"))
                 db.session.commit()
                 user.access_revoked_at = None
                 db.session.commit()

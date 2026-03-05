@@ -29,24 +29,22 @@ ADMIN_GROUP = os.environ.get('ADMIN_GROUP', 'Domain Admins')  # AD group name
 # 'ldap' - Use LDAP/AD queries (requires domain controller access)
 AUTH_METHOD = os.environ.get('AUTH_METHOD', 'windows')
 
-# Database (SQL Server)
-# Connection string format: Server=server,port;Database=dbname;User Id=user;Password=pass
-DB_SERVER = os.environ.get('DB_SERVER', 'roadrunner')
-DB_PORT = os.environ.get('DB_PORT', '42278')
-DB_NAME = os.environ.get('DB_NAME', 'NewHireApp')
-DB_USER = os.environ.get('DB_USER', 'Developer')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', '1Shot@OneKill')
+# Database (CockroachDB / PostgreSQL)
+# Set DATABASE_URL for CockroachDB, e.g.:
+# postgresql://user:password@host:26257/dbname?sslmode=verify-full
+DB_SERVER = os.environ.get('DB_SERVER', '')
+DB_PORT = os.environ.get('DB_PORT', '26257')
+DB_NAME = os.environ.get('DB_NAME', 'ziebartonboarding')
+DB_USER = os.environ.get('DB_USER', '')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', '')
 DB_MAX_POOL_SIZE = os.environ.get('DB_MAX_POOL_SIZE', '300')
 
-# SQLAlchemy connection string for SQL Server
-# Using pyodbc driver (requires ODBC Driver for SQL Server)
 from urllib.parse import quote_plus
-DB_PASSWORD_ENCODED = quote_plus(DB_PASSWORD)
-# Connection string format: mssql+pyodbc://user:password@server:port/database?driver=ODBC+Driver+18+for+SQL+Server
-# URL encode the driver name: ODBC Driver 18 for SQL Server -> ODBC+Driver+18+for+SQL+Server
-SQLALCHEMY_DATABASE_URI = os.environ.get(
-    'DATABASE_URL',
-    f'mssql+pyodbc://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes'
+_db_password_encoded = quote_plus(DB_PASSWORD) if DB_PASSWORD else ''
+# Prefer DATABASE_URL (CockroachDB/PostgreSQL). Otherwise build from parts.
+SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or (
+    f'postgresql://{DB_USER}:{_db_password_encoded}@{DB_SERVER}:{DB_PORT}/{DB_NAME}?sslmode=verify-full'
+    if (DB_SERVER and DB_USER) else ''
 )
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 SQLALCHEMY_ENGINE_OPTIONS = {
