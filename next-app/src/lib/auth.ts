@@ -14,7 +14,13 @@ export const authOptions: NextAuthOptions = {
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) return null;
         const email = credentials.email.trim().toLowerCase();
-        const user = await getUserByEmail(email);
+        let user;
+        try {
+          user = await getUserByEmail(email);
+        } catch (err) {
+          console.error("[auth] getUserByEmail failed:", (err as Error).message);
+          return null;
+        }
         if (!user?.password_hash) return null;
         const ok = await compare(credentials.password, user.password_hash);
         if (!ok) return null;
