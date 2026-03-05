@@ -88,7 +88,9 @@ export async function getUserByEmail(email: string): Promise<DbUser | null> {
       SELECT id, username, email, password_hash, full_name, role
       FROM users WHERE lower(email) = ${normalized} AND access_revoked_at IS NULL LIMIT 1
     `;
-    return (rows as DbUser[])[0] ?? null;
+    const user = (rows as DbUser[])[0] ?? null;
+    console.log("[auth db] direct, found=", user ? 1 : 0);
+    return user;
   }
   const encoded = encodeURIComponent(normalized);
   const rows = await fetchApi<DbUser[]>("/users", {
