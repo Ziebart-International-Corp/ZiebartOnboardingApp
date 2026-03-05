@@ -1,0 +1,16 @@
+{
+  "name": "ziebart-onboarding-app",
+  "private": true,
+  "description": "Ziebart Onboarding: Flask API + Next.js frontend (next-app)",
+  "scripts": {
+    "build": "cd next-app && npm ci && npm run build",
+    "dev:next": "cd next-app && npm run dev",
+    "start:next": "cd next-app && npm run start"
+  },
+  "dependencies": {
+    "next": "14.2.18"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
