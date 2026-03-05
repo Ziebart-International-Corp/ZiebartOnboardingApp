@@ -11,31 +11,24 @@ export default async function NewHiresPage() {
   const newHires = await getNewHires(true);
 
   return (
-    <main className="min-h-screen bg-zinc-950 text-white">
-      <header className="border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
-        <Link href="/dashboard" className="text-amber-500 hover:underline">← Dashboard</Link>
-        <Link href="/api/auth/signout" className="text-sm text-zinc-400 hover:underline">Sign out</Link>
-      </header>
-
-      <div className="p-6 max-w-4xl mx-auto">
-        <h1 className="text-2xl font-bold mb-6">New Hires</h1>
+    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 max-w-4xl">
+      <h1 className="text-2xl font-bold text-black mb-6">New Hires</h1>
 
         {newHires.length === 0 ? (
-          <p className="text-zinc-400">No new hires yet.</p>
+          <p className="text-gray-500">No new hires yet.</p>
         ) : (
           <ul className="space-y-2">
             {newHires.map((n) => (
-              <li key={n.id} className="flex items-center justify-between py-3 border-b border-zinc-800">
+              <li key={n.id} className="flex items-center justify-between py-3 border-b border-gray-200">
                 <div>
-                  <span className="font-medium">{n.first_name} {n.last_name}</span>
-                  <span className="text-zinc-400 ml-2">({n.email})</span>
+                  <span className="font-medium text-black">{n.first_name} {n.last_name}</span>
+                  <span className="text-gray-500 ml-2">({n.email})</span>
                 </div>
-                <span className="text-sm text-zinc-400 capitalize">{n.status}</span>
+                <span className="text-sm text-gray-500 capitalize">{n.status}</span>
               </li>
             ))}
           </ul>
         )}
-      </div>
-    </main>
+    </div>
   );
 }

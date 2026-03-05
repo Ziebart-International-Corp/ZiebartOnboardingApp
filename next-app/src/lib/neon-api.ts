@@ -89,7 +89,6 @@ export async function getUserByEmail(email: string): Promise<DbUser | null> {
       FROM users WHERE lower(email) = ${normalized} AND access_revoked_at IS NULL LIMIT 1
     `;
     const user = (rows as DbUser[])[0] ?? null;
-    console.log("[auth db] direct, found=", user ? 1 : 0);
     return user;
   }
   const encoded = encodeURIComponent(normalized);
@@ -228,4 +227,82 @@ export async function getDocumentsCount(): Promise<number> {
     return (rows as { c: number }[])[0]?.c ?? 0;
   }
   return fetchCount("/documents");
+}
+
+// --- External links (table: external_links) ---
+export interface DbExternalLink {
+  id: number;
+  title: string;
+  url: string;
+  description: string | null;
+  icon: string;
+  image_filename: string | null;
+  order: number;
+  is_active: boolean;
+}
+
+export async function getExternalLinks(): Promise<DbExternalLink[]> {
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = await sql`
+      SELECT id, title, url, description, icon, image_filename, "order", is_active
+      FROM external_links WHERE is_active = true ORDER BY "order" ASC, created_at ASC
+    `;
+    return rows as DbExternalLink[];
+  }
+  const rows = await fetchApi<DbExternalLink[]>("/external_links", {
+    searchParams: { is_active: "eq.true", order: "order.asc", select: "id,title,url,description,icon,image_filename,order,is_active" },
+  });
+  return Array.isArray(rows) ? rows : [];
+}
+
+// --- User tasks (table: user_tasks) ---
+export interface DbUserTask {
+  id: number;
+  task_title: string;
+  task_description: string | null;
+  task_type: string;
+  document_id: number | null;
+  status: string;
+  completed_at: string | null;
+}
+
+export async function getUserTasks(username: string): Promise<DbUserTask[]> {
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = await sql`
+      SELECT id, task_title, task_description, task_type, document_id, status, completed_at
+      FROM user_tasks WHERE username = ${username} ORDER BY assigned_at ASC
+    `;
+    return rows as DbUserTask[];
+  }
+  const enc = encodeURIComponent(username);
+  const rows = await fetchApi<DbUserTask[]>("/user_tasks", {
+    searchParams: { username: `eq.${enc}`, select: "id,task_title,task_description,task_type,document_id,status,completed_at", order: "assigned_at.asc" },
+  });
+  return Array.isArray(rows) ? rows : [];
+}
+
+// --- Document assignments (for "Sign Document" tasks) ---
+export interface DbDocumentAssignmentWithDoc {
+  id: number;
+  document_id: number;
+  document_display_name: string | null;
+  is_completed: boolean;
+  completed_at: string | null;
+}
+
+export async function getDocumentAssignmentsWithDoc(username: string): Promise<DbDocumentAssignmentWithDoc[]> {
+  if (useDirect()) {
+    const sql = getSql();
+    const rows = await sql`
+      SELECT da.id, da.document_id, d.display_name AS document_display_name, da.is_completed, da.completed_at
+      FROM document_assignments da
+      LEFT JOIN documents d ON d.id = da.document_id
+      WHERE da.username = ${username}
+      ORDER BY da.assigned_at ASC
+    `;
+    return rows as DbDocumentAssignmentWithDoc[];
+  }
+  return [];
 }
