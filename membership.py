@@ -1,11 +1,17 @@
 """
 Windows Domain Group Membership Module
-Handles retrieval of user groups from Windows domain/Active Directory
+Handles retrieval of user groups from Windows domain/Active Directory.
+On non-Windows (e.g. Linux), win32 modules are unavailable; functions return [].
 """
-import win32security
-import win32api
-import win32net
-import win32netcon
+try:
+    import win32security
+    import win32api
+    import win32net
+    import win32netcon
+    _WIN32_AVAILABLE = True
+except ImportError:
+    win32security = win32api = win32net = win32netcon = None
+    _WIN32_AVAILABLE = False
 
 
 def get_local_groups(username):
@@ -15,6 +21,8 @@ def get_local_groups(username):
     Returns: Local machine groups the user belongs to
     Example: Groups like "Administrators", "Users" on the local computer
     """
+    if not _WIN32_AVAILABLE:
+        return []
     groups = []
     try:
         # Get local groups for the user
@@ -45,6 +53,8 @@ def get_token_groups():
     Returns: Domain groups and local groups from the user's security token
     Most important for domain groups - includes nested groups
     """
+    if not _WIN32_AVAILABLE:
+        return []
     groups = []
     try:
         # Open the current process token
@@ -97,6 +107,8 @@ def get_all_domain_groups(domain=None):
     - Enumerates all groups from the domain controller
     Returns: All groups available in the domain (not specific to a user)
     """
+    if not _WIN32_AVAILABLE:
+        return []
     groups = []
     try:
         if not domain:
