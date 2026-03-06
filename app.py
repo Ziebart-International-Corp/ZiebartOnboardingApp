@@ -21836,9 +21836,10 @@ def delete_training_video():
         return redirect(url_for('manage_training'))
     
     try:
-        # Delete file
-        if os.path.exists(video.file_path):
-            os.remove(video.file_path)
+        # Delete file only if it's a local path (not a URL e.g. Vercel Blob)
+        fp = (video.file_path or '').strip()
+        if fp and not (fp.startswith('http://') or fp.startswith('https://')) and os.path.exists(fp):
+            os.remove(fp)
         
         # Delete questions and answers
         for question in video.questions:
@@ -22534,20 +22535,21 @@ def view_training_video(video_id):
 @app.route('/training/<int:video_id>/video')
 @login_required
 def serve_training_video(video_id):
-    """Serve training video file"""
+    """Serve training video file (local path or redirect to URL e.g. Vercel Blob)."""
     video = TrainingVideo.query.get(video_id)
     
     if not video:
         return "Video not found", 404
     
-    # Check permissions
     if not video.is_active:
         return "Video not available", 403
     
-    if not os.path.exists(video.file_path):
-        return "Video file not found", 404
-    
-    return send_file(video.file_path, mimetype='video/mp4')
+    path_or_url = (video.file_path or '').strip()
+    if path_or_url.startswith('http://') or path_or_url.startswith('https://'):
+        return redirect(path_or_url)
+    if path_or_url and os.path.exists(path_or_url):
+        return send_file(path_or_url, mimetype='video/mp4')
+    return "Video file not found", 404
 
 
 @app.route('/uploads/ziebart.svg')
