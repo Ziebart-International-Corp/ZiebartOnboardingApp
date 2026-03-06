@@ -1,0 +1,8 @@
+[project]
+name = "ziebart-onboarding"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = []  # use requirements.txt for install
+
+[project.scripts]
+app = "app:app"
