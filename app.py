@@ -21296,6 +21296,7 @@ def manage_training():
                             <th>Questions</th>
                             <th>Passing Score</th>
                             <th>Status</th>
+                            <th>Video URL (Blob)</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -21310,6 +21311,16 @@ def manage_training():
                                 <span class="badge badge-{{ 'active' if video.is_active else 'inactive' }}">
                                     {{ 'Active' if video.is_active else 'Inactive' }}
                                 </span>
+                            </td>
+                            <td style="max-width: 280px;">
+                                <form method="POST" action="{{ url_for('set_training_video_url') }}" style="display: flex; gap: 6px; align-items: center;">
+                                    <input type="hidden" name="video_id" value="{{ video.id }}">
+                                    <input type="url" name="url" value="{{ video.file_path if (video.file_path or '').startswith('http') else '' }}" placeholder="Paste Vercel Blob URL" style="flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px;">
+                                    <button type="submit" class="btn btn-primary btn-small">Set URL</button>
+                                </form>
+                                {% if video.file_path and not video.file_path.startswith('http') %}
+                                <small style="color: #888;">Local file (set URL above for Vercel)</small>
+                                {% endif %}
                             </td>
                             <td>
                                 <a href="{{ url_for('manage_video_quiz', video_id=video.id) }}" class="btn btn-primary btn-small">Manage Quiz</a>
@@ -21864,6 +21875,35 @@ def delete_training_video():
         db.session.rollback()
         flash(f'Error deleting video: {str(e)}', 'error')
     
+    return redirect(url_for('manage_training'))
+
+
+@app.route('/admin/training/set-video-url', methods=['POST'])
+@admin_required
+def set_training_video_url():
+    """Set training video file_path to a URL (e.g. Vercel Blob). Use when hosting on Vercel."""
+    video_id = request.form.get('video_id', type=int)
+    url = (request.form.get('url') or '').strip()
+    if not video_id:
+        flash('Video ID required.', 'error')
+        return redirect(url_for('manage_training'))
+    video = TrainingVideo.query.get(video_id)
+    if not video:
+        flash('Video not found.', 'error')
+        return redirect(url_for('manage_training'))
+    if not url:
+        flash('URL is required.', 'error')
+        return redirect(url_for('manage_training'))
+    if not (url.startswith('http://') or url.startswith('https://')):
+        flash('URL must start with http:// or https://', 'error')
+        return redirect(url_for('manage_training'))
+    try:
+        video.file_path = url
+        db.session.commit()
+        flash(f'Video URL updated for "{video.title}".', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating URL: {str(e)}', 'error')
     return redirect(url_for('manage_training'))
 
 
