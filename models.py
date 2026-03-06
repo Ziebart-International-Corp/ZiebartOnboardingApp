@@ -625,3 +625,33 @@ class AdminSetting(db.Model):
     def __repr__(self):
         return f'<AdminSetting {self.key}>'
 
+
+class Store(db.Model):
+    """Store/location for manager-scoped onboarding."""
+    __tablename__ = 'stores'
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(200), nullable=False)
+    code = db.Column(db.String(50), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=True)
+
+    def __repr__(self):
+        return f'<Store {self.name}>'
+
+
+class ManagerPermission(db.Model):
+    """Per-user manager permission keys (e.g. edit_new_hire, revoke_access)."""
+    __tablename__ = 'manager_permissions'
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    permission_key = db.Column(db.String(80), nullable=False)
+
+    def __repr__(self):
+        return f'<ManagerPermission user_id={self.user_id} {self.permission_key}>'
+
+
+# Association: which documents are visible to which stores (empty = all stores)
+document_stores = db.Table('document_stores',
+    db.Column('document_id', db.Integer, db.ForeignKey('documents.id'), primary_key=True),
+    db.Column('store_id', db.Integer, db.ForeignKey('stores.id'), primary_key=True)
+)
+
