@@ -7,6 +7,13 @@ from pathlib import Path
 # Base directory
 BASE_DIR = Path(__file__).parent
 
+# Load .env from project root so DATABASE_URL etc. are set
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / '.env')
+except ImportError:
+    pass
+
 # Secret key for sessions (change in production!)
 SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 
@@ -36,8 +43,8 @@ ADMIN_GROUP = os.environ.get('ADMIN_GROUP', 'Domain Admins')  # AD group name
 # 'ldap' - Use LDAP/AD queries (requires domain controller access)
 AUTH_METHOD = os.environ.get('AUTH_METHOD', 'windows')
 
-# Database (SQL Server)
-# Connection string format: Server=server,port;Database=dbname;User Id=user;Password=pass
+# Database: SQL Server (ZiebartOnboarding) by default via DB_* env vars.
+# Optionally set DATABASE_URL to a Postgres URL (e.g. Neon) to use PostgreSQL instead.
 DB_SERVER = os.environ.get('DB_SERVER', 'roadrunner')
 DB_PORT = os.environ.get('DB_PORT', '42278')
 DB_NAME = os.environ.get('DB_NAME', 'NewHireApp')
@@ -45,22 +52,25 @@ DB_USER = os.environ.get('DB_USER', 'Developer')
 DB_PASSWORD = os.environ.get('DB_PASSWORD', '1Shot@OneKill')
 DB_MAX_POOL_SIZE = os.environ.get('DB_MAX_POOL_SIZE', '300')
 
-# SQLAlchemy connection string for SQL Server
-# Using pyodbc driver (requires ODBC Driver for SQL Server)
-from urllib.parse import quote_plus
-DB_PASSWORD_ENCODED = quote_plus(DB_PASSWORD)
-# Connection string format: mssql+pyodbc://user:password@server:port/database?driver=ODBC+Driver+18+for+SQL+Server
-# URL encode the driver name: ODBC Driver 18 for SQL Server -> ODBC+Driver+18+for+SQL+Server
-SQLALCHEMY_DATABASE_URI = os.environ.get(
-    'DATABASE_URL',
-    f'mssql+pyodbc://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes'
-)
+_database_url = os.environ.get('DATABASE_URL', '').strip()
+if _database_url and (_database_url.startswith('postgresql://') or _database_url.startswith('postgres://')):
+    SQLALCHEMY_DATABASE_URI = _database_url
+    IS_POSTGRES = True
+else:
+    from urllib.parse import quote_plus
+    DB_PASSWORD_ENCODED = quote_plus(DB_PASSWORD)
+    SQLALCHEMY_DATABASE_URI = (
+        f'mssql+pyodbc://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}'
+        f'?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes'
+    )
+    IS_POSTGRES = False
+
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 SQLALCHEMY_ENGINE_OPTIONS = {
-    'pool_size': int(DB_MAX_POOL_SIZE),
+    'pool_size': 10 if (_database_url and (_database_url.startswith('postgresql://') or _database_url.startswith('postgres://'))) else int(DB_MAX_POOL_SIZE),
     'max_overflow': 0,
-    'pool_pre_ping': True,  # Verify connections before using
-    'pool_recycle': 3600,   # Recycle connections after 1 hour
+    'pool_pre_ping': True,
+    'pool_recycle': 3600,
 }
 
 # Session Configuration

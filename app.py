@@ -10,7 +10,7 @@ from models import (db, NewHire, User as UserModel, Document, ChecklistItem, New
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
                     DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, document_stores)
 from membership import get_token_groups, get_local_groups
-from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, \
+from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, IS_POSTGRES, \
     MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
 from datetime import datetime
 import os
@@ -299,17 +299,35 @@ def _ensure_stores_and_store_id():
     _stores_migrated = True
 
 
+_postgres_schema_created = False
+
+
+def _ensure_postgres_schema():
+    """For Neon/Postgres: create all tables from models (one-time)."""
+    global _postgres_schema_created
+    if _postgres_schema_created or not IS_POSTGRES:
+        return
+    try:
+        db.create_all()
+        _postgres_schema_created = True
+    except Exception:
+        pass
+
+
 @app.before_request
 def _run_users_migration_if_needed():
     """Run one-time migration for users.access_revoked_at, new_hires finale columns, admin_settings, stores before any request."""
     if request.path.startswith('/static'):
         return
     try:
-        _ensure_users_access_revoked_at_column()
-        _ensure_users_role_column()
-        _ensure_new_hires_finale_columns()
-        _ensure_admin_settings_table()
-        _ensure_stores_and_store_id()
+        if IS_POSTGRES:
+            _ensure_postgres_schema()
+        else:
+            _ensure_users_access_revoked_at_column()
+            _ensure_users_role_column()
+            _ensure_new_hires_finale_columns()
+            _ensure_admin_settings_table()
+            _ensure_stores_and_store_id()
     except Exception:
         pass
 

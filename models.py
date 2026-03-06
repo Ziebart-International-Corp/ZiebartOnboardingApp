@@ -19,6 +19,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=True)  # Werkzeug hashed password
     role = db.Column(db.String(20), default='user')  # 'admin' or 'user'
     access_revoked_at = db.Column(db.Date, nullable=True)  # When set (and today >= this date), user cannot log in
+    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)  # For managers: scoped to store
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_login = db.Column(db.DateTime)
     
@@ -48,6 +49,7 @@ class NewHire(db.Model):
     start_date = db.Column(db.Date)
     access_revoked_at = db.Column(db.Date, nullable=True)  # After this date user cannot log in
     status = db.Column(db.String(50), default='pending')  # pending, active, completed
+    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)
     created_by = db.Column(db.String(100))  # Username of creator
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -99,6 +101,7 @@ class Document(db.Model):
     file_type = db.Column(db.String(100))  # MIME type
     description = db.Column(db.Text)
     is_visible = db.Column(db.Boolean, default=False)  # Visibility toggle for regular users
+    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)
     uploaded_by = db.Column(db.String(100))  # Username of uploader
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
