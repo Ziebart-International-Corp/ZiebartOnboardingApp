@@ -472,6 +472,12 @@ def allowed_video_file(filename):
 
 
 # Routes
+@app.route('/health')
+def health():
+    """Lightweight health check (no DB). Use for Vercel/lb checks."""
+    return jsonify({"status": "ok"}), 200
+
+
 @app.route('/')
 def index():
     """Home: redirect to dashboard if logged in, else to login."""
