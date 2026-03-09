@@ -21486,6 +21486,13 @@ def manage_training():
         </div>
         
         <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
             {% if not is_manager_view %}
             <div class="admin-panel">
                 <h2>Upload Training Video</h2>
@@ -21916,7 +21923,13 @@ def manage_video_quiz(video_id):
         </div>
         
         <div class="container">
-            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
             <div class="admin-panel">
                 <h2>Add Quiz Question</h2>
                 <form method="POST" action="{{ url_for('add_quiz_question', video_id=video.id) }}">
@@ -22136,12 +22149,13 @@ def delete_training_video():
         db.session.execute(
             new_hire_required_training.delete().where(new_hire_required_training.c.video_id == vid)
         )
-        # 3. User quiz responses (FK to quiz_answers) — before deleting answers
-        question_ids = [q.id for q in video.questions]
-        if question_ids:
+        # 3. User quiz responses reference quiz_answers.id — must delete by answer_id before deleting answers
+        answer_ids = [a.id for q in video.questions for a in q.answers]
+        if answer_ids:
             UserQuizResponse.query.filter(
-                UserQuizResponse.question_id.in_(question_ids)
+                UserQuizResponse.answer_id.in_(answer_ids)
             ).delete(synchronize_session=False)
+            db.session.flush()  # emit DELETE so quiz_answers can be removed in same transaction
         # 4. Quiz answers, then questions
         for question in video.questions:
             QuizAnswer.query.filter_by(question_id=question.id).delete()
@@ -22164,7 +22178,9 @@ def delete_training_video():
         flash(f'Training video "{video.title}" deleted successfully.', 'success')
     except Exception as e:
         db.session.rollback()
-        flash(f'Error deleting video: {str(e)}', 'error')
+        # Show a short message; full detail can be logged
+        err_msg = str(e).split('DETAIL:')[0].strip() if 'DETAIL:' in str(e) else str(e)
+        flash(f'Error deleting video: {err_msg}', 'error')
     return redirect(url_for('manage_training'))
 
 
