@@ -411,6 +411,22 @@ def get_current_user_store_id():
         return None
 
 
+def _ensure_document_deleted_at_column():
+    """Ensure documents table has deleted_at column (for soft-delete). Safe to call on every request; no-op if column exists."""
+    try:
+        if IS_POSTGRES:
+            db.session.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL"))
+        else:
+            db.session.execute(text("ALTER TABLE documents ADD deleted_at DATETIME NULL"))
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        err_str = (str(e) or '').lower()
+        if 'already exists' in err_str or 'duplicate column' in err_str or 'existing' in err_str:
+            pass  # column already there
+        # else: column might not exist and ALTER failed (e.g. permissions); later queries may fail
+
+
 def documents_visible_to_store_query(store_id, base_filter=None):
     """Return Document query filtered to active (not soft-deleted), is_visible, and (all stores or store_id in document's stores).
     If store_id is None, only is_visible and active are applied (admin view). base_filter is an optional extra filter (e.g. has signature fields)."""
@@ -876,6 +892,11 @@ def welcome():
 def dashboard():
     """User dashboard"""
     try:
+        # Ensure soft-delete column exists (e.g. first request after deploy on Neon)
+        try:
+            _ensure_document_deleted_at_column()
+        except Exception:
+            pass
         is_admin = current_user.is_admin()
         
         # Get new hire record for current user (guard None first/last name)
@@ -5317,6 +5338,10 @@ def admin_dashboard():
 
 def _admin_dashboard_impl():
     """Admin dashboard implementation (called from admin_dashboard)."""
+    try:
+        _ensure_document_deleted_at_column()
+    except Exception:
+        pass
     total_users = 0
     total_new_hires = 0
     admin_users = 0
