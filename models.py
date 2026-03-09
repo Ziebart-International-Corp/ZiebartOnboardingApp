@@ -105,6 +105,7 @@ class Document(db.Model):
     uploaded_by = db.Column(db.String(100))  # Username of uploader
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = db.Column(db.DateTime, nullable=True)  # Soft-delete: when set, document is archived but kept for history
     
     def __repr__(self):
         return f'<Document {self.original_filename}>'

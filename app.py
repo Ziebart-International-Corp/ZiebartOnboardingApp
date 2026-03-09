@@ -412,9 +412,9 @@ def get_current_user_store_id():
 
 
 def documents_visible_to_store_query(store_id, base_filter=None):
-    """Return Document query filtered to is_visible and (all stores or store_id in document's stores).
-    If store_id is None, only is_visible is applied (admin view). base_filter is an optional extra filter (e.g. has signature fields)."""
-    q = Document.query.filter(Document.is_visible == True)
+    """Return Document query filtered to active (not soft-deleted), is_visible, and (all stores or store_id in document's stores).
+    If store_id is None, only is_visible and active are applied (admin view). base_filter is an optional extra filter (e.g. has signature fields)."""
+    q = Document.query.filter(Document.is_visible == True, Document.deleted_at.is_(None))
     if store_id is not None:
         # Document visible to this store if: no rows in document_stores (all stores) OR has row with this store_id
         no_stores = ~exists().where(document_stores.c.document_id == Document.id)
@@ -1075,7 +1075,7 @@ def dashboard():
                 else:
                     visible_documents = []
             else:
-                visible_documents = Document.query.filter_by(is_visible=True).order_by(Document.created_at.desc()).limit(3).all()
+                visible_documents = Document.query.filter_by(is_visible=True).filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).limit(3).all()
         except Exception as e:
             visible_documents = []
         
@@ -5346,7 +5346,7 @@ def _admin_dashboard_impl():
         db.session.rollback()
         app.logger.warning(f"admin_dashboard: admin_users failed: {e}")
     try:
-        forms_completed = Document.query.filter_by(is_visible=True).count()
+        forms_completed = Document.query.filter_by(is_visible=True).filter(Document.deleted_at.is_(None)).count()
     except Exception as e:
         db.session.rollback()
         app.logger.warning(f"admin_dashboard: forms_completed failed: {e}")
@@ -7151,7 +7151,7 @@ def manage_stores():
     for store in stores:
         managers_count = UserModel.query.filter_by(store_id=store.id, role='manager').count()
         users_count = UserModel.query.filter_by(store_id=store.id, role='user').count()
-        forms_count = Document.query.filter_by(store_id=store.id).count()
+        forms_count = Document.query.filter_by(store_id=store.id).filter(Document.deleted_at.is_(None)).count()
         store_stats.append({
             'store': store,
             'managers_count': managers_count,
@@ -7240,7 +7240,7 @@ def store_detail(store_id):
         return redirect(url_for('manage_stores'))
     managers = UserModel.query.filter_by(store_id=store_id, role='manager').order_by(UserModel.username).all()
     users = UserModel.query.filter_by(store_id=store_id, role='user').order_by(UserModel.username).all()
-    forms = Document.query.filter_by(store_id=store_id).order_by(Document.original_filename).all()
+    forms = Document.query.filter_by(store_id=store_id).filter(Document.deleted_at.is_(None)).order_by(Document.original_filename).all()
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -8470,33 +8470,60 @@ def manage_documents():
     if not current_user.is_admin() and not manager_has_permission('manage_documents'):
         abort(403)
     is_manager_view = current_user.is_manager()
+    show_archived = request.args.get('archived') in ('1', 'true', 'yes')
+    store_id = get_current_user_store_id()
     try:
-        store_id = get_current_user_store_id()
-        if current_user.is_manager() and store_id is not None:
-            # Only documents visible to this store (is_visible and assigned to this store or all stores)
-            q = documents_visible_to_store_query(store_id).order_by(Document.created_at.desc())
-            documents = q.all()
+        if show_archived:
+            # Archived list: deleted_at is not None; same store scope for managers
+            q = Document.query.filter(Document.deleted_at.isnot(None))
+            if current_user.is_manager() and store_id is not None:
+                no_stores = ~exists().where(document_stores.c.document_id == Document.id)
+                in_store = exists().where(and_(document_stores.c.document_id == Document.id, document_stores.c.store_id == store_id))
+                q = q.filter(Document.is_visible == True).filter(or_(no_stores, in_store))
+            documents = q.order_by(Document.created_at.desc()).all()
         else:
-            documents = Document.query.order_by(Document.created_at.desc()).all()
+            if current_user.is_manager() and store_id is not None:
+                q = documents_visible_to_store_query(store_id).order_by(Document.created_at.desc())
+                documents = q.all()
+            else:
+                documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
     except Exception as e:
-        # If display_name column is missing (existing DBs), add it and retry
+        # If display_name or deleted_at column is missing (existing DBs), add and retry
         db.session.rollback()
         err_str = (str(e) or '').lower()
-        if 'display_name' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
+        if 'display_name' in err_str or 'deleted_at' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
             try:
-                db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
+                if 'display_name' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
+                    db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
+                if 'deleted_at' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
+                    if IS_POSTGRES:
+                        db.session.execute(text("ALTER TABLE documents ADD COLUMN deleted_at TIMESTAMP NULL"))
+                    else:
+                        db.session.execute(text("ALTER TABLE documents ADD deleted_at DATETIME NULL"))
                 db.session.commit()
             except Exception as alter_e:
                 db.session.rollback()
-                flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL;', 'error')
+                flash('Database update needed. Run: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL; ALTER TABLE documents ADD deleted_at DATETIME NULL; (Postgres: deleted_at TIMESTAMP NULL)', 'error')
                 return redirect(url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard'))
             if current_user.is_manager() and get_current_user_store_id() is not None:
                 sid = get_current_user_store_id()
                 documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
             else:
-                documents = Document.query.order_by(Document.created_at.desc()).all()
+                documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
         else:
             raise
+    # Archived count (for "View archived (N)" link when viewing active list)
+    archived_count = 0
+    if not show_archived:
+        try:
+            qa = Document.query.filter(Document.deleted_at.isnot(None))
+            if current_user.is_manager() and store_id is not None:
+                no_stores = ~exists().where(document_stores.c.document_id == Document.id)
+                in_store = exists().where(and_(document_stores.c.document_id == Document.id, document_stores.c.store_id == store_id))
+                qa = qa.filter(Document.is_visible == True).filter(or_(no_stores, in_store))
+            archived_count = qa.count()
+        except Exception:
+            archived_count = 0
     # For managers: only count signatures from users at their store
     store_usernames = None
     if is_manager_view and store_id is not None:
@@ -8525,7 +8552,7 @@ def manage_documents():
             sid = get_current_user_store_id()
             documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
         else:
-            documents = Document.query.order_by(Document.created_at.desc()).all()
+            documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
         for doc in documents:
             doc.signature_fields_count = 0
             doc.signatures_count = 0
@@ -9061,9 +9088,13 @@ def manage_documents():
     <body>
         <div class="header">
             <div class="header-content">
-                <h1>📄 Manage Documents</h1>
+                <h1>📄 {% if show_archived %}Archived Documents{% else %}Manage Documents{% endif %}</h1>
             </div>
+            {% if show_archived %}
+            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to active documents</a>
+            {% else %}
             <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            {% endif %}
         </div>
         
         <div class="container">
@@ -9074,7 +9105,7 @@ def manage_documents():
                 {% endfor %}
             {% endif %}
             {% endwith %}
-            {% if not is_manager_view %}
+            {% if not is_manager_view and not show_archived %}
             <div class="admin-panel collapsible-upload-panel">
                 <button type="button" class="collapsible-header" id="upload-section-toggle" aria-expanded="true" aria-controls="upload-form-body">
                     <span class="collapsible-chevron" aria-hidden="true">▼</span>
@@ -9118,7 +9149,10 @@ def manage_documents():
             </div>
             {% endif %}
             <div class="admin-panel">
-                <h2>{% if is_manager_view %}Forms for your location (view only){% else %}Uploaded Documents{% endif %}</h2>
+                <h2>{% if show_archived %}Archived documents{% elif is_manager_view %}Forms for your location (view only){% else %}Uploaded Documents{% endif %}</h2>
+                {% if not show_archived and archived_count > 0 %}
+                <p style="margin-bottom: 12px;"><a href="{{ url_for('manage_documents', archived=1) }}" class="btn btn-primary">View archived ({{ archived_count }})</a></p>
+                {% endif %}
                 {% if documents %}
                 <table>
                     <thead>
@@ -9241,12 +9275,18 @@ def manage_documents():
                                             <form method="POST" action="{{ url_for('delete_document') }}" style="display: block;">
                                                 <input type="hidden" name="doc_id" value="{{ doc.id }}">
                                                 <button type="submit" class="actions-dropdown-item danger" style="width: 100%; text-align: left; border: none; background: none; cursor: pointer;" 
-                                                        onclick="return confirm('Delete {{ doc.original_filename }}?')">
-                                                    🗑️ Delete
+                                                        onclick="return confirm('Archive {{ doc.original_filename }}? It will stay in user history and signed copies can still be viewed.')">
+                                                    🗑️ Archive
                                                 </button>
                                             </form>
                                         </div>
                                     </div>
+                                    {% endif %}
+                                    {% if show_archived %}
+                                    <form method="POST" action="{{ url_for('restore_document') }}" style="display: inline;">
+                                        <input type="hidden" name="doc_id" value="{{ doc.id }}">
+                                        <button type="submit" class="action-btn" style="background: #28a745;" title="Restore to active documents">↩️ Restore</button>
+                                    </form>
                                     {% endif %}
                                 </div>
                             </td>
@@ -9255,7 +9295,7 @@ def manage_documents():
                     </tbody>
                 </table>
                 {% else %}
-                <p>{% if is_manager_view %}No forms available for your location.{% else %}No documents uploaded yet.{% endif %}</p>
+                <p>{% if show_archived %}No archived documents.{% elif is_manager_view %}No forms available for your location.{% else %}No documents uploaded yet.{% endif %}</p>
                 {% endif %}
             </div>
         </div>
@@ -9497,7 +9537,7 @@ def manage_documents():
         </script>
     </body>
     </html>
-    ''', documents=documents, stores=stores, store_by_id=store_by_id, is_manager_view=is_manager_view)
+    ''', documents=documents, stores=stores, store_by_id=store_by_id, is_manager_view=is_manager_view, show_archived=show_archived, archived_count=archived_count)
 
 
 @app.route('/admin/upload-document', methods=['POST'])
@@ -9669,10 +9709,37 @@ def set_document_url():
     return redirect(url_for('manage_documents'))
 
 
+@app.route('/admin/restore-document', methods=['POST'])
+@admin_required
+def restore_document():
+    """Restore a soft-deleted document so it appears in active lists again."""
+    doc_id = request.form.get('doc_id')
+    if not doc_id:
+        flash('Document ID is required.', 'error')
+        return redirect(url_for('manage_documents'))
+    try:
+        doc_id = int(doc_id)
+    except (TypeError, ValueError):
+        flash('Invalid document ID.', 'error')
+        return redirect(url_for('manage_documents'))
+    document = Document.query.get(doc_id)
+    if not document:
+        flash('Document not found.', 'error')
+        return redirect(url_for('manage_documents'))
+    try:
+        document.deleted_at = None
+        db.session.commit()
+        flash(f'Document "{document.original_filename}" restored.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error restoring document: {str(e)}', 'error')
+    return redirect(url_for('manage_documents') + '?archived=1')
+
+
 @app.route('/admin/delete-document', methods=['POST'])
 @admin_required
 def delete_document():
-    """Delete a document and all related records (signatures, assignments, etc.)"""
+    """Soft-delete a document: set deleted_at so it is hidden from active lists but kept for user history and signed views."""
     doc_id = request.form.get('doc_id')
     
     if not doc_id:
@@ -9691,34 +9758,29 @@ def delete_document():
         return redirect(url_for('manage_documents'))
     
     original_filename = document.original_filename
-    file_path = document.file_path
     
     try:
-        # Delete related records first (foreign keys would block document delete)
-        DocumentSignature.query.filter_by(document_id=doc_id).delete()
-        DocumentTypedFieldValue.query.filter_by(document_id=doc_id).delete()
-        DocumentSignatureField.query.filter_by(document_id=doc_id).delete()
-        DocumentTypedField.query.filter_by(document_id=doc_id).delete()
-        DocumentAssignment.query.filter_by(document_id=doc_id).delete()
-        # Unlink user tasks that referenced this document (column is nullable)
-        for task in UserTask.query.filter_by(document_id=doc_id).all():
-            task.document_id = None
-        
-        # Delete file from filesystem only if local path (not a URL e.g. Vercel Blob)
-        if file_path and not (file_path.startswith('http://') or file_path.startswith('https://')) and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass  # continue even if file already gone
-        
-        # Delete document
-        db.session.delete(document)
+        document.deleted_at = datetime.utcnow()
         db.session.commit()
-        
-        flash(f'Document "{original_filename}" deleted successfully.', 'success')
+        flash(f'Document "{original_filename}" archived. It remains in user history and signed copies can still be viewed.', 'success')
     except Exception as e:
         db.session.rollback()
-        flash(f'Error deleting document: {str(e)}', 'error')
+        err_str = (str(e) or '').lower()
+        if 'deleted_at' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
+            try:
+                if IS_POSTGRES:
+                    db.session.execute(text("ALTER TABLE documents ADD COLUMN deleted_at TIMESTAMP NULL"))
+                else:
+                    db.session.execute(text("ALTER TABLE documents ADD deleted_at DATETIME NULL"))
+                db.session.commit()
+                document.deleted_at = datetime.utcnow()
+                db.session.commit()
+                flash(f'Document "{original_filename}" archived. It remains in user history and signed copies can still be viewed.', 'success')
+            except Exception as alter_e:
+                db.session.rollback()
+                flash(f'Error archiving document: {str(alter_e)}. Run: ALTER TABLE documents ADD deleted_at DATETIME NULL; (or TIMESTAMP for Postgres)', 'error')
+        else:
+            flash(f'Error archiving document: {str(e)}', 'error')
     
     return redirect(url_for('manage_documents'))
 
@@ -11860,8 +11922,9 @@ def _view_documents_impl():
 
     try:
         if current_user.is_admin():
-            documents = Document.query.order_by(Document.created_at.desc()).all()
+            documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
         else:
+            # User view: show all assigned docs (including archived) so history is preserved
             assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
             assigned_doc_ids = [a.document_id for a in assigned_documents]
             if assigned_doc_ids:
@@ -11870,17 +11933,25 @@ def _view_documents_impl():
                 documents = []
     except Exception as e:
         db.session.rollback()
-        # Try adding display_name if missing (MSSQL/pyodbc error text can vary)
+        # Try adding display_name or deleted_at if missing (MSSQL/pyodbc error text can vary)
         err_str = (str(e) or '').lower()
         try:
             db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
             db.session.commit()
         except Exception:
             db.session.rollback()
-        # Retry the query (succeeds if the only issue was missing display_name)
+        try:
+            if IS_POSTGRES:
+                db.session.execute(text("ALTER TABLE documents ADD COLUMN deleted_at TIMESTAMP NULL"))
+            else:
+                db.session.execute(text("ALTER TABLE documents ADD deleted_at DATETIME NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        # Retry the query (succeeds if the only issue was missing columns)
         try:
             if current_user.is_admin():
-                documents = Document.query.order_by(Document.created_at.desc()).all()
+                documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
             else:
                 assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
                 assigned_doc_ids = [a.document_id for a in assigned_documents]
@@ -20349,8 +20420,8 @@ def admin_reports():
         
         # Document statistics
         try:
-            visible_documents = Document.query.filter_by(is_visible=True).count()
-            documents_with_signatures = Document.query.join(DocumentSignatureField).distinct().count()
+            visible_documents = Document.query.filter_by(is_visible=True).filter(Document.deleted_at.is_(None)).count()
+            documents_with_signatures = Document.query.filter(Document.deleted_at.is_(None)).join(DocumentSignatureField).distinct().count()
             total_signatures = DocumentSignature.query.count()
             unique_signed_users = db.session.query(DocumentSignature.username).distinct().count()
         except Exception as e:
@@ -22018,46 +22089,57 @@ def delete_quiz_question(question_id):
 @app.route('/admin/training/delete', methods=['POST'])
 @admin_required
 def delete_training_video():
-    """Delete a training video"""
+    """Delete a training video and all related data (quizzes, progress, tasks, notifications)."""
     video_id = request.form.get('video_id')
-    
     if not video_id:
         flash('Video ID is required.', 'error')
         return redirect(url_for('manage_training'))
-    
     video = TrainingVideo.query.get(video_id)
-    
     if not video:
         flash('Training video not found.', 'error')
         return redirect(url_for('manage_training'))
-    
     try:
         vid = int(video_id)
-        # Delete file only if it's a local path (not a URL e.g. Vercel Blob)
+        # 1. Delete local file only (skip if URL e.g. Vercel Blob)
         fp = (video.file_path or '').strip()
         if fp and not (fp.startswith('http://') or fp.startswith('https://')) and os.path.exists(fp):
-            os.remove(fp)
-        
-        # Unlink from new hires (required_training_videos association table)
-        db.session.execute(new_hire_required_training.delete().where(new_hire_required_training.c.video_id == vid))
-        
-        # Delete questions and answers
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+        # 2. Unlink from new hires (association table)
+        db.session.execute(
+            new_hire_required_training.delete().where(new_hire_required_training.c.video_id == vid)
+        )
+        # 3. User quiz responses (FK to quiz_answers) — before deleting answers
+        question_ids = [q.id for q in video.questions]
+        if question_ids:
+            UserQuizResponse.query.filter(
+                UserQuizResponse.question_id.in_(question_ids)
+            ).delete(synchronize_session=False)
+        # 4. Quiz answers, then questions
         for question in video.questions:
             QuizAnswer.query.filter_by(question_id=question.id).delete()
         QuizQuestion.query.filter_by(video_id=vid).delete()
-        
-        # Delete user progress
+        # 5. User training progress
         UserTrainingProgress.query.filter_by(video_id=vid).delete()
-        
-        # Delete video
+        # 6. User tasks that reference this video (notes = "video_id:123")
+        UserTask.query.filter(
+            UserTask.task_type == 'training',
+            UserTask.notes == f'video_id:{vid}'
+        ).delete(synchronize_session=False)
+        # 7. Notifications for this training video
+        UserNotification.query.filter_by(
+            notification_type='training',
+            notification_id=str(vid)
+        ).delete(synchronize_session=False)
+        # 8. The video itself
         db.session.delete(video)
         db.session.commit()
-        
         flash(f'Training video "{video.title}" deleted successfully.', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error deleting video: {str(e)}', 'error')
-    
     return redirect(url_for('manage_training'))
 
 
