@@ -8,17 +8,21 @@ from sqlalchemy import exists, or_, and_, text, bindparam
 from auth import login_required, admin_required, manager_required, User, check_user_can_login_as_admin, authenticate_by_email_password
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, document_stores)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, document_stores,
+                    new_hire_required_training)
 from membership import get_token_groups, get_local_groups
 from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, IS_POSTGRES, \
     MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
 from datetime import datetime
 import os
+from pathlib import Path
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import generate_password_hash
 from io import BytesIO
 import base64
+import urllib.request
+import tempfile
 try:
     from graphql_schema import schema as graphql_schema
 except ImportError:
@@ -55,6 +59,42 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = SQLALCHEMY_ENGINE_OPTIONS
 app.config['UPLOAD_FOLDER'] = BASE_DIR / 'uploads'
 app.config['VIDEO_UPLOAD_FOLDER'] = BASE_DIR / 'uploads' / 'videos'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size (for videos)
+
+
+def _resolve_document_path(document):
+    """Resolve document.file_path to a local path or redirect URL. Documents in repo uploads/ (e.g. from GitHub)
+    are found at UPLOAD_FOLDER / basename when the DB path is absolute/missing on serverless (Vercel).
+    Returns (local_path, redirect_url). One is set: use local_path for send_file, or redirect to redirect_url."""
+    fp = (document.file_path or '').strip()
+    if not fp:
+        return (None, None)
+    if fp.startswith('http://') or fp.startswith('https://'):
+        return (None, fp)
+    if os.path.exists(fp):
+        return (fp, None)
+    upload_folder = app.config['UPLOAD_FOLDER']
+    basename = os.path.basename(fp)
+    # Fallback 1: uploads/<basename> (same as in repo / on Vercel)
+    fallback = upload_folder / basename
+    if fallback.exists():
+        return (str(fallback), None)
+    # Fallback 2: document.filename (stored name with timestamp, e.g. 20260121_201216_Employee_Onboarding_Acknowledgement.pdf)
+    if getattr(document, 'filename', None):
+        fallback2 = upload_folder / document.filename
+        if fallback2.exists():
+            return (str(fallback2), None)
+    # Fallback 3: cwd/uploads/ (in case serverless cwd differs from __file__)
+    try:
+        cwd_uploads = Path(os.getcwd()) / 'uploads'
+        if (cwd_uploads / basename).exists():
+            return (str(cwd_uploads / basename), None)
+        if getattr(document, 'filename', None) and (cwd_uploads / document.filename).exists():
+            return (str(cwd_uploads / document.filename), None)
+    except Exception:
+        pass
+    return (None, None)
+
+
 app.config['ALLOWED_EXTENSIONS'] = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'svg'}
 app.config['ALLOWED_VIDEO_EXTENSIONS'] = {'mp4', 'webm', 'ogg', 'mov', 'avi'}
 
@@ -9095,6 +9135,9 @@ def manage_documents():
                             <th>Uploaded By</th>
                             {% endif %}
                             <th>Uploaded</th>
+                            {% if not is_manager_view %}
+                            <th>Document URL (Blob)</th>
+                            {% endif %}
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -9158,6 +9201,18 @@ def manage_documents():
                             <td>{{ doc.uploaded_by }}</td>
                             {% endif %}
                             <td>{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '-' }}</td>
+                            {% if not is_manager_view %}
+                            <td style="max-width: 260px;">
+                                <form method="POST" action="{{ url_for('set_document_url') }}" style="display: flex; gap: 6px; align-items: center;">
+                                    <input type="hidden" name="doc_id" value="{{ doc.id }}">
+                                    <input type="url" name="url" value="{{ doc.file_path if doc.file_path and doc.file_path.startswith('http') else '' }}" placeholder="Paste Vercel Blob URL" style="flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px;">
+                                    <button type="submit" class="action-btn" style="white-space: nowrap;">Set URL</button>
+                                </form>
+                                {% if doc.file_path and not doc.file_path.startswith('http') %}
+                                <small style="color: #888;">Local file (set URL for Vercel)</small>
+                                {% endif %}
+                            </td>
+                            {% endif %}
                             <td>
                                 <div class="actions-group">
                                     <div class="actions-primary">
@@ -9585,6 +9640,35 @@ def toggle_document_visibility():
     return redirect(url_for('manage_documents'))
 
 
+@app.route('/admin/documents/set-url', methods=['POST'])
+@admin_required
+def set_document_url():
+    """Set document file_path to a URL (e.g. Vercel Blob). Use when hosting on Vercel."""
+    doc_id = request.form.get('doc_id', type=int)
+    url = (request.form.get('url') or '').strip()
+    if not doc_id:
+        flash('Document ID required.', 'error')
+        return redirect(url_for('manage_documents'))
+    document = Document.query.get(doc_id)
+    if not document:
+        flash('Document not found.', 'error')
+        return redirect(url_for('manage_documents'))
+    if not url:
+        flash('URL is required.', 'error')
+        return redirect(url_for('manage_documents'))
+    if not (url.startswith('http://') or url.startswith('https://')):
+        flash('URL must start with http:// or https://', 'error')
+        return redirect(url_for('manage_documents'))
+    try:
+        document.file_path = url
+        db.session.commit()
+        flash(f'Document URL updated for "{document.display_name or document.original_filename}".', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating URL: {str(e)}', 'error')
+    return redirect(url_for('manage_documents'))
+
+
 @app.route('/admin/delete-document', methods=['POST'])
 @admin_required
 def delete_document():
@@ -9620,8 +9704,8 @@ def delete_document():
         for task in UserTask.query.filter_by(document_id=doc_id).all():
             task.document_id = None
         
-        # Delete file from filesystem
-        if file_path and os.path.exists(file_path):
+        # Delete file from filesystem only if local path (not a URL e.g. Vercel Blob)
+        if file_path and not (file_path.startswith('http://') or file_path.startswith('https://')) and os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except OSError:
@@ -12408,8 +12492,11 @@ def view_document(doc_id):
             flash('This document is not available.', 'error')
             return redirect(url_for('dashboard'))
     
-    # Check if file exists
-    if not os.path.exists(document.file_path):
+    # Resolve path: URL (redirect), local path, or repo uploads/ fallback (e.g. from GitHub on Vercel)
+    local_path, redirect_url = _resolve_document_path(document)
+    if redirect_url:
+        return redirect(redirect_url)
+    if not local_path:
         flash('File not found on server.', 'error')
         return redirect(url_for('dashboard'))
     
@@ -12424,7 +12511,7 @@ def view_document(doc_id):
     if file_type in viewable_types or file_ext in viewable_extensions:
         # Serve file for viewing in browser
         return send_file(
-            document.file_path,
+            local_path,
             as_attachment=False,
             mimetype=file_type or 'application/octet-stream'
         )
@@ -12495,15 +12582,29 @@ def view_document_embed(doc_id, username=None):
             if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
                 
                 # Create a temporary signed copy
-                import tempfile
                 import shutil
                 
                 # Create temp file
                 temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
                 os.close(temp_fd)
                 
-                # Copy original PDF
-                shutil.copy2(document.file_path, temp_path)
+                # Get original PDF: URL (download), local path, or repo uploads/ fallback
+                local_path, redirect_url = _resolve_document_path(document)
+                if redirect_url:
+                    try:
+                        urllib.request.urlretrieve(redirect_url, temp_path)
+                    except Exception as e:
+                        print(f"Failed to download document from URL: {e}")
+                        if os.path.exists(temp_path):
+                            try:
+                                os.unlink(temp_path)
+                            except Exception:
+                                pass
+                        raise
+                elif local_path:
+                    shutil.copy2(local_path, temp_path)
+                else:
+                    raise FileNotFoundError("Document file not found")
                 
                 # Embed signatures and typed field values into temp copy
                 pdf_doc = fitz.open(temp_path)
@@ -12739,14 +12840,17 @@ def view_document_embed(doc_id, username=None):
             traceback.print_exc()
             # Fall through to serve original
     
-    # Serve original blank document
-    if not os.path.exists(document.file_path):
+    # Serve original blank document (resolve: URL, local path, or repo uploads/)
+    local_path, redirect_url = _resolve_document_path(document)
+    if redirect_url:
+        return redirect(redirect_url)
+    if not local_path:
         return "File not found on server.", 404
     
     file_type = document.file_type or 'application/octet-stream'
     
     response = send_file(
-        document.file_path,
+        local_path,
         as_attachment=False,
         mimetype=file_type
     )
@@ -12773,13 +12877,33 @@ def render_document_with_signatures(doc_id):
         if not assignment:
             return "This document has not been assigned to you.", 403
     
-    # Check if file exists
-    if not os.path.exists(document.file_path):
+    # Resolve: URL (download to temp), local path, or repo uploads/ fallback
+    local_path, redirect_url = _resolve_document_path(document)
+    temp_path = None
+    if redirect_url:
+        try:
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
+            os.close(temp_fd)
+            urllib.request.urlretrieve(redirect_url, temp_path)
+            local_path = temp_path
+        except Exception as e:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+            return f"Failed to load document from URL: {e}", 502
+    elif not local_path:
         return "File not found on server.", 404
-    
+
     # Check if document is a PDF
-    is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
+    is_pdf = document.file_type == 'application/pdf' or (document.original_filename or '').lower().endswith('.pdf')
     if not is_pdf:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
         return "Only PDF documents can be rendered with signatures.", 400
     
     # Get page number (default to 1)
@@ -12854,14 +12978,24 @@ def render_document_with_signatures(doc_id):
         
         # Use PyMuPDF (fitz) - it's already installed and works reliably
         if not FITZ_AVAILABLE:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
             return "PDF rendering library (PyMuPDF) not available. Please install pymupdf.", 500
         
         # Open PDF
-        pdf_doc = fitz.open(document.file_path)
+        pdf_doc = fitz.open(local_path)
         
         # Validate page number
         if page_num < 0 or page_num >= len(pdf_doc):
             pdf_doc.close()
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
             return f"Page not found. Document has {len(pdf_doc)} page(s).", 404
         
         # Get the page
@@ -12871,6 +13005,11 @@ def render_document_with_signatures(doc_id):
         
         if page_height <= 0:
             pdf_doc.close()
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
             return "Invalid page dimensions.", 500
         
         # Render page to image - scale to match viewer height (800px)
@@ -12933,12 +13072,21 @@ def render_document_with_signatures(doc_id):
         output.seek(0)
         
         pdf_doc.close()
-        
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
         return send_file(output, mimetype='image/png')
         
     except Exception as e:
         import traceback
         traceback.print_exc()
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
         return f"Error rendering document: {str(e)}", 500
 
 
@@ -14026,11 +14174,17 @@ def embed_signature_in_pdf(document, signature_field, signature_image_base64):
     if not FITZ_AVAILABLE:
         return False, "PyMuPDF not available"
     
+    local_path, redirect_url = _resolve_document_path(document)
+    if redirect_url:
+        return False, "Document is hosted by URL; cannot embed in place."
+    if not local_path:
+        return False, "Document file not found."
+    
     try:
         from PIL import Image
         
-        # Open the PDF
-        pdf_doc = fitz.open(document.file_path)
+        # Open the PDF (from local path or repo uploads/)
+        pdf_doc = fitz.open(local_path)
         
         # Get the page (0-indexed)
         page_num = signature_field.page_number - 1
@@ -14111,7 +14265,7 @@ def embed_signature_in_pdf(document, signature_field, signature_image_base64):
         page.insert_image(img_rect, stream=img_bytes.getvalue())
         
         # Save the modified PDF (incremental to preserve other data)
-        pdf_doc.save(document.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+        pdf_doc.save(local_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         pdf_doc.close()
         
         return True, "Signature embedded successfully"
@@ -14255,6 +14409,9 @@ def submit_signature(doc_id):
             return jsonify({'success': False, 'error': 'Missing signature image'}), 400
     
     try:
+        # Resolve document path (local, repo uploads/, or URL) for hash and crypto signing
+        doc_local_path, _ = _resolve_document_path(document)
+        
         # Check if user already signed this field (by ID or by location for orphaned signatures)
         existing_signature = DocumentSignature.query.filter_by(
             document_id=doc_id,
@@ -14343,9 +14500,9 @@ def submit_signature(doc_id):
         if is_cryptographic:
             # Cryptographic signature
             success, message = sign_pdf_cryptographically(document, signature_field, current_user.username)
-            if success:
-                # Calculate hash of signed PDF for audit trail
-                pdf_hash = calculate_pdf_hash(document.file_path)
+            if success and doc_local_path:
+                # Calculate hash of signed PDF for audit trail (use resolved path)
+                pdf_hash = calculate_pdf_hash(doc_local_path)
                 sig_to_embed.signature_hash = pdf_hash
         else:
             # Image signature - don't embed into original, just save to database
@@ -14649,8 +14806,11 @@ def download_document(doc_id):
                 flash('This document is not available.', 'error')
                 return redirect(url_for('dashboard'))
     
-    # Check if file exists
-    if not os.path.exists(document.file_path):
+    # Resolve: URL, local path, or repo uploads/ fallback (e.g. from GitHub on Vercel)
+    local_path, redirect_url = _resolve_document_path(document)
+    if redirect_url and (current_user.is_admin() or (current_user.is_manager() and manager_has_permission('manage_documents'))):
+        return redirect(redirect_url)
+    if not redirect_url and not local_path:
         flash('Document not found on server.', 'error')
         return redirect(url_for('dashboard'))
     
@@ -14676,15 +14836,26 @@ def download_document(doc_id):
             
             if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
                 # Create a temporary signed copy
-                import tempfile
                 import shutil
                 
                 # Create temp file
                 temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
                 os.close(temp_fd)
                 
-                # Copy original PDF
-                shutil.copy2(document.file_path, temp_path)
+                # Get original PDF: URL (download) or local path (incl. repo uploads/)
+                if redirect_url:
+                    try:
+                        urllib.request.urlretrieve(redirect_url, temp_path)
+                    except Exception as e:
+                        flash(f'Failed to load document: {e}', 'error')
+                        if os.path.exists(temp_path):
+                            try:
+                                os.unlink(temp_path)
+                            except Exception:
+                                pass
+                        return redirect(url_for('dashboard'))
+                else:
+                    shutil.copy2(local_path, temp_path)
                 
                 # Embed signatures and typed field values into temp copy
                 pdf_doc = fitz.open(temp_path)
@@ -14842,9 +15013,11 @@ def download_document(doc_id):
                     mimetype=document.file_type or 'application/pdf'
                 )
             else:
-                # No signatures or typed fields, just download original
+                # No signatures or typed fields, just download original (redirect if URL)
+                if redirect_url:
+                    return redirect(redirect_url)
                 return send_file(
-                    document.file_path,
+                    local_path,
                     as_attachment=True,
                     download_name=document.original_filename,
                     mimetype=document.file_type or 'application/octet-stream'
@@ -14853,17 +15026,19 @@ def download_document(doc_id):
             print(f"Error generating signed PDF: {e}")
             import traceback
             traceback.print_exc()
-            # Fall through to download original
+            # Fall through to download original (redirect if URL)
+            if redirect_url:
+                return redirect(redirect_url)
             return send_file(
-                document.file_path,
+                local_path,
                 as_attachment=True,
                 download_name=document.original_filename,
                 mimetype=document.file_type or 'application/octet-stream'
             )
     else:
-        # Admin downloads original document
+        # Admin downloads original (URL already redirected at top; here use local path)
         return send_file(
-            document.file_path,
+            local_path,
             as_attachment=True,
             download_name=document.original_filename,
             mimetype=document.file_type or 'application/octet-stream'
@@ -15627,13 +15802,17 @@ def download_signed_document(doc_id, username):
     def _error_redirect():
         return redirect(url_for('view_form_signatures', doc_id=doc_id)) if request.args.get('inline') else redirect(url_for('view_signed_documents', doc_id=doc_id))
     
-    # Check if file exists
-    if not os.path.exists(document.file_path):
+    # Resolve: URL, local path, or repo uploads/ fallback
+    local_path, redirect_url = _resolve_document_path(document)
+    if redirect_url:
+        flash('Download signed copy from URL not supported here. Use View/Download from your documents.', 'error')
+        return _error_redirect()
+    if not local_path:
         flash('File not found on server.', 'error')
         return _error_redirect()
     
     # Check if document is a PDF
-    is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
+    is_pdf = document.file_type == 'application/pdf' or (document.original_filename or '').lower().endswith('.pdf')
     
     if not is_pdf:
         flash('Signed copies can only be generated for PDF documents.', 'error')
@@ -15673,8 +15852,8 @@ def download_signed_document(doc_id, username):
             temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
             os.close(temp_fd)
             
-            # Copy original PDF
-            shutil.copy2(document.file_path, temp_path)
+            # Copy original PDF (use resolved local_path)
+            shutil.copy2(local_path, temp_path)
             
             # Embed signatures and typed field values into temp copy
             pdf_doc = fitz.open(temp_path)
@@ -21853,18 +22032,22 @@ def delete_training_video():
         return redirect(url_for('manage_training'))
     
     try:
+        vid = int(video_id)
         # Delete file only if it's a local path (not a URL e.g. Vercel Blob)
         fp = (video.file_path or '').strip()
         if fp and not (fp.startswith('http://') or fp.startswith('https://')) and os.path.exists(fp):
             os.remove(fp)
         
+        # Unlink from new hires (required_training_videos association table)
+        db.session.execute(new_hire_required_training.delete().where(new_hire_required_training.c.video_id == vid))
+        
         # Delete questions and answers
         for question in video.questions:
             QuizAnswer.query.filter_by(question_id=question.id).delete()
-        QuizQuestion.query.filter_by(video_id=video_id).delete()
+        QuizQuestion.query.filter_by(video_id=vid).delete()
         
         # Delete user progress
-        UserTrainingProgress.query.filter_by(video_id=video_id).delete()
+        UserTrainingProgress.query.filter_by(video_id=vid).delete()
         
         # Delete video
         db.session.delete(video)
