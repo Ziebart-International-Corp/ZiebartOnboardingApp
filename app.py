@@ -19,7 +19,10 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import generate_password_hash
 from io import BytesIO
 import base64
-from graphql_schema import schema as graphql_schema
+try:
+    from graphql_schema import schema as graphql_schema
+except ImportError:
+    graphql_schema = None
 try:
     from pdf2image import convert_from_path
     PDF2IMAGE_AVAILABLE = True
@@ -496,6 +499,8 @@ query {
     operation_name = data.get('operationName')
     if not query:
         return jsonify({'errors': [{'message': 'Missing query'}]}), 400
+    if not graphql_schema:
+        return jsonify({'errors': [{'message': 'GraphQL not available'}]}), 503
     result = graphql_schema.execute(
         query,
         context_value={'request': request, 'current_user': current_user},

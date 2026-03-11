@@ -22,6 +22,10 @@ class User(UserMixin):
     def is_admin(self):
         """Check if user is an admin"""
         return self.role == 'admin'
+
+    def is_manager(self):
+        """Check if user is a manager (or admin)"""
+        return getattr(self, 'role', None) in ('manager', 'admin')
     
     def __repr__(self):
         return f'<User {self.full_username} ({self.role})>'
@@ -105,6 +109,31 @@ def check_user_can_login_as_admin(username, domain=None):
     return role == 'admin'
 
 
+def authenticate_by_email_password(email, password):
+    """
+    Authenticate by email and password. Returns auth.User if valid, None otherwise.
+    """
+    if not email or not password:
+        return None
+    from werkzeug.security import check_password_hash
+    from models import User as UserModel
+    from app import app
+    from datetime import date
+    with app.app_context():
+        user = UserModel.query.filter_by(email=email.strip().lower()).first()
+        if not user or not user.password_hash:
+            return None
+        if user.access_revoked_at and date.today() >= user.access_revoked_at:
+            return None
+        if not check_password_hash(user.password_hash, password):
+            return None
+        return User(
+            username=user.username,
+            domain=getattr(user, 'domain', None),
+            role=(user.role or 'user')
+        )
+
+
 def authenticate_user(role_override=None):
     """
     Authenticate user using Windows domain authentication
@@ -176,4 +205,20 @@ def admin_required(f):
         
         return f(*args, **kwargs)
     
+    return decorated_function
+
+
+def manager_required(f):
+    """
+    Decorator to require manager or admin role
+    """
+    @wraps(f)
+    @login_required
+    def decorated_function(*args, **kwargs):
+        from flask_login import current_user
+        role = getattr(current_user, 'role', None) or 'user'
+        if role not in ('admin', 'manager'):
+            from flask import abort
+            abort(403)  # Forbidden
+        return f(*args, **kwargs)
     return decorated_function
