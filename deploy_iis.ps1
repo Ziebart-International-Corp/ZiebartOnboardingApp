@@ -20,7 +20,7 @@ $siteName = "ZiebartOnboarding"
 $appPoolName = "ZiebartOnboardingAppPool"
 $hostname = "ziebartonboarding.com"
 # Port configuration - Change this if port 8080 is also in use
-$port = 8080  # Changed from 80 to avoid conflicts with other apps
+$port = 8082  # Avoid conflicts (80, 8080, 8081, etc. in use)
 
 # Check if port is already in use
 Write-Host "Checking if port $port is available..." -ForegroundColor Yellow
@@ -106,11 +106,12 @@ if (Test-Path "IIS:\Sites\$siteName") {
 # Create new site
 New-Website -Name $siteName -Port $port -PhysicalPath $appPath -ApplicationPool $appPoolName -Force | Out-Null
 
-# Add hostname binding
+# Add hostname binding (port in $port and port 80 for clean URL)
 New-WebBinding -Name $siteName -Protocol http -HostHeader $hostname -Port $port -ErrorAction SilentlyContinue
+New-WebBinding -Name $siteName -Protocol http -HostHeader $hostname -Port 80 -ErrorAction SilentlyContinue
 
 Write-Host "  Site created: $siteName" -ForegroundColor Green
-Write-Host "  Binding: http://$hostname`:$port" -ForegroundColor Green
+Write-Host "  Bindings: http://$hostname and http://$hostname`:$port" -ForegroundColor Green
 
 Write-Host "Step 5: Setting up permissions..." -ForegroundColor Yellow
 # Grant permissions to application pool identity

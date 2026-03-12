@@ -4,6 +4,14 @@ Configuration settings for the New Hire Application
 import os
 from pathlib import Path
 
+# Load .env from project root so DB_* and other vars are available (e.g. under IIS)
+try:
+    from dotenv import load_dotenv
+    _config_dir = Path(__file__).resolve().parent
+    load_dotenv(_config_dir / '.env')
+except ImportError:
+    pass
+
 # Base directory
 BASE_DIR = Path(__file__).parent
 
@@ -49,7 +57,7 @@ from urllib.parse import quote_plus
 DB_PASSWORD_ENCODED = quote_plus(DB_PASSWORD)
 SQLALCHEMY_DATABASE_URI = (
     f'mssql+pyodbc://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}'
-    f'?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes'
+    f'?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes'
 )
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 SQLALCHEMY_ENGINE_OPTIONS = {

@@ -16,6 +16,10 @@ ENV/
 dist/
 build/
 
+# Large uploads (GitHub file size limit 100 MB)
+uploads/videos/*.mp4
+uploads/videos/*.webm
+
 # Logs
 logs/
 *.log

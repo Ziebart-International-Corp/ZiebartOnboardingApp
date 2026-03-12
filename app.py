@@ -103,6 +103,34 @@ login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
 
 
+def _log_exception_to_file(exc):
+    """Write exception traceback to logs/error.log."""
+    try:
+        import traceback
+        log_path = BASE_DIR / 'logs' / 'error.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(datetime.utcnow().isoformat() + ' EXCEPTION\n')
+            f.write(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            f.write('\n')
+    except Exception:
+        pass
+
+
+from flask.signals import got_request_exception
+def _on_request_exception(sender, exception, **kwargs):
+    _log_exception_to_file(exception)
+got_request_exception.connect(_on_request_exception, app)
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    """Log 500 and return generic message."""
+    if getattr(e, 'original_exception', None):
+        _log_exception_to_file(e.original_exception)
+    return 'Internal Server Error', 500
+
+
 def get_email_for_username(username):
     """Get best available email for a username (NewHire first, then User)."""
     new_hire = NewHire.query.filter_by(username=username).first()
@@ -523,15 +551,19 @@ def login():
         return redirect(url_for('dashboard'))
     next_url = request.args.get('next') or url_for('dashboard')
     if request.method == 'POST':
-        email = (request.form.get('email') or '').strip()
-        password = request.form.get('password') or ''
-        user = authenticate_by_email_password(email, password)
-        if user:
-            login_user(user, remember=True)
-            update_last_login(user.username)
-            next_after = request.form.get('next') or request.args.get('next') or url_for('dashboard')
-            return redirect(url_for('welcome', next=next_after))
-        flash('Invalid email or password. Please try again.', 'error')
+        try:
+            email = (request.form.get('email') or '').strip()
+            password = request.form.get('password') or ''
+            user = authenticate_by_email_password(email, password)
+            if user:
+                login_user(user, remember=True)
+                update_last_login(user.username)
+                next_after = request.form.get('next') or request.args.get('next') or url_for('dashboard')
+                return redirect(url_for('welcome', next=next_after))
+            flash('Invalid email or password. Please try again.', 'error')
+        except Exception as e:
+            _log_exception_to_file(e)
+            raise
     return render_template_string('''
     <!DOCTYPE html>
     <html>
