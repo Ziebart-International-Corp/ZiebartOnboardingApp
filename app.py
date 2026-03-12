@@ -206,6 +206,48 @@ def _ensure_users_role_column():
         _users_role_migrated = True
 
 
+_users_domain_migrated = False
+
+
+def _ensure_users_domain_column():
+    """Ensure users.domain exists (one-time migration)."""
+    global _users_domain_migrated
+    if _users_domain_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 domain FROM users"))
+        _users_domain_migrated = True
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text("ALTER TABLE users ADD domain NVARCHAR(100) NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        _users_domain_migrated = True
+
+
+_users_last_login_migrated = False
+
+
+def _ensure_users_last_login_column():
+    """Ensure users.last_login exists (one-time migration)."""
+    global _users_last_login_migrated
+    if _users_last_login_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 last_login FROM users"))
+        _users_last_login_migrated = True
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text("ALTER TABLE users ADD last_login DATETIME NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        _users_last_login_migrated = True
+
+
 _new_hires_finale_migrated = False
 
 
@@ -335,6 +377,8 @@ def _run_users_migration_if_needed():
     try:
         _ensure_users_access_revoked_at_column()
         _ensure_users_role_column()
+        _ensure_users_domain_column()
+        _ensure_users_last_login_column()
         _ensure_new_hires_finale_columns()
         _ensure_admin_settings_table()
         _ensure_stores_and_store_id()
@@ -350,13 +394,20 @@ def load_user(user_id):
     except Exception:
         db.session.rollback()
         _ensure_users_access_revoked_at_column()
+        _ensure_users_role_column()
+        _ensure_users_domain_column()
+        _ensure_users_last_login_column()
         try:
             user_record = UserModel.query.filter_by(username=user_id).first()
         except Exception:
             return None
     if not user_record:
         return None
-    return User(user_record.username, user_record.domain, user_record.role)
+    return User(
+        user_record.username,
+        getattr(user_record, 'domain', None),
+        getattr(user_record, 'role', None) or 'user'
+    )
 
 
 @app.before_request
@@ -1871,11 +1922,6 @@ def dashboard():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
-                {% elif current_user.is_manager() %}
-                <a href="{{ url_for('manager_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Manager Console</a>
-                {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav">
                 <a href="{{ url_for('dashboard') }}">Home</a>
@@ -1883,11 +1929,6 @@ def dashboard():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
-                {% elif current_user.is_manager() %}
-                <a href="{{ url_for('manager_dashboard') }}">Manager Console</a>
-                {% endif %}
             </div>
             <div class="user-section">
                 <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
@@ -3022,11 +3063,6 @@ def user_tasks():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
-                {% elif current_user.is_manager() %}
-                <a href="{{ url_for('manager_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Manager Console</a>
-                {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav">
                 <a href="{{ url_for('dashboard') }}">Home</a>
@@ -3034,11 +3070,6 @@ def user_tasks():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
-                {% elif current_user.is_manager() %}
-                <a href="{{ url_for('manager_dashboard') }}">Manager Console</a>
-                {% endif %}
             </div>
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
@@ -3837,11 +3868,6 @@ def profile():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
-                {% elif current_user.is_manager() %}
-                <a href="{{ url_for('manager_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Manager Console</a>
-                {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav">
                 <a href="{{ url_for('dashboard') }}">Home</a>
@@ -3849,11 +3875,6 @@ def profile():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
-                {% elif current_user.is_manager() %}
-                <a href="{{ url_for('manager_dashboard') }}">Manager Console</a>
-                {% endif %}
             </div>
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
@@ -3947,11 +3968,12 @@ def view_all_new_hires():
 
 
 def _view_all_new_hires_impl():
-    """Implementation for admin/manager new-hires list. Managers see only their store."""
+    """Implementation for admin/manager new-hires list. Managers (non-admin) see only their store; admins see all."""
     q = NewHire.query.filter(NewHire.status != 'removed')
-    store_id = get_current_user_store_id()
-    if current_user.is_manager() and store_id is not None:
-        q = q.filter(NewHire.store_id == store_id)
+    if current_user.is_manager() and not current_user.is_admin():
+        store_id = get_current_user_store_id()
+        if store_id is not None:
+            q = q.filter(NewHire.store_id == store_id)
     all_new_hires = q.order_by(NewHire.created_at.desc()).all()
     new_hires_with_progress = []
     
@@ -4053,6 +4075,21 @@ def _view_all_new_hires_impl():
                 background: rgba(255,255,255,0.3);
                 color: #FFFFFF;
             }
+            .header-right { display: flex; align-items: center; gap: 16px; }
+            .user-dropdown { cursor: pointer; position: relative; display: flex; align-items: center; }
+            .user-icon {
+                width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff;
+                display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em;
+            }
+            .user-dropdown:hover .user-icon { background: #d90000; }
+            .dropdown-menu {
+                display: none; position: absolute; top: 100%; right: 0; margin-top: 8px;
+                background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+                z-index: 1000; padding: 8px 0; border: 1px solid #eee;
+            }
+            .dropdown-menu.show { display: block; }
+            .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
+            .dropdown-item:hover { background: #f5f5f5; }
             .container {
                 max-width: 1600px;
                 margin: 30px auto;
@@ -4176,8 +4213,22 @@ def _view_all_new_hires_impl():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-right">
+                <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('viewNewHiresUserDropdown').classList.toggle('show');">
+                    <div class="user-icon">{{ (admin_name or 'A')[0].upper() }}</div>
+                    <div class="dropdown-menu" id="viewNewHiresUserDropdown">
+                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
+                        {% if current_user.is_admin() %}
+                        <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                        {% endif %}
+                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    </div>
+                </div>
+            </div>
         </div>
+        <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('viewNewHiresUserDropdown').classList.remove('show'); });</script>
         
         <div class="container">
             <div class="section">
@@ -4620,7 +4671,7 @@ def add_new_hire():
             <div class="header-content">
                 <h1>🚀 New Hire Onboarding Wizard</h1>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -5339,10 +5390,25 @@ def _admin_dashboard_impl():
             kept.append(nh)
         all_new_hires = kept
         total_new_hires = len(all_new_hires)  # Keep count in sync with filtered list
+        # Filter by store if requested
+        store_filter = request.args.get('store_id', '')
+        if store_filter == 'none':
+            all_new_hires = [nh for nh in all_new_hires if not nh.store_id]
+        elif store_filter and store_filter.isdigit():
+            sid = int(store_filter)
+            all_new_hires = [nh for nh in all_new_hires if nh.store_id == sid]
+        total_new_hires = len(all_new_hires)
     except Exception as e:
         db.session.rollback()
         app.logger.warning(f"admin_dashboard: all_new_hires failed: {e}")
         all_new_hires = []
+
+    all_stores = []
+    try:
+        all_stores = Store.query.order_by(Store.name).all()
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f"admin_dashboard: all_stores failed: {e}")
 
     try:
         for new_hire in all_new_hires:
@@ -5394,11 +5460,17 @@ def _admin_dashboard_impl():
                 completed_items = completed_videos + completed_user_tasks + checklist_completed
                 progress_percentage = int((completed_items / total_items * 100)) if total_items > 0 else 0
                 
+                store_name = '—'
+                if new_hire.store_id:
+                    store = Store.query.get(new_hire.store_id)
+                    if store:
+                        store_name = store.name
                 new_hires_with_progress.append({
                     'new_hire': new_hire,
                     'progress': progress_percentage,
                     'completed': completed_items,
                     'total': total_items,
+                    'store_name': store_name,
                     'training': {'completed': completed_videos, 'total': total_videos},
                     'tasks': {'completed': completed_user_tasks, 'total': total_user_tasks},
                     'checklist': {'completed': checklist_completed, 'total': checklist_total}
@@ -5408,12 +5480,18 @@ def _admin_dashboard_impl():
                 import traceback
                 app.logger.error(f'Error processing new hire {new_hire.username}: {str(e)}')
                 app.logger.error(traceback.format_exc())
+                store_name = '—'
+                if new_hire.store_id:
+                    store = Store.query.get(new_hire.store_id)
+                    if store:
+                        store_name = store.name
                 # Add with default values so the dashboard still shows
                 new_hires_with_progress.append({
                     'new_hire': new_hire,
                     'progress': 0,
                     'completed': 0,
                     'total': 0,
+                    'store_name': store_name,
                     'training': {'completed': 0, 'total': 0},
                     'tasks': {'completed': 0, 'total': 0},
                     'checklist': {'completed': 0, 'total': 0}
@@ -6384,11 +6462,20 @@ def _admin_dashboard_impl():
                 <div class="section">
                     <div class="section-header">
                         <h2 class="section-title">Progress Overview</h2>
-                        <select class="filter-dropdown" style="font-size: 0.85em;">
-                            <option>Last 30 Days</option>
-                            <option>Last 7 Days</option>
-                            <option>Last 90 Days</option>
-                        </select>
+                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                            <select class="filter-dropdown" style="font-size: 0.85em;" id="storeFilter" onchange="window.location.href='{{ url_for('admin_dashboard') }}' + (this.value ? '?store_id=' + encodeURIComponent(this.value) : '');">
+                                <option value="" {{ 'selected' if not store_filter else '' }}>All Stores</option>
+                                <option value="none" {{ 'selected' if store_filter == 'none' else '' }}>No store</option>
+                                {% for store in all_stores %}
+                                <option value="{{ store.id }}" {{ 'selected' if store_filter == store.id|string else '' }}>{{ store.name }}</option>
+                                {% endfor %}
+                            </select>
+                            <select class="filter-dropdown" style="font-size: 0.85em;">
+                                <option>Last 30 Days</option>
+                                <option>Last 7 Days</option>
+                                <option>Last 90 Days</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="progress-list">
                         {% for item in new_hires_with_progress[:7] %}
@@ -6406,6 +6493,7 @@ def _admin_dashboard_impl():
                                     {% endif %}
                                 </div>
                             </div>
+                            <div class="progress-store" style="min-width: 100px; font-size: 0.85em; color: #555;">{{ item.store_name }}</div>
                             <div class="progress-percentage">{{ item.progress }}%</div>
                         </div>
                         {% endfor %}
@@ -6725,7 +6813,8 @@ def _admin_dashboard_impl():
     ''', total_users=total_users, total_new_hires=total_new_hires, admin_users=admin_users,
          forms_completed=forms_completed, total_checklist_items=total_checklist_items,
          new_hires_with_progress=new_hires_with_progress, recent_activity=recent_activity,
-         form_status_data=form_status_data,          admin_name=admin_name, pending_count=pending_count, notifications=notifications)
+         form_status_data=form_status_data, admin_name=admin_name, pending_count=pending_count, notifications=notifications,
+         all_stores=all_stores, store_filter=request.args.get('store_id', ''))
 
 
 @app.route('/manager')
@@ -6822,6 +6911,21 @@ def manager_dashboard():
             .card .number { font-size: 2em; font-weight: 800; color: #FE0100; }
             .card .hint { font-size: 0.85em; color: #666; margin-top: 8px; }
             .card.disabled { opacity: 0.7; pointer-events: none; }
+            .header-right { display: flex; align-items: center; gap: 16px; }
+            .user-dropdown { cursor: pointer; position: relative; display: flex; align-items: center; }
+            .user-icon {
+                width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff;
+                display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em;
+            }
+            .user-dropdown:hover .user-icon { background: #d90000; }
+            .dropdown-menu {
+                display: none; position: absolute; top: 100%; right: 0; margin-top: 8px;
+                background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+                z-index: 1000; padding: 8px 0; border: 1px solid #eee;
+            }
+            .dropdown-menu.show { display: block; }
+            .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
+            .dropdown-item:hover { background: #f5f5f5; }
         </style>
     </head>
     <body>
@@ -6830,8 +6934,26 @@ def manager_dashboard():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Logo">
                 <span>Manager Console</span>
             </div>
-            <a href="{{ url_for('dashboard') }}" class="back-btn">← User Dashboard</a>
+            <div class="header-right">
+                <a href="{{ url_for('dashboard') }}" class="back-btn">← User Dashboard</a>
+                <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('managerUserDropdown').classList.toggle('show');">
+                    <div class="user-icon">{{ (manager_name or 'M')[0].upper() }}</div>
+                    <div class="dropdown-menu" id="managerUserDropdown">
+                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
+                        {% if current_user.is_admin() %}
+                        <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                        {% endif %}
+                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    </div>
+                </div>
+            </div>
         </div>
+        <script>
+            document.addEventListener('click', function(e) {
+                if (!e.target.closest('.user-dropdown')) document.getElementById('managerUserDropdown').classList.remove('show');
+            });
+        </script>
         <div class="container">
             <div class="store-banner">
                 <h1>Your store</h1>
@@ -6899,6 +7021,14 @@ def settings_page():
             .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
             .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
             .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .header-right { display: flex; align-items: center; gap: 16px; }
+            .user-dropdown { cursor: pointer; position: relative; }
+            .user-icon { width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em; }
+            .user-dropdown:hover .user-icon { background: #d90000; }
+            .dropdown-menu { display: none; position: absolute; top: 100%; right: 0; margin-top: 8px; background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); z-index: 1000; padding: 8px 0; border: 1px solid #eee; }
+            .dropdown-menu.show { display: block; }
+            .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
+            .dropdown-item:hover { background: #f5f5f5; }
             .container { max-width: 900px; margin: 24px auto; padding: 0 20px; }
             .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
             .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
@@ -6920,8 +7050,20 @@ def settings_page():
     <body>
         <div class="header">
             <h1>⚙️ Settings</h1>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-right">
+                <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('settingsUserDropdown').classList.toggle('show');">
+                    <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
+                    <div class="dropdown-menu" id="settingsUserDropdown">
+                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
+                        {% if current_user.is_admin() %}<a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>{% endif %}
+                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    </div>
+                </div>
+            </div>
         </div>
+        <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('settingsUserDropdown').classList.remove('show'); });</script>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -7139,6 +7281,14 @@ def manage_stores():
             .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
             .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
             .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .header-right { display: flex; align-items: center; gap: 16px; }
+            .user-dropdown { cursor: pointer; position: relative; }
+            .user-icon { width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em; }
+            .user-dropdown:hover .user-icon { background: #d90000; }
+            .dropdown-menu { display: none; position: absolute; top: 100%; right: 0; margin-top: 8px; background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); z-index: 1000; padding: 8px 0; border: 1px solid #eee; }
+            .dropdown-menu.show { display: block; }
+            .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
+            .dropdown-item:hover { background: #f5f5f5; }
             .container { max-width: 1000px; margin: 24px auto; padding: 0 20px; }
             .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
             .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
@@ -7157,8 +7307,20 @@ def manage_stores():
     <body>
         <div class="header">
             <h1>🏪 Manage Stores</h1>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-right">
+                <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('manageStoresUserDropdown').classList.toggle('show');">
+                    <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
+                    <div class="dropdown-menu" id="manageStoresUserDropdown">
+                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
+                        {% if current_user.is_admin() %}<a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>{% endif %}
+                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    </div>
+                </div>
+            </div>
         </div>
+        <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('manageStoresUserDropdown').classList.remove('show'); });</script>
         <div class="container">
             <div class="card">
                 <h2>Stores</h2>
@@ -7360,6 +7522,14 @@ def manage_users():
             .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
             .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
             .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .header-right { display: flex; align-items: center; gap: 16px; }
+            .user-dropdown { cursor: pointer; position: relative; }
+            .user-icon { width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em; }
+            .user-dropdown:hover .user-icon { background: #d90000; }
+            .dropdown-menu { display: none; position: absolute; top: 100%; right: 0; margin-top: 8px; background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); z-index: 1000; padding: 8px 0; border: 1px solid #eee; }
+            .dropdown-menu.show { display: block; }
+            .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
+            .dropdown-item:hover { background: #f5f5f5; }
             .container { max-width: 1200px; margin: 24px auto; padding: 0 20px; }
             .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
             .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
@@ -7404,8 +7574,20 @@ def manage_users():
     <body>
         <div class="header">
             <h1>👥 Manage Users</h1>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-right">
+                <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('manageUsersUserDropdown').classList.toggle('show');">
+                    <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
+                    <div class="dropdown-menu" id="manageUsersUserDropdown">
+                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
+                        {% if current_user.is_admin() %}<a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>{% endif %}
+                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
+                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    </div>
+                </div>
+            </div>
         </div>
+        <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('manageUsersUserDropdown').classList.remove('show'); });</script>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -7781,7 +7963,7 @@ def manage_roles():
     <body>
         <div class="header">
             <h1>🎭 Manage Roles</h1>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         <div class="container">
             <div class="panel">
@@ -8138,7 +8320,7 @@ def manage_admins():
     <body>
         <div class="header">
             <h1>🛡️ Manage Admins</h1>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -8457,7 +8639,7 @@ def manage_documents():
             except Exception as alter_e:
                 db.session.rollback()
                 flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL;', 'error')
-                return redirect(url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard'))
+                return redirect(url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard'))
             if current_user.is_manager() and get_current_user_store_id() is not None:
                 sid = get_current_user_store_id()
                 documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
@@ -9031,7 +9213,7 @@ def manage_documents():
             <div class="header-content">
                 <h1>📄 Manage Documents</h1>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -12270,9 +12452,6 @@ def _view_documents_impl():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
-                {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav">
                 <a href="{{ url_for('dashboard') }}">Home</a>
@@ -12280,9 +12459,6 @@ def _view_documents_impl():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}">Admin Console</a>
-                {% endif %}
             </div>
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
@@ -12292,7 +12468,9 @@ def _view_documents_impl():
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
                     <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
+                    {% if is_admin %}
                     <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
+                    {% endif %}
                     <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
                 </div>
             </div>
@@ -15508,7 +15686,7 @@ def view_form_signatures(doc_id):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -15864,9 +16042,9 @@ def view_new_hire_details(username):
         new_hire = NewHire.query.filter_by(username=username).first()
         if not new_hire:
             flash('New hire not found.', 'error')
-            return redirect(url_for('view_all_new_hires') if current_user.is_manager() else url_for('admin_dashboard'))
-        # Managers can only view new hires that appear on their store's list
-        if current_user.is_manager():
+            return redirect(url_for('view_all_new_hires') if current_user.is_manager() and not current_user.is_admin() else url_for('admin_dashboard'))
+        # Managers (non-admin) can only view new hires that appear on their store's list; admins can view all
+        if current_user.is_manager() and not current_user.is_admin():
             store_id = get_current_user_store_id()
             if store_id is None:
                 flash('You can only view new hires at your store.', 'error')
@@ -16335,7 +16513,7 @@ def view_new_hire_details(username):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -16504,6 +16682,11 @@ def view_new_hire_details(username):
                                 <td>{{ task.assigned_at.strftime('%B %d, %Y') if task.assigned_at else '-' }}</td>
                                 <td>{{ task.due_date.strftime('%B %d, %Y') if task.due_date else '-' }}</td>
                                 <td>
+                                    {% if task.status != 'completed' %}
+                                    <form method="POST" action="{{ url_for('nudge_user_task', username=username, task_id=task.id) }}" style="display: inline;">
+                                        <button type="submit" class="btn" style="padding: 6px 12px; font-size: 0.85em; background: #0d6efd; color: white; border: none; border-radius: 0.35rem; margin-right: 6px;">Email Nudge</button>
+                                    </form>
+                                    {% endif %}
                                     <form method="POST" action="{{ url_for('remove_user_task', task_id=task.id) }}" style="display: inline;" onsubmit="return confirm('Remove this task for {{ username }}? They will no longer see it in their Tasks list.');">
                                         <button type="submit" class="btn" style="padding: 6px 12px; font-size: 0.85em; background: #dc3545; color: white; border: none; border-radius: 0.35rem;">Remove</button>
                                     </form>
@@ -16548,6 +16731,48 @@ def remove_user_task(task_id):
         db.session.rollback()
         app.logger.exception('remove_user_task failed')
         flash(f'Could not remove task: {str(e)}', 'error')
+    return redirect(url_for('view_new_hire_details', username=username))
+
+
+@app.route('/admin/new-hire/<username>/nudge-task/<int:task_id>', methods=['POST'])
+@login_required
+def nudge_user_task(username, task_id):
+    """Send an email nudge to the user reminding them to complete the task. Admin or manager (store) only. Only for pending tasks."""
+    if not _manager_can_act_on_new_hire(username):
+        flash('You do not have permission to nudge this user.', 'error')
+        return redirect(url_for('view_all_new_hires') if current_user.is_manager() and not current_user.is_admin() else url_for('admin_dashboard'))
+    task = UserTask.query.filter_by(id=task_id, username=username).first()
+    if not task:
+        flash('Task not found.', 'error')
+        return redirect(url_for('view_new_hire_details', username=username))
+    if task.status == 'completed':
+        flash('Cannot nudge a completed task.', 'info')
+        return redirect(url_for('view_new_hire_details', username=username))
+    # Get user email: NewHire first, then User
+    to_email = None
+    new_hire = NewHire.query.filter_by(username=username).first()
+    if new_hire and getattr(new_hire, 'email', None) and str(new_hire.email).strip():
+        to_email = str(new_hire.email).strip()
+    if not to_email:
+        user_record = UserModel.query.filter_by(username=username).first()
+        if user_record and getattr(user_record, 'email', None) and str(user_record.email).strip():
+            to_email = str(user_record.email).strip()
+    if not to_email:
+        flash(f'No email address for {username}. Cannot send nudge.', 'error')
+        return redirect(url_for('view_new_hire_details', username=username))
+    task_title = task.task_title or 'Your assigned task'
+    subject = f'Reminder: Complete your onboarding task – {task_title}'
+    body_html = f'''
+    <p>Hello,</p>
+    <p>This is a reminder that the following task <strong>needs to be completed to continue onboarding</strong>:</p>
+    <p><strong>{task_title}</strong></p>
+    <p>Please log in to the onboarding portal and complete this task at your earliest convenience.</p>
+    <p>Thank you,<br>Onboarding Team</p>
+    '''
+    if send_email(to_email, subject, body_html):
+        flash(f'Nudge email sent to {to_email} for task "{task_title}".', 'success')
+    else:
+        flash('Email could not be sent. Check mail configuration.', 'error')
     return redirect(url_for('view_new_hire_details', username=username))
 
 
@@ -17002,7 +17227,7 @@ def manage_checklist():
             <div class="header-content">
                 <h1>✅ Manage New Hire Checklist</h1>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -17594,7 +17819,7 @@ def view_checklist():
             <div class="header-content">
                 <h1>✅ New Hire Checklist</h1>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -17993,7 +18218,7 @@ def view_user_checklists():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -18884,7 +19109,7 @@ def manage_external_links():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -20627,7 +20852,7 @@ def admin_reports():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -21017,7 +21242,7 @@ def admin_reports():
                 <strong>⚠️ Reports Page Error</strong>
                 <p>There was an error loading the reports. Please refresh the page or contact support if the problem persists.</p>
             </div>
-            <p><a href="{{ url_for('admin_reports') }}">Refresh Reports</a> | <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}">Back to Dashboard</a></p>
+            <p><a href="{{ url_for('admin_reports') }}">Refresh Reports</a> | <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}">Back to Dashboard</a></p>
         </body>
         </html>
         ''')
@@ -21215,7 +21440,7 @@ def manage_training():
             <div class="header-content">
                 <h1>🎓 Training Management</h1>
             </div>
-            <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -23251,11 +23476,6 @@ def list_training_videos():
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}" class="active">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Admin Console</a>
-                {% elif current_user.is_manager() %}
-                <a href="{{ url_for('manager_dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">Manager Console</a>
-                {% endif %}
             </div>
             <div class="mobile-nav" id="mobileNav" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: #000000; flex-direction: column; padding: 20px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
                 <a href="{{ url_for('dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Home</a>
@@ -23263,11 +23483,6 @@ def list_training_videos():
                 <a href="{{ url_for('view_documents') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Files</a>
                 <a href="{{ url_for('list_training_videos') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Videos</a>
                 <a href="{{ url_for('profile') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em; border-bottom: 1px solid rgba(255,255,255,0.1);">Profile</a>
-                {% if is_admin %}
-                <a href="{{ url_for('admin_dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em;">Admin Console</a>
-                {% elif current_user.is_manager() %}
-                <a href="{{ url_for('manager_dashboard') }}" style="color: #ffffff; text-decoration: none; padding: 12px 0; font-size: 1.1em;">Manager Console</a>
-                {% endif %}
             </div>
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">

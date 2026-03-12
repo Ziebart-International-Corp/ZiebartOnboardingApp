@@ -4,16 +4,31 @@ Configuration settings for the New Hire Application
 import os
 from pathlib import Path
 
-# Load .env from project root so DB_* and other vars are available (e.g. under IIS)
+# Load .env from project root so DB_* and other vars are available (e.g. under IIS).
+# override=True so .env always wins over IIS/process environment (e.g. DB_NAME).
+_config_dir = Path(__file__).resolve().parent
+_env_path = _config_dir / '.env'
 try:
     from dotenv import load_dotenv
-    _config_dir = Path(__file__).resolve().parent
-    load_dotenv(_config_dir / '.env')
+    load_dotenv(_env_path, override=True)
 except ImportError:
     pass
 
+# Force DB_* from .env file so IIS/env never overrides (read file directly for DB_NAME)
+def _env_value(key: str, default: str = '') -> str:
+    try:
+        if _env_path.exists():
+            with open(_env_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(key + '='):
+                        return line.split('=', 1)[1].strip().strip('"').strip("'") or default
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
 # Base directory
-BASE_DIR = Path(__file__).parent
+BASE_DIR = _config_dir
 
 # Secret key for sessions (change in production!)
 SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -44,13 +59,13 @@ ADMIN_GROUP = os.environ.get('ADMIN_GROUP', 'Domain Admins')  # AD group name
 # 'ldap' - Use LDAP/AD queries (requires domain controller access)
 AUTH_METHOD = os.environ.get('AUTH_METHOD', 'windows')
 
-# Database (SQL Server) — set in .env (never commit real credentials to the repo)
-DB_SERVER = os.environ.get('DB_SERVER', '')
-DB_PORT = os.environ.get('DB_PORT', '42278')
-DB_NAME = os.environ.get('DB_NAME', '')
-DB_USER = os.environ.get('DB_USER', '')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', '')
-DB_MAX_POOL_SIZE = os.environ.get('DB_MAX_POOL_SIZE', '300')
+# Database (SQL Server) — read from .env file first so IIS/env cannot override
+DB_SERVER = _env_value('DB_SERVER') or os.environ.get('DB_SERVER', '')
+DB_PORT = _env_value('DB_PORT') or os.environ.get('DB_PORT', '42278') or '42278'
+DB_NAME = _env_value('DB_NAME') or os.environ.get('DB_NAME', '')
+DB_USER = _env_value('DB_USER') or os.environ.get('DB_USER', '')
+DB_PASSWORD = _env_value('DB_PASSWORD') or os.environ.get('DB_PASSWORD', '')
+DB_MAX_POOL_SIZE = _env_value('DB_MAX_POOL_SIZE') or os.environ.get('DB_MAX_POOL_SIZE', '300')
 
 # SQLAlchemy connection string — SQL Server only (Neon/Postgres DATABASE_URL is ignored)
 from urllib.parse import quote_plus
