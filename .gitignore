@@ -1,5 +1,7 @@
-# Env (do not commit secrets)
+# Environment and secrets (copy to new PC manually)
 .env
+.env.local
+.env.*.local
 
 # Python
 __pycache__/
@@ -13,6 +15,10 @@ ENV/
 *.egg-info/
 dist/
 build/
+
+# Large uploads (GitHub file size limit 100 MB)
+uploads/videos/*.mp4
+uploads/videos/*.webm
 
 # Logs
 logs/

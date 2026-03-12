@@ -7,6 +7,18 @@ from datetime import datetime
 db = SQLAlchemy()
 
 
+class Store(db.Model):
+    """Store/location for scoping managers and documents."""
+    __tablename__ = 'stores'
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(200), nullable=False)
+    code = db.Column(db.String(50), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=True)
+
+    def __repr__(self):
+        return f'<Store {self.name}>'
+
+
 class User(db.Model):
     """User model for storing user information. Login is by email + password."""
     __tablename__ = 'users'
@@ -17,9 +29,9 @@ class User(db.Model):
     full_name = db.Column(db.String(200))
     email = db.Column(db.String(200), nullable=True, index=True)  # Used for login; unique per user
     password_hash = db.Column(db.String(255), nullable=True)  # Werkzeug hashed password
-    role = db.Column(db.String(20), default='user')  # 'admin' or 'user'
+    role = db.Column(db.String(20), default='user')  # 'admin', 'manager', or 'user'
+    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)
     access_revoked_at = db.Column(db.Date, nullable=True)  # When set (and today >= this date), user cannot log in
-    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)  # For managers: scoped to store
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_login = db.Column(db.DateTime)
     
@@ -49,11 +61,11 @@ class NewHire(db.Model):
     start_date = db.Column(db.Date)
     access_revoked_at = db.Column(db.Date, nullable=True)  # After this date user cannot log in
     status = db.Column(db.String(50), default='pending')  # pending, active, completed
-    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)
     created_by = db.Column(db.String(100))  # Username of creator
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     notes = db.Column(db.Text)
+    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)
     # Finale message shown to new hire when onboarding is complete (sent from admin checklist)
     finale_message = db.Column(db.Text, nullable=True)
     finale_message_sent_at = db.Column(db.DateTime, nullable=True)
@@ -101,11 +113,10 @@ class Document(db.Model):
     file_type = db.Column(db.String(100))  # MIME type
     description = db.Column(db.Text)
     is_visible = db.Column(db.Boolean, default=False)  # Visibility toggle for regular users
-    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)
+    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)  # Legacy: single store; document_stores for many
     uploaded_by = db.Column(db.String(100))  # Username of uploader
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    deleted_at = db.Column(db.DateTime, nullable=True)  # Soft-delete: when set, document is archived but kept for history
     
     def __repr__(self):
         return f'<Document {self.original_filename}>'
@@ -131,6 +142,12 @@ class Document(db.Model):
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
+
+# Document visibility per store (empty = all stores)
+document_stores = db.Table('document_stores',
+    db.Column('document_id', db.Integer, db.ForeignKey('documents.id'), primary_key=True),
+    db.Column('store_id', db.Integer, db.ForeignKey('stores.id'), primary_key=True)
+)
 
 # Job roles: default documents per role for onboarding
 role_documents = db.Table('role_documents',
@@ -620,30 +637,8 @@ class UserNotification(db.Model):
         return f'<UserNotification {self.username} - {self.notification_type}:{self.notification_id} ({self.is_read})>'
 
 
-class AdminSetting(db.Model):
-    """Key-value store for admin defaults (e.g. default finale message)."""
-    __tablename__ = 'admin_settings'
-    key = db.Column(db.String(100), primary_key=True)
-    value = db.Column(db.Text, nullable=True)
-
-    def __repr__(self):
-        return f'<AdminSetting {self.key}>'
-
-
-class Store(db.Model):
-    """Store/location for manager-scoped onboarding."""
-    __tablename__ = 'stores'
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    name = db.Column(db.String(200), nullable=False)
-    code = db.Column(db.String(50), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=True)
-
-    def __repr__(self):
-        return f'<Store {self.name}>'
-
-
 class ManagerPermission(db.Model):
-    """Per-user manager permission keys (e.g. edit_new_hire, revoke_access)."""
+    """Per-manager permission flags (e.g. can_manage_checklists)."""
     __tablename__ = 'manager_permissions'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
@@ -653,9 +648,12 @@ class ManagerPermission(db.Model):
         return f'<ManagerPermission user_id={self.user_id} {self.permission_key}>'
 
 
-# Association: which documents are visible to which stores (empty = all stores)
-document_stores = db.Table('document_stores',
-    db.Column('document_id', db.Integer, db.ForeignKey('documents.id'), primary_key=True),
-    db.Column('store_id', db.Integer, db.ForeignKey('stores.id'), primary_key=True)
-)
+class AdminSetting(db.Model):
+    """Key-value store for admin defaults (e.g. default finale message)."""
+    __tablename__ = 'admin_settings'
+    key = db.Column(db.String(100), primary_key=True)
+    value = db.Column(db.Text, nullable=True)
+
+    def __repr__(self):
+        return f'<AdminSetting {self.key}>'
 

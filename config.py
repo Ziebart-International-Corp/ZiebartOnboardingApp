@@ -4,15 +4,16 @@ Configuration settings for the New Hire Application
 import os
 from pathlib import Path
 
-# Base directory
-BASE_DIR = Path(__file__).parent
-
-# Load .env from project root so DATABASE_URL etc. are set
+# Load .env from project root so DB_* and other vars are available (e.g. under IIS)
 try:
     from dotenv import load_dotenv
-    load_dotenv(BASE_DIR / '.env')
+    _config_dir = Path(__file__).resolve().parent
+    load_dotenv(_config_dir / '.env')
 except ImportError:
     pass
+
+# Base directory
+BASE_DIR = Path(__file__).parent
 
 # Secret key for sessions (change in production!)
 SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -25,7 +26,7 @@ LDAP_BASE_DN = os.environ.get('LDAP_BASE_DN', None)  # Optional: e.g., 'DC=conto
 # Email Configuration
 EMAIL_DOMAIN = os.environ.get('EMAIL_DOMAIN', 'ziebart.com')  # Email domain for default email addresses
 MAIL_SERVER = os.environ.get('MAIL_SERVER', '')
-MAIL_PORT = int(os.environ.get('MAIL_PORT', '587'))
+MAIL_PORT = int(os.environ.get('MAIL_PORT', '587') or 587)
 MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'true').lower() == 'true'
 MAIL_USE_SSL = os.environ.get('MAIL_USE_SSL', 'false').lower() == 'true'
 MAIL_USERNAME = os.environ.get('MAIL_USERNAME', '')
@@ -43,34 +44,27 @@ ADMIN_GROUP = os.environ.get('ADMIN_GROUP', 'Domain Admins')  # AD group name
 # 'ldap' - Use LDAP/AD queries (requires domain controller access)
 AUTH_METHOD = os.environ.get('AUTH_METHOD', 'windows')
 
-# Database: SQL Server (ZiebartOnboarding) by default via DB_* env vars.
-# Optionally set DATABASE_URL to a Postgres URL (e.g. Neon) to use PostgreSQL instead.
-DB_SERVER = os.environ.get('DB_SERVER', 'roadrunner')
+# Database (SQL Server) — set in .env (never commit real credentials to the repo)
+DB_SERVER = os.environ.get('DB_SERVER', '')
 DB_PORT = os.environ.get('DB_PORT', '42278')
-DB_NAME = os.environ.get('DB_NAME', 'NewHireApp')
-DB_USER = os.environ.get('DB_USER', 'Developer')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', '1Shot@OneKill')
+DB_NAME = os.environ.get('DB_NAME', '')
+DB_USER = os.environ.get('DB_USER', '')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', '')
 DB_MAX_POOL_SIZE = os.environ.get('DB_MAX_POOL_SIZE', '300')
 
-_database_url = os.environ.get('DATABASE_URL', '').strip()
-if _database_url and (_database_url.startswith('postgresql://') or _database_url.startswith('postgres://')):
-    SQLALCHEMY_DATABASE_URI = _database_url
-    IS_POSTGRES = True
-else:
-    from urllib.parse import quote_plus
-    DB_PASSWORD_ENCODED = quote_plus(DB_PASSWORD)
-    SQLALCHEMY_DATABASE_URI = (
-        f'mssql+pyodbc://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}'
-        f'?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes'
-    )
-    IS_POSTGRES = False
-
+# SQLAlchemy connection string — SQL Server only (Neon/Postgres DATABASE_URL is ignored)
+from urllib.parse import quote_plus
+DB_PASSWORD_ENCODED = quote_plus(DB_PASSWORD)
+SQLALCHEMY_DATABASE_URI = (
+    f'mssql+pyodbc://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}'
+    f'?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes'
+)
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 SQLALCHEMY_ENGINE_OPTIONS = {
-    'pool_size': 10 if (_database_url and (_database_url.startswith('postgresql://') or _database_url.startswith('postgres://'))) else int(DB_MAX_POOL_SIZE),
+    'pool_size': int(DB_MAX_POOL_SIZE),
     'max_overflow': 0,
-    'pool_pre_ping': True,
-    'pool_recycle': 3600,
+    'pool_pre_ping': True,  # Verify connections before using
+    'pool_recycle': 3600,   # Recycle connections after 1 hour
 }
 
 # Session Configuration

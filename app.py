@@ -8,21 +8,17 @@ from sqlalchemy import exists, or_, and_, text, bindparam
 from auth import login_required, admin_required, manager_required, User, check_user_can_login_as_admin, authenticate_by_email_password
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, document_stores,
-                    new_hire_required_training)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, document_stores)
 from membership import get_token_groups, get_local_groups
-from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, IS_POSTGRES, \
+from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, \
     MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
 from datetime import datetime
 import os
-from pathlib import Path
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import generate_password_hash
 from io import BytesIO
 import base64
-import urllib.request
-import tempfile
 try:
     from graphql_schema import schema as graphql_schema
 except ImportError:
@@ -59,42 +55,6 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = SQLALCHEMY_ENGINE_OPTIONS
 app.config['UPLOAD_FOLDER'] = BASE_DIR / 'uploads'
 app.config['VIDEO_UPLOAD_FOLDER'] = BASE_DIR / 'uploads' / 'videos'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size (for videos)
-
-
-def _resolve_document_path(document):
-    """Resolve document.file_path to a local path or redirect URL. Documents in repo uploads/ (e.g. from GitHub)
-    are found at UPLOAD_FOLDER / basename when the DB path is absolute/missing on serverless (Vercel).
-    Returns (local_path, redirect_url). One is set: use local_path for send_file, or redirect to redirect_url."""
-    fp = (document.file_path or '').strip()
-    if not fp:
-        return (None, None)
-    if fp.startswith('http://') or fp.startswith('https://'):
-        return (None, fp)
-    if os.path.exists(fp):
-        return (fp, None)
-    upload_folder = app.config['UPLOAD_FOLDER']
-    basename = os.path.basename(fp)
-    # Fallback 1: uploads/<basename> (same as in repo / on Vercel)
-    fallback = upload_folder / basename
-    if fallback.exists():
-        return (str(fallback), None)
-    # Fallback 2: document.filename (stored name with timestamp, e.g. 20260121_201216_Employee_Onboarding_Acknowledgement.pdf)
-    if getattr(document, 'filename', None):
-        fallback2 = upload_folder / document.filename
-        if fallback2.exists():
-            return (str(fallback2), None)
-    # Fallback 3: cwd/uploads/ (in case serverless cwd differs from __file__)
-    try:
-        cwd_uploads = Path(os.getcwd()) / 'uploads'
-        if (cwd_uploads / basename).exists():
-            return (str(cwd_uploads / basename), None)
-        if getattr(document, 'filename', None) and (cwd_uploads / document.filename).exists():
-            return (str(cwd_uploads / document.filename), None)
-    except Exception:
-        pass
-    return (None, None)
-
-
 app.config['ALLOWED_EXTENSIONS'] = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'svg'}
 app.config['ALLOWED_VIDEO_EXTENSIONS'] = {'mp4', 'webm', 'ogg', 'mov', 'avi'}
 
@@ -141,6 +101,34 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
+
+
+def _log_exception_to_file(exc):
+    """Write exception traceback to logs/error.log."""
+    try:
+        import traceback
+        log_path = BASE_DIR / 'logs' / 'error.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(datetime.utcnow().isoformat() + ' EXCEPTION\n')
+            f.write(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            f.write('\n')
+    except Exception:
+        pass
+
+
+from flask.signals import got_request_exception
+def _on_request_exception(sender, exception, **kwargs):
+    _log_exception_to_file(exception)
+got_request_exception.connect(_on_request_exception, app)
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    """Log 500 and return generic message."""
+    if getattr(e, 'original_exception', None):
+        _log_exception_to_file(e.original_exception)
+    return 'Internal Server Error', 500
 
 
 def get_email_for_username(username):
@@ -339,35 +327,17 @@ def _ensure_stores_and_store_id():
     _stores_migrated = True
 
 
-_postgres_schema_created = False
-
-
-def _ensure_postgres_schema():
-    """For Neon/Postgres: create all tables from models (one-time)."""
-    global _postgres_schema_created
-    if _postgres_schema_created or not IS_POSTGRES:
-        return
-    try:
-        db.create_all()
-        _postgres_schema_created = True
-    except Exception:
-        pass
-
-
 @app.before_request
 def _run_users_migration_if_needed():
     """Run one-time migration for users.access_revoked_at, new_hires finale columns, admin_settings, stores before any request."""
     if request.path.startswith('/static'):
         return
     try:
-        if IS_POSTGRES:
-            _ensure_postgres_schema()
-        else:
-            _ensure_users_access_revoked_at_column()
-            _ensure_users_role_column()
-            _ensure_new_hires_finale_columns()
-            _ensure_admin_settings_table()
-            _ensure_stores_and_store_id()
+        _ensure_users_access_revoked_at_column()
+        _ensure_users_role_column()
+        _ensure_new_hires_finale_columns()
+        _ensure_admin_settings_table()
+        _ensure_stores_and_store_id()
     except Exception:
         pass
 
@@ -411,26 +381,10 @@ def get_current_user_store_id():
         return None
 
 
-def _ensure_document_deleted_at_column():
-    """Ensure documents table has deleted_at column (for soft-delete). Safe to call on every request; no-op if column exists."""
-    try:
-        if IS_POSTGRES:
-            db.session.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL"))
-        else:
-            db.session.execute(text("ALTER TABLE documents ADD deleted_at DATETIME NULL"))
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        err_str = (str(e) or '').lower()
-        if 'already exists' in err_str or 'duplicate column' in err_str or 'existing' in err_str:
-            pass  # column already there
-        # else: column might not exist and ALTER failed (e.g. permissions); later queries may fail
-
-
 def documents_visible_to_store_query(store_id, base_filter=None):
-    """Return Document query filtered to active (not soft-deleted), is_visible, and (all stores or store_id in document's stores).
-    If store_id is None, only is_visible and active are applied (admin view). base_filter is an optional extra filter (e.g. has signature fields)."""
-    q = Document.query.filter(Document.is_visible == True, Document.deleted_at.is_(None))
+    """Return Document query filtered to is_visible and (all stores or store_id in document's stores).
+    If store_id is None, only is_visible is applied (admin view). base_filter is an optional extra filter (e.g. has signature fields)."""
+    q = Document.query.filter(Document.is_visible == True)
     if store_id is not None:
         # Document visible to this store if: no rows in document_stores (all stores) OR has row with this store_id
         no_stores = ~exists().where(document_stores.c.document_id == Document.id)
@@ -528,12 +482,6 @@ def allowed_video_file(filename):
 
 
 # Routes
-@app.route('/health')
-def health():
-    """Lightweight health check (no DB). Use for Vercel/lb checks."""
-    return jsonify({"status": "ok"}), 200
-
-
 @app.route('/')
 def index():
     """Home: redirect to dashboard if logged in, else to login."""
@@ -579,8 +527,8 @@ query {
     operation_name = data.get('operationName')
     if not query:
         return jsonify({'errors': [{'message': 'Missing query'}]}), 400
-    if graphql_schema is None:
-        return jsonify({'errors': [{'message': 'GraphQL schema not available'}]}), 503
+    if not graphql_schema:
+        return jsonify({'errors': [{'message': 'GraphQL not available'}]}), 503
     result = graphql_schema.execute(
         query,
         context_value={'request': request, 'current_user': current_user},
@@ -603,15 +551,19 @@ def login():
         return redirect(url_for('dashboard'))
     next_url = request.args.get('next') or url_for('dashboard')
     if request.method == 'POST':
-        email = (request.form.get('email') or '').strip()
-        password = request.form.get('password') or ''
-        user = authenticate_by_email_password(email, password)
-        if user:
-            login_user(user, remember=True)
-            update_last_login(user.username)
-            next_after = request.form.get('next') or request.args.get('next') or url_for('dashboard')
-            return redirect(url_for('welcome', next=next_after))
-        flash('Invalid email or password. Please try again.', 'error')
+        try:
+            email = (request.form.get('email') or '').strip()
+            password = request.form.get('password') or ''
+            user = authenticate_by_email_password(email, password)
+            if user:
+                login_user(user, remember=True)
+                update_last_login(user.username)
+                next_after = request.form.get('next') or request.args.get('next') or url_for('dashboard')
+                return redirect(url_for('welcome', next=next_after))
+            flash('Invalid email or password. Please try again.', 'error')
+        except Exception as e:
+            _log_exception_to_file(e)
+            raise
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -892,11 +844,6 @@ def welcome():
 def dashboard():
     """User dashboard"""
     try:
-        # Ensure soft-delete column exists (e.g. first request after deploy on Neon)
-        try:
-            _ensure_document_deleted_at_column()
-        except Exception:
-            pass
         is_admin = current_user.is_admin()
         
         # Get new hire record for current user (guard None first/last name)
@@ -1096,7 +1043,7 @@ def dashboard():
                 else:
                     visible_documents = []
             else:
-                visible_documents = Document.query.filter_by(is_visible=True).filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).limit(3).all()
+                visible_documents = Document.query.filter_by(is_visible=True).order_by(Document.created_at.desc()).limit(3).all()
         except Exception as e:
             visible_documents = []
         
@@ -5338,10 +5285,6 @@ def admin_dashboard():
 
 def _admin_dashboard_impl():
     """Admin dashboard implementation (called from admin_dashboard)."""
-    try:
-        _ensure_document_deleted_at_column()
-    except Exception:
-        pass
     total_users = 0
     total_new_hires = 0
     admin_users = 0
@@ -5371,7 +5314,7 @@ def _admin_dashboard_impl():
         db.session.rollback()
         app.logger.warning(f"admin_dashboard: admin_users failed: {e}")
     try:
-        forms_completed = Document.query.filter_by(is_visible=True).filter(Document.deleted_at.is_(None)).count()
+        forms_completed = Document.query.filter_by(is_visible=True).count()
     except Exception as e:
         db.session.rollback()
         app.logger.warning(f"admin_dashboard: forms_completed failed: {e}")
@@ -7176,7 +7119,7 @@ def manage_stores():
     for store in stores:
         managers_count = UserModel.query.filter_by(store_id=store.id, role='manager').count()
         users_count = UserModel.query.filter_by(store_id=store.id, role='user').count()
-        forms_count = Document.query.filter_by(store_id=store.id).filter(Document.deleted_at.is_(None)).count()
+        forms_count = Document.query.filter_by(store_id=store.id).count()
         store_stats.append({
             'store': store,
             'managers_count': managers_count,
@@ -7265,7 +7208,7 @@ def store_detail(store_id):
         return redirect(url_for('manage_stores'))
     managers = UserModel.query.filter_by(store_id=store_id, role='manager').order_by(UserModel.username).all()
     users = UserModel.query.filter_by(store_id=store_id, role='user').order_by(UserModel.username).all()
-    forms = Document.query.filter_by(store_id=store_id).filter(Document.deleted_at.is_(None)).order_by(Document.original_filename).all()
+    forms = Document.query.filter_by(store_id=store_id).order_by(Document.original_filename).all()
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -8495,60 +8438,33 @@ def manage_documents():
     if not current_user.is_admin() and not manager_has_permission('manage_documents'):
         abort(403)
     is_manager_view = current_user.is_manager()
-    show_archived = request.args.get('archived') in ('1', 'true', 'yes')
-    store_id = get_current_user_store_id()
     try:
-        if show_archived:
-            # Archived list: deleted_at is not None; same store scope for managers
-            q = Document.query.filter(Document.deleted_at.isnot(None))
-            if current_user.is_manager() and store_id is not None:
-                no_stores = ~exists().where(document_stores.c.document_id == Document.id)
-                in_store = exists().where(and_(document_stores.c.document_id == Document.id, document_stores.c.store_id == store_id))
-                q = q.filter(Document.is_visible == True).filter(or_(no_stores, in_store))
-            documents = q.order_by(Document.created_at.desc()).all()
+        store_id = get_current_user_store_id()
+        if current_user.is_manager() and store_id is not None:
+            # Only documents visible to this store (is_visible and assigned to this store or all stores)
+            q = documents_visible_to_store_query(store_id).order_by(Document.created_at.desc())
+            documents = q.all()
         else:
-            if current_user.is_manager() and store_id is not None:
-                q = documents_visible_to_store_query(store_id).order_by(Document.created_at.desc())
-                documents = q.all()
-            else:
-                documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
+            documents = Document.query.order_by(Document.created_at.desc()).all()
     except Exception as e:
-        # If display_name or deleted_at column is missing (existing DBs), add and retry
+        # If display_name column is missing (existing DBs), add it and retry
         db.session.rollback()
         err_str = (str(e) or '').lower()
-        if 'display_name' in err_str or 'deleted_at' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
+        if 'display_name' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
             try:
-                if 'display_name' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
-                    db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
-                if 'deleted_at' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
-                    if IS_POSTGRES:
-                        db.session.execute(text("ALTER TABLE documents ADD COLUMN deleted_at TIMESTAMP NULL"))
-                    else:
-                        db.session.execute(text("ALTER TABLE documents ADD deleted_at DATETIME NULL"))
+                db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
                 db.session.commit()
             except Exception as alter_e:
                 db.session.rollback()
-                flash('Database update needed. Run: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL; ALTER TABLE documents ADD deleted_at DATETIME NULL; (Postgres: deleted_at TIMESTAMP NULL)', 'error')
+                flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL;', 'error')
                 return redirect(url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard'))
             if current_user.is_manager() and get_current_user_store_id() is not None:
                 sid = get_current_user_store_id()
                 documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
             else:
-                documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
+                documents = Document.query.order_by(Document.created_at.desc()).all()
         else:
             raise
-    # Archived count (for "View archived (N)" link when viewing active list)
-    archived_count = 0
-    if not show_archived:
-        try:
-            qa = Document.query.filter(Document.deleted_at.isnot(None))
-            if current_user.is_manager() and store_id is not None:
-                no_stores = ~exists().where(document_stores.c.document_id == Document.id)
-                in_store = exists().where(and_(document_stores.c.document_id == Document.id, document_stores.c.store_id == store_id))
-                qa = qa.filter(Document.is_visible == True).filter(or_(no_stores, in_store))
-            archived_count = qa.count()
-        except Exception:
-            archived_count = 0
     # For managers: only count signatures from users at their store
     store_usernames = None
     if is_manager_view and store_id is not None:
@@ -8577,7 +8493,7 @@ def manage_documents():
             sid = get_current_user_store_id()
             documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
         else:
-            documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
+            documents = Document.query.order_by(Document.created_at.desc()).all()
         for doc in documents:
             doc.signature_fields_count = 0
             doc.signatures_count = 0
@@ -9113,13 +9029,9 @@ def manage_documents():
     <body>
         <div class="header">
             <div class="header-content">
-                <h1>📄 {% if show_archived %}Archived Documents{% else %}Manage Documents{% endif %}</h1>
+                <h1>📄 Manage Documents</h1>
             </div>
-            {% if show_archived %}
-            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to active documents</a>
-            {% else %}
             <a href="{{ url_for('manager_dashboard') if current_user.is_manager() else url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
-            {% endif %}
         </div>
         
         <div class="container">
@@ -9130,7 +9042,7 @@ def manage_documents():
                 {% endfor %}
             {% endif %}
             {% endwith %}
-            {% if not is_manager_view and not show_archived %}
+            {% if not is_manager_view %}
             <div class="admin-panel collapsible-upload-panel">
                 <button type="button" class="collapsible-header" id="upload-section-toggle" aria-expanded="true" aria-controls="upload-form-body">
                     <span class="collapsible-chevron" aria-hidden="true">▼</span>
@@ -9174,10 +9086,7 @@ def manage_documents():
             </div>
             {% endif %}
             <div class="admin-panel">
-                <h2>{% if show_archived %}Archived documents{% elif is_manager_view %}Forms for your location (view only){% else %}Uploaded Documents{% endif %}</h2>
-                {% if not show_archived and archived_count > 0 %}
-                <p style="margin-bottom: 12px;"><a href="{{ url_for('manage_documents', archived=1) }}" class="btn btn-primary">View archived ({{ archived_count }})</a></p>
-                {% endif %}
+                <h2>{% if is_manager_view %}Forms for your location (view only){% else %}Uploaded Documents{% endif %}</h2>
                 {% if documents %}
                 <table>
                     <thead>
@@ -9194,9 +9103,6 @@ def manage_documents():
                             <th>Uploaded By</th>
                             {% endif %}
                             <th>Uploaded</th>
-                            {% if not is_manager_view %}
-                            <th>Document URL (Blob)</th>
-                            {% endif %}
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -9260,18 +9166,6 @@ def manage_documents():
                             <td>{{ doc.uploaded_by }}</td>
                             {% endif %}
                             <td>{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '-' }}</td>
-                            {% if not is_manager_view %}
-                            <td style="max-width: 260px;">
-                                <form method="POST" action="{{ url_for('set_document_url') }}" style="display: flex; gap: 6px; align-items: center;">
-                                    <input type="hidden" name="doc_id" value="{{ doc.id }}">
-                                    <input type="url" name="url" value="{{ doc.file_path if doc.file_path and doc.file_path.startswith('http') else '' }}" placeholder="Paste Vercel Blob URL" style="flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px;">
-                                    <button type="submit" class="action-btn" style="white-space: nowrap;">Set URL</button>
-                                </form>
-                                {% if doc.file_path and not doc.file_path.startswith('http') %}
-                                <small style="color: #888;">Local file (set URL for Vercel)</small>
-                                {% endif %}
-                            </td>
-                            {% endif %}
                             <td>
                                 <div class="actions-group">
                                     <div class="actions-primary">
@@ -9300,18 +9194,12 @@ def manage_documents():
                                             <form method="POST" action="{{ url_for('delete_document') }}" style="display: block;">
                                                 <input type="hidden" name="doc_id" value="{{ doc.id }}">
                                                 <button type="submit" class="actions-dropdown-item danger" style="width: 100%; text-align: left; border: none; background: none; cursor: pointer;" 
-                                                        onclick="return confirm('Archive {{ doc.original_filename }}? It will stay in user history and signed copies can still be viewed.')">
-                                                    🗑️ Archive
+                                                        onclick="return confirm('Delete {{ doc.original_filename }}?')">
+                                                    🗑️ Delete
                                                 </button>
                                             </form>
                                         </div>
                                     </div>
-                                    {% endif %}
-                                    {% if show_archived %}
-                                    <form method="POST" action="{{ url_for('restore_document') }}" style="display: inline;">
-                                        <input type="hidden" name="doc_id" value="{{ doc.id }}">
-                                        <button type="submit" class="action-btn" style="background: #28a745;" title="Restore to active documents">↩️ Restore</button>
-                                    </form>
                                     {% endif %}
                                 </div>
                             </td>
@@ -9320,7 +9208,7 @@ def manage_documents():
                     </tbody>
                 </table>
                 {% else %}
-                <p>{% if show_archived %}No archived documents.{% elif is_manager_view %}No forms available for your location.{% else %}No documents uploaded yet.{% endif %}</p>
+                <p>{% if is_manager_view %}No forms available for your location.{% else %}No documents uploaded yet.{% endif %}</p>
                 {% endif %}
             </div>
         </div>
@@ -9562,7 +9450,7 @@ def manage_documents():
         </script>
     </body>
     </html>
-    ''', documents=documents, stores=stores, store_by_id=store_by_id, is_manager_view=is_manager_view, show_archived=show_archived, archived_count=archived_count)
+    ''', documents=documents, stores=stores, store_by_id=store_by_id, is_manager_view=is_manager_view)
 
 
 @app.route('/admin/upload-document', methods=['POST'])
@@ -9705,66 +9593,10 @@ def toggle_document_visibility():
     return redirect(url_for('manage_documents'))
 
 
-@app.route('/admin/documents/set-url', methods=['POST'])
-@admin_required
-def set_document_url():
-    """Set document file_path to a URL (e.g. Vercel Blob). Use when hosting on Vercel."""
-    doc_id = request.form.get('doc_id', type=int)
-    url = (request.form.get('url') or '').strip()
-    if not doc_id:
-        flash('Document ID required.', 'error')
-        return redirect(url_for('manage_documents'))
-    document = Document.query.get(doc_id)
-    if not document:
-        flash('Document not found.', 'error')
-        return redirect(url_for('manage_documents'))
-    if not url:
-        flash('URL is required.', 'error')
-        return redirect(url_for('manage_documents'))
-    if not (url.startswith('http://') or url.startswith('https://')):
-        flash('URL must start with http:// or https://', 'error')
-        return redirect(url_for('manage_documents'))
-    try:
-        document.file_path = url
-        db.session.commit()
-        flash(f'Document URL updated for "{document.display_name or document.original_filename}".', 'success')
-    except Exception as e:
-        db.session.rollback()
-        flash(f'Error updating URL: {str(e)}', 'error')
-    return redirect(url_for('manage_documents'))
-
-
-@app.route('/admin/restore-document', methods=['POST'])
-@admin_required
-def restore_document():
-    """Restore a soft-deleted document so it appears in active lists again."""
-    doc_id = request.form.get('doc_id')
-    if not doc_id:
-        flash('Document ID is required.', 'error')
-        return redirect(url_for('manage_documents'))
-    try:
-        doc_id = int(doc_id)
-    except (TypeError, ValueError):
-        flash('Invalid document ID.', 'error')
-        return redirect(url_for('manage_documents'))
-    document = Document.query.get(doc_id)
-    if not document:
-        flash('Document not found.', 'error')
-        return redirect(url_for('manage_documents'))
-    try:
-        document.deleted_at = None
-        db.session.commit()
-        flash(f'Document "{document.original_filename}" restored.', 'success')
-    except Exception as e:
-        db.session.rollback()
-        flash(f'Error restoring document: {str(e)}', 'error')
-    return redirect(url_for('manage_documents') + '?archived=1')
-
-
 @app.route('/admin/delete-document', methods=['POST'])
 @admin_required
 def delete_document():
-    """Soft-delete a document: set deleted_at so it is hidden from active lists but kept for user history and signed views."""
+    """Delete a document and all related records (signatures, assignments, etc.)"""
     doc_id = request.form.get('doc_id')
     
     if not doc_id:
@@ -9783,29 +9615,34 @@ def delete_document():
         return redirect(url_for('manage_documents'))
     
     original_filename = document.original_filename
+    file_path = document.file_path
     
     try:
-        document.deleted_at = datetime.utcnow()
+        # Delete related records first (foreign keys would block document delete)
+        DocumentSignature.query.filter_by(document_id=doc_id).delete()
+        DocumentTypedFieldValue.query.filter_by(document_id=doc_id).delete()
+        DocumentSignatureField.query.filter_by(document_id=doc_id).delete()
+        DocumentTypedField.query.filter_by(document_id=doc_id).delete()
+        DocumentAssignment.query.filter_by(document_id=doc_id).delete()
+        # Unlink user tasks that referenced this document (column is nullable)
+        for task in UserTask.query.filter_by(document_id=doc_id).all():
+            task.document_id = None
+        
+        # Delete file from filesystem
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass  # continue even if file already gone
+        
+        # Delete document
+        db.session.delete(document)
         db.session.commit()
-        flash(f'Document "{original_filename}" archived. It remains in user history and signed copies can still be viewed.', 'success')
+        
+        flash(f'Document "{original_filename}" deleted successfully.', 'success')
     except Exception as e:
         db.session.rollback()
-        err_str = (str(e) or '').lower()
-        if 'deleted_at' in err_str or 'invalid column' in err_str or 'unknown column' in err_str:
-            try:
-                if IS_POSTGRES:
-                    db.session.execute(text("ALTER TABLE documents ADD COLUMN deleted_at TIMESTAMP NULL"))
-                else:
-                    db.session.execute(text("ALTER TABLE documents ADD deleted_at DATETIME NULL"))
-                db.session.commit()
-                document.deleted_at = datetime.utcnow()
-                db.session.commit()
-                flash(f'Document "{original_filename}" archived. It remains in user history and signed copies can still be viewed.', 'success')
-            except Exception as alter_e:
-                db.session.rollback()
-                flash(f'Error archiving document: {str(alter_e)}. Run: ALTER TABLE documents ADD deleted_at DATETIME NULL; (or TIMESTAMP for Postgres)', 'error')
-        else:
-            flash(f'Error archiving document: {str(e)}', 'error')
+        flash(f'Error deleting document: {str(e)}', 'error')
     
     return redirect(url_for('manage_documents'))
 
@@ -11947,9 +11784,8 @@ def _view_documents_impl():
 
     try:
         if current_user.is_admin():
-            documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
+            documents = Document.query.order_by(Document.created_at.desc()).all()
         else:
-            # User view: show all assigned docs (including archived) so history is preserved
             assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
             assigned_doc_ids = [a.document_id for a in assigned_documents]
             if assigned_doc_ids:
@@ -11958,25 +11794,17 @@ def _view_documents_impl():
                 documents = []
     except Exception as e:
         db.session.rollback()
-        # Try adding display_name or deleted_at if missing (MSSQL/pyodbc error text can vary)
+        # Try adding display_name if missing (MSSQL/pyodbc error text can vary)
         err_str = (str(e) or '').lower()
         try:
             db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
             db.session.commit()
         except Exception:
             db.session.rollback()
-        try:
-            if IS_POSTGRES:
-                db.session.execute(text("ALTER TABLE documents ADD COLUMN deleted_at TIMESTAMP NULL"))
-            else:
-                db.session.execute(text("ALTER TABLE documents ADD deleted_at DATETIME NULL"))
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-        # Retry the query (succeeds if the only issue was missing columns)
+        # Retry the query (succeeds if the only issue was missing display_name)
         try:
             if current_user.is_admin():
-                documents = Document.query.filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
+                documents = Document.query.order_by(Document.created_at.desc()).all()
             else:
                 assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
                 assigned_doc_ids = [a.document_id for a in assigned_documents]
@@ -12588,11 +12416,8 @@ def view_document(doc_id):
             flash('This document is not available.', 'error')
             return redirect(url_for('dashboard'))
     
-    # Resolve path: URL (redirect), local path, or repo uploads/ fallback (e.g. from GitHub on Vercel)
-    local_path, redirect_url = _resolve_document_path(document)
-    if redirect_url:
-        return redirect(redirect_url)
-    if not local_path:
+    # Check if file exists
+    if not os.path.exists(document.file_path):
         flash('File not found on server.', 'error')
         return redirect(url_for('dashboard'))
     
@@ -12607,7 +12432,7 @@ def view_document(doc_id):
     if file_type in viewable_types or file_ext in viewable_extensions:
         # Serve file for viewing in browser
         return send_file(
-            local_path,
+            document.file_path,
             as_attachment=False,
             mimetype=file_type or 'application/octet-stream'
         )
@@ -12678,29 +12503,15 @@ def view_document_embed(doc_id, username=None):
             if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
                 
                 # Create a temporary signed copy
+                import tempfile
                 import shutil
                 
                 # Create temp file
                 temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
                 os.close(temp_fd)
                 
-                # Get original PDF: URL (download), local path, or repo uploads/ fallback
-                local_path, redirect_url = _resolve_document_path(document)
-                if redirect_url:
-                    try:
-                        urllib.request.urlretrieve(redirect_url, temp_path)
-                    except Exception as e:
-                        print(f"Failed to download document from URL: {e}")
-                        if os.path.exists(temp_path):
-                            try:
-                                os.unlink(temp_path)
-                            except Exception:
-                                pass
-                        raise
-                elif local_path:
-                    shutil.copy2(local_path, temp_path)
-                else:
-                    raise FileNotFoundError("Document file not found")
+                # Copy original PDF
+                shutil.copy2(document.file_path, temp_path)
                 
                 # Embed signatures and typed field values into temp copy
                 pdf_doc = fitz.open(temp_path)
@@ -12936,17 +12747,14 @@ def view_document_embed(doc_id, username=None):
             traceback.print_exc()
             # Fall through to serve original
     
-    # Serve original blank document (resolve: URL, local path, or repo uploads/)
-    local_path, redirect_url = _resolve_document_path(document)
-    if redirect_url:
-        return redirect(redirect_url)
-    if not local_path:
+    # Serve original blank document
+    if not os.path.exists(document.file_path):
         return "File not found on server.", 404
     
     file_type = document.file_type or 'application/octet-stream'
     
     response = send_file(
-        local_path,
+        document.file_path,
         as_attachment=False,
         mimetype=file_type
     )
@@ -12973,33 +12781,13 @@ def render_document_with_signatures(doc_id):
         if not assignment:
             return "This document has not been assigned to you.", 403
     
-    # Resolve: URL (download to temp), local path, or repo uploads/ fallback
-    local_path, redirect_url = _resolve_document_path(document)
-    temp_path = None
-    if redirect_url:
-        try:
-            temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
-            os.close(temp_fd)
-            urllib.request.urlretrieve(redirect_url, temp_path)
-            local_path = temp_path
-        except Exception as e:
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
-            return f"Failed to load document from URL: {e}", 502
-    elif not local_path:
+    # Check if file exists
+    if not os.path.exists(document.file_path):
         return "File not found on server.", 404
-
+    
     # Check if document is a PDF
-    is_pdf = document.file_type == 'application/pdf' or (document.original_filename or '').lower().endswith('.pdf')
+    is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
     if not is_pdf:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
         return "Only PDF documents can be rendered with signatures.", 400
     
     # Get page number (default to 1)
@@ -13074,24 +12862,14 @@ def render_document_with_signatures(doc_id):
         
         # Use PyMuPDF (fitz) - it's already installed and works reliably
         if not FITZ_AVAILABLE:
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
             return "PDF rendering library (PyMuPDF) not available. Please install pymupdf.", 500
         
         # Open PDF
-        pdf_doc = fitz.open(local_path)
+        pdf_doc = fitz.open(document.file_path)
         
         # Validate page number
         if page_num < 0 or page_num >= len(pdf_doc):
             pdf_doc.close()
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
             return f"Page not found. Document has {len(pdf_doc)} page(s).", 404
         
         # Get the page
@@ -13101,11 +12879,6 @@ def render_document_with_signatures(doc_id):
         
         if page_height <= 0:
             pdf_doc.close()
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
             return "Invalid page dimensions.", 500
         
         # Render page to image - scale to match viewer height (800px)
@@ -13168,21 +12941,12 @@ def render_document_with_signatures(doc_id):
         output.seek(0)
         
         pdf_doc.close()
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
+        
         return send_file(output, mimetype='image/png')
         
     except Exception as e:
         import traceback
         traceback.print_exc()
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except Exception:
-                pass
         return f"Error rendering document: {str(e)}", 500
 
 
@@ -14270,17 +14034,11 @@ def embed_signature_in_pdf(document, signature_field, signature_image_base64):
     if not FITZ_AVAILABLE:
         return False, "PyMuPDF not available"
     
-    local_path, redirect_url = _resolve_document_path(document)
-    if redirect_url:
-        return False, "Document is hosted by URL; cannot embed in place."
-    if not local_path:
-        return False, "Document file not found."
-    
     try:
         from PIL import Image
         
-        # Open the PDF (from local path or repo uploads/)
-        pdf_doc = fitz.open(local_path)
+        # Open the PDF
+        pdf_doc = fitz.open(document.file_path)
         
         # Get the page (0-indexed)
         page_num = signature_field.page_number - 1
@@ -14361,7 +14119,7 @@ def embed_signature_in_pdf(document, signature_field, signature_image_base64):
         page.insert_image(img_rect, stream=img_bytes.getvalue())
         
         # Save the modified PDF (incremental to preserve other data)
-        pdf_doc.save(local_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+        pdf_doc.save(document.file_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         pdf_doc.close()
         
         return True, "Signature embedded successfully"
@@ -14505,9 +14263,6 @@ def submit_signature(doc_id):
             return jsonify({'success': False, 'error': 'Missing signature image'}), 400
     
     try:
-        # Resolve document path (local, repo uploads/, or URL) for hash and crypto signing
-        doc_local_path, _ = _resolve_document_path(document)
-        
         # Check if user already signed this field (by ID or by location for orphaned signatures)
         existing_signature = DocumentSignature.query.filter_by(
             document_id=doc_id,
@@ -14596,9 +14351,9 @@ def submit_signature(doc_id):
         if is_cryptographic:
             # Cryptographic signature
             success, message = sign_pdf_cryptographically(document, signature_field, current_user.username)
-            if success and doc_local_path:
-                # Calculate hash of signed PDF for audit trail (use resolved path)
-                pdf_hash = calculate_pdf_hash(doc_local_path)
+            if success:
+                # Calculate hash of signed PDF for audit trail
+                pdf_hash = calculate_pdf_hash(document.file_path)
                 sig_to_embed.signature_hash = pdf_hash
         else:
             # Image signature - don't embed into original, just save to database
@@ -14902,11 +14657,8 @@ def download_document(doc_id):
                 flash('This document is not available.', 'error')
                 return redirect(url_for('dashboard'))
     
-    # Resolve: URL, local path, or repo uploads/ fallback (e.g. from GitHub on Vercel)
-    local_path, redirect_url = _resolve_document_path(document)
-    if redirect_url and (current_user.is_admin() or (current_user.is_manager() and manager_has_permission('manage_documents'))):
-        return redirect(redirect_url)
-    if not redirect_url and not local_path:
+    # Check if file exists
+    if not os.path.exists(document.file_path):
         flash('Document not found on server.', 'error')
         return redirect(url_for('dashboard'))
     
@@ -14932,26 +14684,15 @@ def download_document(doc_id):
             
             if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
                 # Create a temporary signed copy
+                import tempfile
                 import shutil
                 
                 # Create temp file
                 temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
                 os.close(temp_fd)
                 
-                # Get original PDF: URL (download) or local path (incl. repo uploads/)
-                if redirect_url:
-                    try:
-                        urllib.request.urlretrieve(redirect_url, temp_path)
-                    except Exception as e:
-                        flash(f'Failed to load document: {e}', 'error')
-                        if os.path.exists(temp_path):
-                            try:
-                                os.unlink(temp_path)
-                            except Exception:
-                                pass
-                        return redirect(url_for('dashboard'))
-                else:
-                    shutil.copy2(local_path, temp_path)
+                # Copy original PDF
+                shutil.copy2(document.file_path, temp_path)
                 
                 # Embed signatures and typed field values into temp copy
                 pdf_doc = fitz.open(temp_path)
@@ -15109,11 +14850,9 @@ def download_document(doc_id):
                     mimetype=document.file_type or 'application/pdf'
                 )
             else:
-                # No signatures or typed fields, just download original (redirect if URL)
-                if redirect_url:
-                    return redirect(redirect_url)
+                # No signatures or typed fields, just download original
                 return send_file(
-                    local_path,
+                    document.file_path,
                     as_attachment=True,
                     download_name=document.original_filename,
                     mimetype=document.file_type or 'application/octet-stream'
@@ -15122,19 +14861,17 @@ def download_document(doc_id):
             print(f"Error generating signed PDF: {e}")
             import traceback
             traceback.print_exc()
-            # Fall through to download original (redirect if URL)
-            if redirect_url:
-                return redirect(redirect_url)
+            # Fall through to download original
             return send_file(
-                local_path,
+                document.file_path,
                 as_attachment=True,
                 download_name=document.original_filename,
                 mimetype=document.file_type or 'application/octet-stream'
             )
     else:
-        # Admin downloads original (URL already redirected at top; here use local path)
+        # Admin downloads original document
         return send_file(
-            local_path,
+            document.file_path,
             as_attachment=True,
             download_name=document.original_filename,
             mimetype=document.file_type or 'application/octet-stream'
@@ -15898,17 +15635,13 @@ def download_signed_document(doc_id, username):
     def _error_redirect():
         return redirect(url_for('view_form_signatures', doc_id=doc_id)) if request.args.get('inline') else redirect(url_for('view_signed_documents', doc_id=doc_id))
     
-    # Resolve: URL, local path, or repo uploads/ fallback
-    local_path, redirect_url = _resolve_document_path(document)
-    if redirect_url:
-        flash('Download signed copy from URL not supported here. Use View/Download from your documents.', 'error')
-        return _error_redirect()
-    if not local_path:
+    # Check if file exists
+    if not os.path.exists(document.file_path):
         flash('File not found on server.', 'error')
         return _error_redirect()
     
     # Check if document is a PDF
-    is_pdf = document.file_type == 'application/pdf' or (document.original_filename or '').lower().endswith('.pdf')
+    is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
     
     if not is_pdf:
         flash('Signed copies can only be generated for PDF documents.', 'error')
@@ -15948,8 +15681,8 @@ def download_signed_document(doc_id, username):
             temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
             os.close(temp_fd)
             
-            # Copy original PDF (use resolved local_path)
-            shutil.copy2(local_path, temp_path)
+            # Copy original PDF
+            shutil.copy2(document.file_path, temp_path)
             
             # Embed signatures and typed field values into temp copy
             pdf_doc = fitz.open(temp_path)
@@ -20445,8 +20178,8 @@ def admin_reports():
         
         # Document statistics
         try:
-            visible_documents = Document.query.filter_by(is_visible=True).filter(Document.deleted_at.is_(None)).count()
-            documents_with_signatures = Document.query.filter(Document.deleted_at.is_(None)).join(DocumentSignatureField).distinct().count()
+            visible_documents = Document.query.filter_by(is_visible=True).count()
+            documents_with_signatures = Document.query.join(DocumentSignatureField).distinct().count()
             total_signatures = DocumentSignature.query.count()
             unique_signed_users = db.session.query(DocumentSignature.username).distinct().count()
         except Exception as e:
@@ -21486,13 +21219,6 @@ def manage_training():
         </div>
         
         <div class="container">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, msg in messages %}
-                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
-                {% endfor %}
-            {% endif %}
-            {% endwith %}
             {% if not is_manager_view %}
             <div class="admin-panel">
                 <h2>Upload Training Video</h2>
@@ -21578,7 +21304,6 @@ def manage_training():
                             <th>Questions</th>
                             <th>Passing Score</th>
                             <th>Status</th>
-                            <th>Video URL (Blob)</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -21593,16 +21318,6 @@ def manage_training():
                                 <span class="badge badge-{{ 'active' if video.is_active else 'inactive' }}">
                                     {{ 'Active' if video.is_active else 'Inactive' }}
                                 </span>
-                            </td>
-                            <td style="max-width: 280px;">
-                                <form method="POST" action="{{ url_for('set_training_video_url') }}" style="display: flex; gap: 6px; align-items: center;">
-                                    <input type="hidden" name="video_id" value="{{ video.id }}">
-                                    <input type="url" name="url" value="{{ video.file_path if (video.file_path or '').startswith('http') else '' }}" placeholder="Paste Vercel Blob URL" style="flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px;">
-                                    <button type="submit" class="btn btn-primary btn-small">Set URL</button>
-                                </form>
-                                {% if video.file_path and not video.file_path.startswith('http') %}
-                                <small style="color: #888;">Local file (set URL above for Vercel)</small>
-                                {% endif %}
                             </td>
                             <td>
                                 <a href="{{ url_for('manage_video_quiz', video_id=video.id) }}" class="btn btn-primary btn-small">Manage Quiz</a>
@@ -21923,13 +21638,7 @@ def manage_video_quiz(video_id):
         </div>
         
         <div class="container">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, msg in messages %}
-                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
-                {% endfor %}
-            {% endif %}
-            {% endwith %}
+            
             <div class="admin-panel">
                 <h2>Add Quiz Question</h2>
                 <form method="POST" action="{{ url_for('add_quiz_question', video_id=video.id) }}">
@@ -22127,89 +21836,41 @@ def delete_quiz_question(question_id):
 @app.route('/admin/training/delete', methods=['POST'])
 @admin_required
 def delete_training_video():
-    """Delete a training video and all related data (quizzes, progress, tasks, notifications)."""
+    """Delete a training video"""
     video_id = request.form.get('video_id')
+    
     if not video_id:
         flash('Video ID is required.', 'error')
         return redirect(url_for('manage_training'))
+    
     video = TrainingVideo.query.get(video_id)
+    
     if not video:
         flash('Training video not found.', 'error')
         return redirect(url_for('manage_training'))
+    
     try:
-        vid = int(video_id)
-        # 1. Delete local file only (skip if URL e.g. Vercel Blob)
-        fp = (video.file_path or '').strip()
-        if fp and not (fp.startswith('http://') or fp.startswith('https://')) and os.path.exists(fp):
-            try:
-                os.remove(fp)
-            except OSError:
-                pass
-        # 2. Unlink from new hires (association table)
-        db.session.execute(
-            new_hire_required_training.delete().where(new_hire_required_training.c.video_id == vid)
-        )
-        # 3. User quiz responses reference quiz_answers.id — must delete by answer_id before deleting answers
-        answer_ids = [a.id for q in video.questions for a in q.answers]
-        if answer_ids:
-            UserQuizResponse.query.filter(
-                UserQuizResponse.answer_id.in_(answer_ids)
-            ).delete(synchronize_session=False)
-            db.session.flush()  # emit DELETE so quiz_answers can be removed in same transaction
-        # 4. Quiz answers, then questions
+        # Delete file
+        if os.path.exists(video.file_path):
+            os.remove(video.file_path)
+        
+        # Delete questions and answers
         for question in video.questions:
             QuizAnswer.query.filter_by(question_id=question.id).delete()
-        QuizQuestion.query.filter_by(video_id=vid).delete()
-        # 5. User training progress
-        UserTrainingProgress.query.filter_by(video_id=vid).delete()
-        # 6. User tasks that reference this video (notes = "video_id:123")
-        UserTask.query.filter(
-            UserTask.task_type == 'training',
-            UserTask.notes == f'video_id:{vid}'
-        ).delete(synchronize_session=False)
-        # 7. Notifications for this training video
-        UserNotification.query.filter_by(
-            notification_type='training',
-            notification_id=str(vid)
-        ).delete(synchronize_session=False)
-        # 8. The video itself
+        QuizQuestion.query.filter_by(video_id=video_id).delete()
+        
+        # Delete user progress
+        UserTrainingProgress.query.filter_by(video_id=video_id).delete()
+        
+        # Delete video
         db.session.delete(video)
         db.session.commit()
+        
         flash(f'Training video "{video.title}" deleted successfully.', 'success')
     except Exception as e:
         db.session.rollback()
-        # Show a short message; full detail can be logged
-        err_msg = str(e).split('DETAIL:')[0].strip() if 'DETAIL:' in str(e) else str(e)
-        flash(f'Error deleting video: {err_msg}', 'error')
-    return redirect(url_for('manage_training'))
-
-
-@app.route('/admin/training/set-video-url', methods=['POST'])
-@admin_required
-def set_training_video_url():
-    """Set training video file_path to a URL (e.g. Vercel Blob). Use when hosting on Vercel."""
-    video_id = request.form.get('video_id', type=int)
-    url = (request.form.get('url') or '').strip()
-    if not video_id:
-        flash('Video ID required.', 'error')
-        return redirect(url_for('manage_training'))
-    video = TrainingVideo.query.get(video_id)
-    if not video:
-        flash('Video not found.', 'error')
-        return redirect(url_for('manage_training'))
-    if not url:
-        flash('URL is required.', 'error')
-        return redirect(url_for('manage_training'))
-    if not (url.startswith('http://') or url.startswith('https://')):
-        flash('URL must start with http:// or https://', 'error')
-        return redirect(url_for('manage_training'))
-    try:
-        video.file_path = url
-        db.session.commit()
-        flash(f'Video URL updated for "{video.title}".', 'success')
-    except Exception as e:
-        db.session.rollback()
-        flash(f'Error updating URL: {str(e)}', 'error')
+        flash(f'Error deleting video: {str(e)}', 'error')
+    
     return redirect(url_for('manage_training'))
 
 
@@ -22887,21 +22548,20 @@ def view_training_video(video_id):
 @app.route('/training/<int:video_id>/video')
 @login_required
 def serve_training_video(video_id):
-    """Serve training video file (local path or redirect to URL e.g. Vercel Blob)."""
+    """Serve training video file"""
     video = TrainingVideo.query.get(video_id)
     
     if not video:
         return "Video not found", 404
     
+    # Check permissions
     if not video.is_active:
         return "Video not available", 403
     
-    path_or_url = (video.file_path or '').strip()
-    if path_or_url.startswith('http://') or path_or_url.startswith('https://'):
-        return redirect(path_or_url)
-    if path_or_url and os.path.exists(path_or_url):
-        return send_file(path_or_url, mimetype='video/mp4')
-    return "Video file not found", 404
+    if not os.path.exists(video.file_path):
+        return "Video file not found", 404
+    
+    return send_file(video.file_path, mimetype='video/mp4')
 
 
 @app.route('/uploads/ziebart.svg')
