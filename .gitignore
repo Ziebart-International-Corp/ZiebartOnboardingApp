@@ -10,6 +10,7 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 env/
 ENV/
 *.egg-info/
@@ -19,6 +20,9 @@ build/
 # Large uploads (GitHub file size limit 100 MB)
 uploads/videos/*.mp4
 uploads/videos/*.webm
+
+# Persisted signed PDF copies (regenerated on demand from DB signatures)
+uploads/signed_copies/
 
 # Logs
 logs/

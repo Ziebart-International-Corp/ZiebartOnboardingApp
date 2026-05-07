@@ -32,6 +32,9 @@ class User(db.Model):
     role = db.Column(db.String(20), default='user')  # 'admin', 'manager', or 'user'
     store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)
     access_revoked_at = db.Column(db.Date, nullable=True)  # When set (and today >= this date), user cannot log in
+    saved_signature_image = db.Column(db.Text, nullable=True)  # Base64 encoded PNG (default reusable signature)
+    saved_signature_kind = db.Column(db.String(20), nullable=True)  # 'drawn' or 'typed'
+    saved_signature_updated_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_login = db.Column(db.DateTime)
     
@@ -444,6 +447,7 @@ class DocumentSignature(db.Model):
     signature_hash = db.Column(db.String(64), nullable=True)  # SHA-256 hash of signed PDF (for cryptographic)
     certificate_serial = db.Column(db.String(200), nullable=True)  # Certificate serial number (for cryptographic)
     signature_type = db.Column(db.String(20), default='image')  # 'image' or 'cryptographic'
+    used_saved_signature = db.Column(db.Boolean, default=False)  # True when user clicked "Apply My Saved Signature"
     signed_at = db.Column(db.DateTime, default=datetime.utcnow)
     ip_address = db.Column(db.String(50))  # IP address when signed (for audit)
     user_agent = db.Column(db.String(500), nullable=True)  # Browser user agent
@@ -658,4 +662,23 @@ class AdminSetting(db.Model):
 
     def __repr__(self):
         return f'<AdminSetting {self.key}>'
+
+
+class SignatureAuditLog(db.Model):
+    """Audit trail for signature actions and finalized signed copies."""
+    __tablename__ = 'signature_audit_logs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    document_id = db.Column(db.Integer, nullable=False, index=True)
+    username = db.Column(db.String(100), nullable=False, index=True)
+    event_type = db.Column(db.String(80), nullable=False)  # apply_signature, complete_document, etc.
+    details = db.Column(db.Text, nullable=True)
+    used_saved_signature = db.Column(db.Boolean, default=False)
+    signed_copy_path = db.Column(db.String(500), nullable=True)
+    ip_address = db.Column(db.String(50), nullable=True)
+    user_agent = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    def __repr__(self):
+        return f'<SignatureAuditLog doc={self.document_id} user={self.username} event={self.event_type}>'
 

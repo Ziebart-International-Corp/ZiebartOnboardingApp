@@ -18,7 +18,7 @@ from sqlalchemy import exists, or_, and_, text, bindparam, func
 from auth import login_required, admin_required, manager_required, User, check_user_can_login_as_admin, authenticate_by_email_password
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, document_stores)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, SignatureAuditLog, document_stores)
 from membership import get_token_groups, get_local_groups
 from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR
 from datetime import datetime
@@ -856,6 +856,15 @@ table tr:hover {
     background: var(--metal-sheen);
     pointer-events: none;
     z-index: 0;
+    opacity: 0.35;
+}
+.admin-panel > *,
+.store-banner > *,
+.collapsible-upload-panel > *,
+.wizard-container > *,
+.modal-content > * {
+    position: relative;
+    z-index: 1;
 }
 .back-btn {
     background: rgba(255, 255, 255, 0.1) !important;
@@ -1127,6 +1136,42 @@ tbody tr:nth-child(even) {
     box-shadow: var(--shadow-elev) !important;
     color: var(--text-primary) !important;
 }
+
+/* Assign document — user list is a nested div (not .admin-panel); keep it dark everywhere */
+#assign-doc-users-list-root.assign-doc-users-list {
+    background: #070b10 !important;
+    background-color: #070b10 !important;
+    background-image: none !important;
+    color: #f2f5fb !important;
+    border-color: rgba(255, 255, 255, 0.22) !important;
+}
+#assign-doc-users-list-root .assign-doc-user-row {
+    background: #121a26 !important;
+    background-color: #121a26 !important;
+    background-image: none !important;
+    color: #ffffff !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
+}
+#assign-doc-users-list-root .assign-doc-user-row label,
+#assign-doc-users-list-root .assign-doc-user-name {
+    color: #ffffff !important;
+    -webkit-text-fill-color: #ffffff !important;
+    opacity: 1 !important;
+}
+/* Outer shell around label + scroll list (covers any UA “light” scroll viewport) */
+.assign-doc-users-shell {
+    background: #03060a !important;
+    background-color: #03060a !important;
+    background-image: none !important;
+    color: #f2f5fb !important;
+    border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    border-radius: 12px !important;
+    padding: 14px !important;
+    margin-top: 8px !important;
+}
+.assign-doc-users-shell > label {
+    color: #f2f5fb !important;
+}
 """
 
 USER_MOBILE_TABBAR_SHOW = frozenset({
@@ -1339,12 +1384,54 @@ def send_email(to_email, subject, body_html, body_text=None):
         return False
 
 
+def _html_to_plain_fallback(body_html):
+    """Lightweight HTML→plaintext conversion for email fallbacks.
+
+    Removes leading indentation, replaces common block tags with newlines,
+    strips remaining tags, and collapses excess blank lines so that mail clients
+    that fall back to text/plain render something readable.
+    """
+    import re
+    import textwrap
+    text = textwrap.dedent(body_html or '').strip()
+    # Replace <br> and </p> / </div> / </li> with newlines
+    text = re.sub(r'(?i)<br\s*/?>', '\n', text)
+    text = re.sub(r'(?i)</\s*(p|div|li|h[1-6]|tr)\s*>', '\n', text)
+    # Convert list items roughly
+    text = re.sub(r'(?i)<\s*li[^>]*>', '- ', text)
+    # Strip remaining tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Decode the most common HTML entities
+    text = (text
+            .replace('&nbsp;', ' ')
+            .replace('&amp;', '&')
+            .replace('&lt;', '<')
+            .replace('&gt;', '>')
+            .replace('&quot;', '"')
+            .replace('&#39;', "'"))
+    # Collapse 3+ blank lines into 2 and dedent each line
+    lines = [ln.strip() for ln in text.splitlines()]
+    cleaned = []
+    blank = 0
+    for ln in lines:
+        if not ln:
+            blank += 1
+            if blank > 1:
+                continue
+        else:
+            blank = 0
+        cleaned.append(ln)
+    return '\n'.join(cleaned).strip() + '\n'
+
+
 def send_email_with_attachment(to_email, subject, body_html, attachment_filename, attachment_bytes, body_text=None):
     """Send email with a single PDF (or other) attachment. Uses same config as send_email."""
     if not MAIL_AVAILABLE or not to_email or not to_email.strip():
         return False
     to_email = to_email.strip()
-    plain = body_text if body_text is not None else body_html.replace('<br>', '\n').replace('</p>', '\n')
+    import textwrap
+    body_html = textwrap.dedent(body_html or '').strip()
+    plain = body_text if body_text is not None else _html_to_plain_fallback(body_html)
 
     sock_server = os.getenv('SOCKETLABS_SERVER', 'smtp.socketlabs.com')
     sock_port = int(os.getenv('SOCKETLABS_PORT', '587'))
@@ -1363,7 +1450,10 @@ def send_email_with_attachment(to_email, subject, body_html, attachment_filename
             msg['Subject'] = subject
             msg['From'] = sock_sender
             msg['To'] = to_email
-            msg.attach(MIMEText(plain, 'plain'))
+            alt = MIMEMultipart('alternative')
+            alt.attach(MIMEText(plain, 'plain', 'utf-8'))
+            alt.attach(MIMEText(body_html, 'html', 'utf-8'))
+            msg.attach(alt)
             part = MIMEBase('application', 'pdf')
             part.set_payload(attachment_bytes)
             encoders.encode_base64(part)
@@ -1480,6 +1570,96 @@ def _ensure_users_last_login_column():
         except Exception:
             db.session.rollback()
         _users_last_login_migrated = True
+
+
+_users_saved_signature_migrated = False
+
+
+def _ensure_users_saved_signature_columns():
+    """Ensure users has saved signature columns for reusable signature feature."""
+    global _users_saved_signature_migrated
+    if _users_saved_signature_migrated:
+        return
+    for col, sql_type in [
+        ('saved_signature_image', 'NVARCHAR(MAX) NULL'),
+        ('saved_signature_kind', 'NVARCHAR(20) NULL'),
+        ('saved_signature_updated_at', 'DATETIME NULL'),
+    ]:
+        try:
+            db.session.execute(text(f"SELECT TOP 1 {col} FROM users"))
+        except Exception:
+            db.session.rollback()
+            try:
+                db.session.execute(text(f"ALTER TABLE users ADD {col} {sql_type}"))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+    _users_saved_signature_migrated = True
+
+
+_document_signatures_savedflag_migrated = False
+
+
+def _ensure_document_signatures_savedflag_column():
+    """Ensure document_signatures.used_saved_signature exists."""
+    global _document_signatures_savedflag_migrated
+    if _document_signatures_savedflag_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 used_saved_signature FROM document_signatures"))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text("ALTER TABLE document_signatures ADD used_saved_signature BIT NULL"))
+            db.session.commit()
+            db.session.execute(text("UPDATE document_signatures SET used_saved_signature = 0 WHERE used_saved_signature IS NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    _document_signatures_savedflag_migrated = True
+
+
+_signature_audit_logs_migrated = False
+
+
+def _ensure_signature_audit_logs_table():
+    """Create signature_audit_logs table if it does not exist."""
+    global _signature_audit_logs_migrated
+    if _signature_audit_logs_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 id FROM signature_audit_logs"))
+        _signature_audit_logs_migrated = True
+        return
+    except Exception:
+        db.session.rollback()
+    try:
+        db.session.execute(text(
+            "CREATE TABLE signature_audit_logs ("
+            "id INT PRIMARY KEY IDENTITY(1,1), "
+            "document_id INT NOT NULL, "
+            "username NVARCHAR(100) NOT NULL, "
+            "event_type NVARCHAR(80) NOT NULL, "
+            "details NVARCHAR(MAX) NULL, "
+            "used_saved_signature BIT NULL, "
+            "signed_copy_path NVARCHAR(500) NULL, "
+            "ip_address NVARCHAR(50) NULL, "
+            "user_agent NVARCHAR(MAX) NULL, "
+            "created_at DATETIME NULL"
+            ")"
+        ))
+        db.session.commit()
+        try:
+            db.session.execute(text(
+                "CREATE INDEX ix_signature_audit_logs_doc_user "
+                "ON signature_audit_logs (document_id, username)"
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        _signature_audit_logs_migrated = True
+    except Exception:
+        db.session.rollback()
 
 
 _new_hires_finale_migrated = False
@@ -1605,7 +1785,7 @@ def _ensure_stores_and_store_id():
 
 @app.before_request
 def _run_users_migration_if_needed():
-    """Run one-time migration for users.access_revoked_at, new_hires finale columns, admin_settings, stores before any request."""
+    """Run one-time schema checks/migrations before requests."""
     if request.path.startswith('/static'):
         return
     try:
@@ -1613,9 +1793,12 @@ def _run_users_migration_if_needed():
         _ensure_users_role_column()
         _ensure_users_domain_column()
         _ensure_users_last_login_column()
+        _ensure_users_saved_signature_columns()
+        _ensure_document_signatures_savedflag_column()
         _ensure_new_hires_finale_columns()
         _ensure_admin_settings_table()
         _ensure_stores_and_store_id()
+        _ensure_signature_audit_logs_table()
     except Exception:
         pass
 
@@ -1631,6 +1814,7 @@ def load_user(user_id):
         _ensure_users_role_column()
         _ensure_users_domain_column()
         _ensure_users_last_login_column()
+        _ensure_users_saved_signature_columns()
         try:
             user_record = UserModel.query.filter_by(username=user_id).first()
         except Exception:
@@ -2015,9 +2199,53 @@ def login():
                 line-height: 1;
             }
         {{ global_theme_css|safe }}
+            /* Keep Manage Documents legible and visually aligned with site theme */
+            body.manage-docs-page .upload-form {
+                background: linear-gradient(160deg, rgba(20, 28, 40, 0.82) 0%, rgba(12, 18, 28, 0.88) 100%) !important;
+                border: 1px solid rgba(255,255,255,0.2) !important;
+            }
+            body.manage-docs-page .admin-panel,
+            body.manage-docs-page .collapsible-upload-panel,
+            body.manage-docs-page .collapsible-upload-panel .collapsible-body,
+            body.manage-docs-page table {
+                background: #141b28 !important;
+                color: #f2f5fb !important;
+                opacity: 1 !important;
+                filter: none !important;
+            }
+            body.manage-docs-page .upload-form small,
+            body.manage-docs-page .file-size,
+            body.manage-docs-page .signature-status-signed {
+                color: #b7c1d3 !important;
+            }
+            body.manage-docs-page .upload-form label,
+            body.manage-docs-page table th,
+            body.manage-docs-page table td,
+            body.manage-docs-page .actions-dropdown-item,
+            body.manage-docs-page .store-check-row {
+                color: #f2f5fb !important;
+            }
+            body.manage-docs-page .upload-form input[type="text"],
+            body.manage-docs-page .upload-form input[type="file"],
+            body.manage-docs-page .upload-form textarea,
+            body.manage-docs-page .upload-form select {
+                background: rgba(255,255,255,0.08) !important;
+                border: 1px solid rgba(255,255,255,0.25) !important;
+                color: #f2f5fb !important;
+            }
+            body.manage-docs-page table th {
+                background: rgba(255,255,255,0.06) !important;
+            }
+            body.manage-docs-page .actions-dropdown {
+                background: #151b28 !important;
+                border: 1px solid rgba(255,255,255,0.2) !important;
+            }
+            body.manage-docs-page .actions-dropdown-item:hover {
+                background: rgba(255,255,255,0.08) !important;
+            }
         </style>
     </head>
-    <body>
+    <body class="manage-docs-page">
         <div class="login-box">
             <h1>Ziebart Onboarding</h1>
             <p class="subtitle">Sign in with your email</p>
@@ -2267,6 +2495,25 @@ def welcome():
                 .welcome-card p { font-size: 1em; }
             }
         {{ global_theme_css|safe }}
+            /* Manage Documents: keep Upload panel dark like the rest of admin pages */
+            .collapsible-upload-panel .upload-form {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+                color: #f2f5fb !important;
+            }
+            .collapsible-upload-panel .upload-form label,
+            .collapsible-upload-panel .upload-form small,
+            .collapsible-upload-panel .upload-form .checkbox-group label {
+                color: #b7c1d3 !important;
+            }
+            .collapsible-upload-panel .upload-form input[type="text"],
+            .collapsible-upload-panel .upload-form input[type="file"],
+            .collapsible-upload-panel .upload-form textarea,
+            .collapsible-upload-panel .upload-form select {
+                background: rgba(255, 255, 255, 0.08) !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255, 255, 255, 0.24) !important;
+            }
         </style>
     </head>
     <body>
@@ -4800,6 +5047,35 @@ def user_tasks():
                 }
             }
         {{ global_theme_css|safe }}
+            /* Set Signature Fields page: enforce dark panels and readable controls */
+            .main-content .document-viewer-container,
+            .main-content .sidebar-panel {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+                color: #f2f5fb !important;
+            }
+            .main-content .sidebar-panel h3,
+            .main-content .sidebar-panel label,
+            .main-content .sidebar-panel p,
+            .main-content .document-viewer-container h3 {
+                color: #f2f5fb !important;
+            }
+            .main-content .sidebar-panel input,
+            .main-content .sidebar-panel select {
+                background: rgba(255, 255, 255, 0.08) !important;
+                border: 1px solid rgba(255, 255, 255, 0.24) !important;
+                color: #f2f5fb !important;
+            }
+            .main-content .sidebar-panel select option {
+                background: #1a202c !important;
+                color: #f2f5fb !important;
+            }
+            .instructions,
+            .signature-field-item {
+                background: rgba(255, 255, 255, 0.06) !important;
+                border-color: rgba(255, 255, 255, 0.18) !important;
+                color: #f2f5fb !important;
+            }
         </style>
     </head>
     <body class="user-app-shell">
@@ -4864,9 +5140,15 @@ def user_tasks():
                 <h2 class="section-title">All Tasks</h2>
                 <div class="task-list">
                     {% for task in user_tasks %}
-                    <div class="task-item {{ 'completed' if task.status == 'completed' else '' }} {{ 'high-priority' if task.priority == 'high' else '' }} {{ 'urgent-priority' if task.priority == 'urgent' else '' }}">
-                        <div class="task-header">
-                            <div class="task-title">
+                    {% set is_simple_task = (task.task_type not in ['document', 'training']) %}
+                    <div id="task-row-{{ task.id }}" class="task-item {{ 'completed' if task.status == 'completed' else '' }} {{ 'high-priority' if task.priority == 'high' else '' }} {{ 'urgent-priority' if task.priority == 'urgent' else '' }}">
+                        <div class="task-header" style="display: flex; align-items: flex-start; gap: 12px;">
+                            {% if is_simple_task and task.status != 'completed' %}
+                            <label class="task-checkoff" title="Mark complete" style="display: inline-flex; align-items: center; padding-top: 4px; cursor: pointer;">
+                                <input type="checkbox" onchange="checkOffTask({{ task.id }}, this)" style="width: 22px; height: 22px; cursor: pointer; accent-color: #28a745;">
+                            </label>
+                            {% endif %}
+                            <div class="task-title" style="flex: 1;">
                                 {% if task.status != 'completed' and task.task_type == 'document' %}
                                 {% if task.document_id %}
                                 <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" style="color: inherit; text-decoration: none;">{{ task.task_title }}</a>
@@ -4966,6 +5248,49 @@ def user_tasks():
                 }
             }
             
+            function checkOffTask(taskId, checkboxEl) {
+                if (!checkboxEl.checked) return;
+                checkboxEl.disabled = true;
+                var row = document.getElementById('task-row-' + taskId);
+                fetch('/tasks/' + taskId + '/complete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.success) {
+                        if (row) {
+                            row.style.transition = 'opacity 0.3s ease, max-height 0.4s ease, margin 0.4s ease, padding 0.4s ease';
+                            row.style.opacity = '0';
+                            row.style.maxHeight = row.offsetHeight + 'px';
+                            requestAnimationFrame(function() {
+                                row.style.maxHeight = '0px';
+                                row.style.marginTop = '0px';
+                                row.style.marginBottom = '0px';
+                                row.style.paddingTop = '0px';
+                                row.style.paddingBottom = '0px';
+                                row.style.overflow = 'hidden';
+                            });
+                            setTimeout(function() {
+                                if (row && row.parentNode) row.parentNode.removeChild(row);
+                            }, 450);
+                        } else {
+                            location.reload();
+                        }
+                    } else {
+                        checkboxEl.checked = false;
+                        checkboxEl.disabled = false;
+                        alert('Error: ' + (data.error || 'Failed to update task'));
+                    }
+                })
+                .catch(function(err) {
+                    checkboxEl.checked = false;
+                    checkboxEl.disabled = false;
+                    alert('Error: ' + err);
+                });
+            }
+
             function markComplete(taskId) {
                 if (confirm('Mark this task as completed?')) {
                     fetch('/tasks/' + taskId + '/complete', {
@@ -5673,6 +5998,13 @@ def profile():
                     <span class="info-value">{{ user_start_date.strftime('%B %d, %Y') if user_start_date else 'Not set' }}</span>
                 </div>
             </div>
+            <div class="info-section">
+                <h2 class="section-title-dash">Signature</h2>
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <p style="color: #808080;">Create and save a default signature to apply intentionally while signing documents.</p>
+                    <a href="{{ url_for('manage_signature') }}" class="btn" style="text-decoration: none;">Manage Signature</a>
+                </div>
+            </div>
         </div>
         
         <script>
@@ -5695,6 +6027,252 @@ def profile():
     </html>
     ''', is_admin=is_admin, user_name=user_name, user_email=user_email,
          user_position=user_position, user_start_date=user_start_date)
+
+
+@app.route('/profile/signature', methods=['GET', 'POST'])
+@login_required
+def manage_signature():
+    """Create/update a default reusable signature for current user."""
+    user_record = UserModel.query.filter_by(username=current_user.username).first()
+    if not user_record:
+        flash('User profile not found.', 'error')
+        return redirect(url_for('profile'))
+
+    if request.method == 'POST':
+        mode = (request.form.get('signature_mode') or '').strip().lower()
+        signature_image = (request.form.get('signature_image') or '').strip()
+        if signature_image.startswith('data:image'):
+            signature_image = signature_image.split(',', 1)[1] if ',' in signature_image else signature_image
+
+        if mode not in ('drawn', 'typed'):
+            flash('Please choose how to create your signature.', 'error')
+            return redirect(url_for('manage_signature'))
+        if not signature_image:
+            flash('Please provide a signature before saving.', 'error')
+            return redirect(url_for('manage_signature'))
+
+        try:
+            user_record.saved_signature_image = signature_image
+            user_record.saved_signature_kind = mode
+            user_record.saved_signature_updated_at = datetime.utcnow()
+            db.session.commit()
+            flash('Default signature saved. You can now apply it intentionally on each document field.', 'success')
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error saving signature: {e}', 'error')
+        return redirect(url_for('manage_signature'))
+
+    if request.args.get('clear') == '1':
+        try:
+            user_record.saved_signature_image = None
+            user_record.saved_signature_kind = None
+            user_record.saved_signature_updated_at = None
+            db.session.commit()
+            flash('Saved signature removed.', 'success')
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error clearing signature: {e}', 'error')
+        return redirect(url_for('manage_signature'))
+
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manage Signature - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; color: #000; }
+            .header {
+                background: #000;
+                color: white;
+                padding: 12px 30px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #fff;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                border: 1px solid rgba(255,255,255,0.3);
+            }
+            .container { max-width: 1100px; margin: 24px auto; padding: 0 20px; }
+            .panel {
+                background: #fff;
+                border-radius: 0.75rem;
+                border: 1px solid #e0e0e0;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                padding: 20px;
+                margin-bottom: 20px;
+            }
+            .grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 20px;
+            }
+            .sig-pad {
+                width: 100%;
+                height: 220px;
+                border: 1px solid #ccc;
+                border-radius: 0.5rem;
+                background: #fff;
+                cursor: crosshair;
+            }
+            .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+            .btn {
+                display: inline-block;
+                padding: 10px 16px;
+                border-radius: 0.5rem;
+                border: none;
+                cursor: pointer;
+                text-decoration: none;
+                color: #fff;
+                background: #fe0100;
+            }
+            .btn-secondary { background: #6c757d; }
+            .preview {
+                border: 1px dashed #999;
+                border-radius: 0.5rem;
+                background: #fff;
+                min-height: 120px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 10px;
+            }
+            .preview img { max-width: 100%; max-height: 100px; object-fit: contain; }
+        {{ global_theme_css|safe }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>✍️ Manage Signature</h1>
+            <a href="{{ url_for('profile') }}" class="back-btn">← Back to Profile</a>
+        </div>
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div style="padding: 12px 16px; margin-bottom: 12px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da{% else %}#d4edda{% endif %}; color: {% if category == 'error' %}#721c24{% else %}#155724{% endif %};">
+                    {{ msg }}
+                </div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
+            <div class="grid">
+                <div class="panel">
+                    <h3 style="margin-bottom: 12px;">Draw Signature</h3>
+                    <canvas id="drawPad" class="sig-pad" width="500" height="220"></canvas>
+                    <div class="row">
+                        <button type="button" class="btn-secondary btn" onclick="clearPad()">Clear</button>
+                        <button type="button" class="btn" onclick="saveFromPad()">Save Drawn Signature</button>
+                    </div>
+                </div>
+                <div class="panel">
+                    <h3 style="margin-bottom: 12px;">Type Signature</h3>
+                    <input id="typedName" type="text" placeholder="Type your name as signature" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:0.5rem;">
+                    <div class="preview" id="typedPreview" style="margin-top:10px;">Preview</div>
+                    <div class="row">
+                        <button type="button" class="btn-secondary btn" onclick="renderTyped()">Preview Typed</button>
+                        <button type="button" class="btn" onclick="saveTyped()">Save Typed Signature</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3 style="margin-bottom:10px;">Current Saved Signature</h3>
+                {% if user_record.saved_signature_image %}
+                    <div class="preview"><img src="data:image/png;base64,{{ user_record.saved_signature_image }}" alt="Saved signature"></div>
+                    <p style="margin-top:8px; color:#666;">Type: {{ user_record.saved_signature_kind or 'unknown' }}{% if user_record.saved_signature_updated_at %} • Updated: {{ user_record.saved_signature_updated_at.strftime('%Y-%m-%d %H:%M') }}{% endif %}</p>
+                    <div class="row">
+                        <a class="btn btn-secondary" href="{{ url_for('manage_signature', clear='1') }}" onclick="return confirm('Remove your saved default signature?');">Clear Saved Signature</a>
+                    </div>
+                {% else %}
+                    <p style="color:#666;">No saved signature yet.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <form id="saveForm" method="POST" action="{{ url_for('manage_signature') }}" style="display:none;">
+            <input type="hidden" name="signature_mode" id="sigMode">
+            <input type="hidden" name="signature_image" id="sigImage">
+        </form>
+
+        <script>
+            const canvas = document.getElementById('drawPad');
+            const ctx = canvas.getContext('2d');
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            let drawing = false;
+            let lastX = 0, lastY = 0;
+            function getPos(e) {
+                const rect = canvas.getBoundingClientRect();
+                const clientX = (e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX);
+                const clientY = (e.touches && e.touches[0] ? e.touches[0].clientY : e.clientY);
+                return { x: clientX - rect.left, y: clientY - rect.top };
+            }
+            function startDraw(e){ drawing = true; const p = getPos(e); lastX = p.x; lastY = p.y; }
+            function moveDraw(e){
+                if (!drawing) return;
+                e.preventDefault();
+                const p = getPos(e);
+                ctx.beginPath();
+                ctx.moveTo(lastX, lastY);
+                ctx.lineTo(p.x, p.y);
+                ctx.stroke();
+                lastX = p.x; lastY = p.y;
+            }
+            function endDraw(){ drawing = false; }
+            canvas.addEventListener('mousedown', startDraw);
+            canvas.addEventListener('mousemove', moveDraw);
+            canvas.addEventListener('mouseup', endDraw);
+            canvas.addEventListener('mouseleave', endDraw);
+            canvas.addEventListener('touchstart', startDraw, { passive: true });
+            canvas.addEventListener('touchmove', moveDraw, { passive: false });
+            canvas.addEventListener('touchend', endDraw);
+
+            function clearPad(){ ctx.clearRect(0, 0, canvas.width, canvas.height); }
+            function canvasHasInk() {
+                const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                for (let i = 3; i < img.length; i += 4) if (img[i] > 0) return true;
+                return false;
+            }
+            function postSignature(mode, dataUrl) {
+                document.getElementById('sigMode').value = mode;
+                document.getElementById('sigImage').value = dataUrl;
+                document.getElementById('saveForm').submit();
+            }
+            function saveFromPad() {
+                if (!canvasHasInk()) { alert('Please draw your signature first.'); return; }
+                postSignature('drawn', canvas.toDataURL('image/png'));
+            }
+            function renderTyped() {
+                const name = (document.getElementById('typedName').value || '').trim();
+                if (!name) { alert('Type your name first.'); return; }
+                const tCanvas = document.createElement('canvas');
+                tCanvas.width = 500; tCanvas.height = 120;
+                const tCtx = tCanvas.getContext('2d');
+                tCtx.fillStyle = '#fff'; tCtx.fillRect(0, 0, tCanvas.width, tCanvas.height);
+                tCtx.fillStyle = '#111';
+                tCtx.font = '52px "Brush Script MT", "Segoe Script", cursive';
+                tCtx.fillText(name, 20, 80);
+                document.getElementById('typedPreview').innerHTML = '<img src="' + tCanvas.toDataURL('image/png') + '" alt="Typed signature preview">';
+                window.__typedSigData = tCanvas.toDataURL('image/png');
+            }
+            function saveTyped() {
+                if (!window.__typedSigData) renderTyped();
+                if (!window.__typedSigData) return;
+                postSignature('typed', window.__typedSigData);
+            }
+        </script>
+    </body>
+    </html>
+    ''', user_record=user_record)
 
 
 @app.route('/admin/new-hires')
@@ -8603,6 +9181,25 @@ def _admin_dashboard_impl():
             table th, table td { border-bottom-color: rgba(255,255,255,0.1); }
             table tr:hover { background: rgba(255,255,255,0.04); }
         {{ global_theme_css|safe }}
+            /* Manage Documents page-specific override: keep upload section dark and readable */
+            .collapsible-upload-panel .upload-form {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+                color: #f2f5fb !important;
+            }
+            .collapsible-upload-panel .upload-form label,
+            .collapsible-upload-panel .upload-form small,
+            .collapsible-upload-panel .upload-form .checkbox-group label {
+                color: #b7c1d3 !important;
+            }
+            .collapsible-upload-panel .upload-form input[type="text"],
+            .collapsible-upload-panel .upload-form input[type="file"],
+            .collapsible-upload-panel .upload-form textarea,
+            .collapsible-upload-panel .upload-form select {
+                background: rgba(255, 255, 255, 0.08) !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255, 255, 255, 0.24) !important;
+            }
         </style>
     </head>
     <body>
@@ -8733,6 +9330,11 @@ def _admin_dashboard_impl():
                         </a>
                         {% endif %}
                         {% if current_user.is_admin() %}
+                        <a href="{{ url_for('admin_assign_task', staff_console='admin') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">✅</span>
+                            <span class="quick-link-text">Assign task to user</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
                         <a href="{{ url_for('manage_users') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">👥</span>
                             <span class="quick-link-text">Manage Users</span>
@@ -9113,9 +9715,47 @@ def manager_dashboard():
             .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
             .dropdown-item:hover { background: #f5f5f5; }
         {{ global_theme_css|safe }}
+            /* Set Signature Fields: explicit dark theme overrides */
+            body.sig-fields-page .document-viewer-container,
+            body.sig-fields-page .sidebar-panel {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+                color: #f2f5fb !important;
+            }
+            body.sig-fields-page .document-viewer {
+                background: #343a46 !important;
+            }
+            body.sig-fields-page .sidebar-panel h3,
+            body.sig-fields-page .sidebar-panel label,
+            body.sig-fields-page .sidebar-panel p,
+            body.sig-fields-page .document-viewer-container h3,
+            body.sig-fields-page .signature-field-item h4,
+            body.sig-fields-page .signature-field-item p,
+            body.sig-fields-page .instructions h3,
+            body.sig-fields-page .instructions li {
+                color: #f2f5fb !important;
+            }
+            body.sig-fields-page .sidebar-panel input,
+            body.sig-fields-page .sidebar-panel select {
+                background: rgba(255, 255, 255, 0.08) !important;
+                border: 1px solid rgba(255, 255, 255, 0.24) !important;
+                color: #f2f5fb !important;
+            }
+            body.sig-fields-page .sidebar-panel input::placeholder {
+                color: #b7c1d3 !important;
+            }
+            body.sig-fields-page .sidebar-panel select option {
+                background: #1a202c !important;
+                color: #f2f5fb !important;
+            }
+            body.sig-fields-page .instructions,
+            body.sig-fields-page .signature-field-item {
+                background: rgba(255, 255, 255, 0.06) !important;
+                border-left-color: rgba(110, 168, 254, 0.9) !important;
+            }
         </style>
     </head>
-    <body>
+    <body class="sig-fields-page">
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Logo">
@@ -10811,10 +11451,11 @@ def manage_documents():
     """Manage documents - upload and manage new hire paperwork. Admin or manager with manage_documents permission. Managers see only forms for their store, view/download only."""
     if not current_user.is_admin() and not manager_has_permission('manage_documents'):
         abort(403)
-    is_manager_view = current_user.is_manager()
+    is_manager_only = current_user.is_manager() and not current_user.is_admin()
+    is_manager_view = is_manager_only
     try:
         store_id = get_current_user_store_id()
-        if current_user.is_manager() and store_id is not None:
+        if is_manager_only and store_id is not None:
             # Only documents visible to this store (is_visible and assigned to this store or all stores)
             q = documents_visible_to_store_query(store_id).order_by(Document.created_at.desc())
             documents = q.all()
@@ -10832,7 +11473,7 @@ def manage_documents():
                 db.session.rollback()
                 flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL;', 'error')
                 return redirect(staff_console_home_url())
-            if current_user.is_manager() and get_current_user_store_id() is not None:
+            if is_manager_only and get_current_user_store_id() is not None:
                 sid = get_current_user_store_id()
                 documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
             else:
@@ -10863,7 +11504,7 @@ def manage_documents():
                 doc.signed_users_count = 0
     except Exception as e:
         # If anything fails, provide default values
-        if current_user.is_manager() and get_current_user_store_id() is not None:
+        if is_manager_only and get_current_user_store_id() is not None:
             sid = get_current_user_store_id()
             documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
         else:
@@ -11399,6 +12040,60 @@ def manage_documents():
                 }
             }
         {{ global_theme_css|safe }}
+            /* Manage Documents page-specific override: dark upload section */
+            .collapsible-upload-panel .upload-form {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+                color: #f2f5fb !important;
+            }
+            .collapsible-upload-panel .upload-form label,
+            .collapsible-upload-panel .upload-form small,
+            .collapsible-upload-panel .upload-form .checkbox-group label {
+                color: #b7c1d3 !important;
+            }
+            .collapsible-upload-panel .upload-form input[type="text"],
+            .collapsible-upload-panel .upload-form input[type="file"],
+            .collapsible-upload-panel .upload-form textarea,
+            .collapsible-upload-panel .upload-form select {
+                background: rgba(255, 255, 255, 0.08) !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255, 255, 255, 0.24) !important;
+            }
+            .collapsible-upload-panel .upload-form select option,
+            .collapsible-upload-panel .upload-form select optgroup {
+                background: #1a202c !important;
+                color: #f2f5fb !important;
+            }
+            .actions-dropdown {
+                background: #151b28 !important;
+                border: 1px solid rgba(255, 255, 255, 0.2) !important;
+            }
+            .actions-dropdown-item {
+                color: #f2f5fb !important;
+                border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+            }
+            .actions-dropdown-item:hover {
+                background: rgba(255, 255, 255, 0.09) !important;
+                color: #ffffff !important;
+            }
+            .actions-dropdown-item.danger {
+                color: #ffd7d7 !important;
+            }
+            .actions-dropdown-item.danger:hover {
+                background: rgba(254, 1, 0, 0.35) !important;
+                color: #ffffff !important;
+            }
+            .store-dropdown-panel {
+                background: #151b28 !important;
+                border: 1px solid rgba(255, 255, 255, 0.2) !important;
+                color: #f2f5fb !important;
+            }
+            .store-check-row {
+                color: #f2f5fb !important;
+            }
+            .store-check-row:hover {
+                background: rgba(255, 255, 255, 0.06) !important;
+            }
         </style>
     </head>
     <body>
@@ -11566,6 +12261,10 @@ def manage_documents():
                                             <a href="{{ url_for('view_document_embed', doc_id=doc.id) }}" class="actions-dropdown-item" target="_blank" title="Open in new tab to print">
                                                 🖨️ Print
                                             </a>
+                                            <label class="actions-dropdown-item" style="cursor: pointer; display: block;" title="Upload a clean copy to replace the underlying PDF (preserves signature fields and DB signatures)">
+                                                🔄 Replace File…
+                                                <input type="file" accept=".pdf,application/pdf" style="display: none;" onchange="if(this.files[0]){ var fd=new FormData(); fd.append('file', this.files[0]); if(confirm('Replace the underlying PDF for &quot;{{ doc.original_filename|replace(\"\\\"\", \"\") }}&quot; with this new file?\\n\\nThe old file will be kept as .bak next to it. Signature fields, assignments, and database signatures are preserved.')){ fetch('{{ url_for(\"replace_document_file\", doc_id=doc.id) }}', {method:'POST', body:fd}).then(function(){ location.reload(); }); } }">
+                                            </label>
                                             <form method="POST" action="{{ url_for('delete_document') }}" style="display: block;">
                                                 <input type="hidden" name="doc_id" value="{{ doc.id }}">
                                                 <button type="submit" class="actions-dropdown-item danger" style="width: 100%; text-align: left; border: none; background: none; cursor: pointer;" 
@@ -11834,6 +12533,7 @@ def upload_document():
     """Upload a new document. Admin or manager with manage_documents permission."""
     if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         abort(403)
+    is_manager_only = current_user.is_manager() and not current_user.is_admin()
     if 'file' not in request.files:
         flash('No file selected.', 'error')
         return redirect(url_for('manage_documents'))
@@ -11871,7 +12571,7 @@ def upload_document():
         if store_id_raw and store_id_raw.isdigit():
             sid = int(store_id_raw)
             if Store.query.get(sid):
-                if current_user.is_manager():
+                if is_manager_only:
                     my_sid = get_current_user_store_id()
                     if my_sid is not None and sid != my_sid:
                         sid = my_sid  # managers can only assign their store or all
@@ -11902,17 +12602,89 @@ def upload_document():
     return redirect(url_for('manage_documents'))
 
 
-@app.route('/admin/documents/<int:doc_id>/update-stores', methods=['POST'])
+@app.route('/admin/documents/<int:doc_id>/replace-file', methods=['POST'])
 @login_required
-def document_update_stores(doc_id):
-    """Update which stores can see this document. Form: all=1 for all stores, or store_ids list."""
+def replace_document_file(doc_id):
+    """Replace a document's underlying PDF file with a clean re-uploaded copy.
+
+    Use this when an old PDF has stale embedded signatures from before signatures
+    were stored only in the database. The Document record (id, name, signature
+    fields, assignments, signatures in DB) is preserved; only `file_path` /
+    `filename` / `file_size` / `file_type` are swapped to point at the new file.
+    The previous file is renamed to `<name>.replaced-<timestamp>.bak` so it can
+    still be recovered if needed.
+    """
     if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         abort(403)
     document = Document.query.get(doc_id)
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('manage_documents'))
-    if current_user.is_manager():
+
+    if 'file' not in request.files:
+        flash('No replacement file selected.', 'error')
+        return redirect(url_for('manage_documents'))
+
+    file = request.files['file']
+    if not file or file.filename == '':
+        flash('No replacement file selected.', 'error')
+        return redirect(url_for('manage_documents'))
+    if not allowed_file(file.filename):
+        flash('File type not allowed for replacement.', 'error')
+        return redirect(url_for('manage_documents'))
+
+    try:
+        upload_folder = app.config['UPLOAD_FOLDER']
+        upload_folder.mkdir(exist_ok=True)
+
+        original_filename = file.filename
+        new_safe_name = secure_filename(original_filename)
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_')
+        new_filename = timestamp + new_safe_name
+        new_file_path = upload_folder / new_filename
+        file.save(str(new_file_path))
+        new_size = new_file_path.stat().st_size
+
+        old_path = document.file_path
+        if old_path and os.path.exists(old_path):
+            try:
+                bak_path = f"{old_path}.replaced-{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.bak"
+                os.rename(old_path, bak_path)
+            except Exception:
+                app.logger.exception('Could not back up old document file at %s', old_path)
+
+        document.filename = new_filename
+        document.original_filename = original_filename
+        document.file_path = str(new_file_path)
+        document.file_size = new_size
+        document.file_type = file.content_type or document.file_type or 'application/pdf'
+
+        db.session.commit()
+        flash(
+            f'Document file replaced. The original file was kept as a .bak next to it. '
+            f'Existing signature fields, assignments, and DB signatures are preserved.',
+            'success'
+        )
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception('replace_document_file failed for doc_id=%s', doc_id)
+        flash(f'Error replacing file: {str(e)}', 'error')
+
+    return redirect(url_for('manage_documents'))
+
+
+@app.route('/admin/documents/<int:doc_id>/update-stores', methods=['POST'])
+@login_required
+def document_update_stores(doc_id):
+    """Update which stores can see this document. Form: all=1 for all stores, or store_ids list."""
+    if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
+        abort(403)
+    is_manager_only = current_user.is_manager() and not current_user.is_admin()
+    document = Document.query.get(doc_id)
+    if not document:
+        flash('Document not found.', 'error')
+        return redirect(url_for('manage_documents'))
+    if is_manager_only:
         my_sid = get_current_user_store_id()
         if my_sid is None:
             flash('You must be assigned to a store to change document visibility.', 'error')
@@ -11927,7 +12699,7 @@ def document_update_stores(doc_id):
                 try:
                     sid = int(sid)
                     if Store.query.get(sid):
-                        if current_user.is_manager() and sid != my_sid:
+                        if is_manager_only and sid != my_sid:
                             continue
                         store_ids.append(Store.query.get(sid))
                 except (ValueError, TypeError):
@@ -12028,12 +12800,13 @@ def rename_document(doc_id):
     """Rename a document and set store visibility. Admin or manager with manage_documents."""
     if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         abort(403)
+    is_manager_only = current_user.is_manager() and not current_user.is_admin()
     document = Document.query.get(doc_id)
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('manage_documents'))
     # Managers can only edit documents they can see (all stores or their store)
-    if current_user.is_manager():
+    if is_manager_only:
         sid = get_current_user_store_id()
         if document.store_id is not None and (sid is None or document.store_id != sid):
             abort(403)
@@ -12054,7 +12827,7 @@ def rename_document(doc_id):
                     document.store_id = None
                 else:
                     sid = int(store_id_raw)
-                    if current_user.is_manager():
+                    if is_manager_only:
                         my_sid = get_current_user_store_id()
                         if my_sid is not None and sid != my_sid:
                             document.store_id = my_sid
@@ -12448,9 +13221,47 @@ def set_signature_fields(doc_id):
                 font-size: 0.9em;
             }
         {{ global_theme_css|safe }}
+            /* Signature fields page dark overrides (scoped) */
+            body.signature-fields-page .document-viewer-container,
+            body.signature-fields-page .sidebar-panel {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+                color: #f2f5fb !important;
+            }
+            body.signature-fields-page .document-viewer {
+                background: #343a46 !important;
+            }
+            body.signature-fields-page .sidebar-panel h3,
+            body.signature-fields-page .sidebar-panel label,
+            body.signature-fields-page .sidebar-panel p,
+            body.signature-fields-page .document-viewer-container h3,
+            body.signature-fields-page .signature-field-item h4,
+            body.signature-fields-page .signature-field-item p,
+            body.signature-fields-page .instructions h3,
+            body.signature-fields-page .instructions li {
+                color: #f2f5fb !important;
+            }
+            body.signature-fields-page .sidebar-panel input,
+            body.signature-fields-page .sidebar-panel select {
+                background: rgba(255, 255, 255, 0.08) !important;
+                border: 1px solid rgba(255, 255, 255, 0.24) !important;
+                color: #f2f5fb !important;
+            }
+            body.signature-fields-page .sidebar-panel input::placeholder {
+                color: #b7c1d3 !important;
+            }
+            body.signature-fields-page .sidebar-panel select option {
+                background: #1a202c !important;
+                color: #f2f5fb !important;
+            }
+            body.signature-fields-page .instructions,
+            body.signature-fields-page .signature-field-item {
+                background: rgba(255, 255, 255, 0.06) !important;
+                border-left-color: rgba(110, 168, 254, 0.9) !important;
+            }
         </style>
     </head>
-    <body>
+    <body class="signature-fields-page">
         <div class="header">
             <div class="header-content">
                 <h1>✍️ Set Signature Fields - {{ document.name_for_users }}</h1>
@@ -13431,18 +14242,18 @@ def set_signature_fields(doc_id):
                 if (viewerContainer && !document.getElementById('modeContainer')) {
                     var modeContainer = document.createElement('div');
                     modeContainer.id = 'modeContainer';
-                    modeContainer.style.cssText = 'position: absolute; top: 10px; right: 10px; z-index: 200; background: white; padding: 10px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);';
-                    modeContainer.innerHTML = '<label style="font-size: 0.9em; font-weight: bold; margin-right: 10px;">Mode:</label>' +
-                        '<button type="button" id="modeSignature" style="padding: 5px 15px; margin-right: 5px; background: #28a745; color: white; border: none; border-radius: 3px; cursor: pointer;">Signature</button>' +
-                        '<button type="button" id="modeTyped" style="padding: 5px 15px; background: #e0e0e0; color: #000; border: none; border-radius: 3px; cursor: pointer;">Typed Field</button>';
+                    modeContainer.style.cssText = 'position: absolute; top: 10px; right: 10px; z-index: 200; background: #141b28; color: #f2f5fb; padding: 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 2px 10px rgba(0,0,0,0.35);';
+                    modeContainer.innerHTML = '<label style="font-size: 0.9em; font-weight: bold; margin-right: 10px; color: #f2f5fb;">Mode:</label>' +
+                        '<button type="button" id="modeSignature" style="padding: 5px 15px; margin-right: 5px; background: #fe0100; color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 3px; cursor: pointer;">Signature</button>' +
+                        '<button type="button" id="modeTyped" style="padding: 5px 15px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Typed Field</button>';
                     viewerContainer.appendChild(modeContainer);
                     
                     document.getElementById('modeSignature').addEventListener('click', function() {
                         fieldMode = 'signature';
-                        this.style.background = '#28a745';
+                        this.style.background = '#fe0100';
                         this.style.color = 'white';
-                        document.getElementById('modeTyped').style.background = '#e0e0e0';
-                        document.getElementById('modeTyped').style.color = '#000';
+                        document.getElementById('modeTyped').style.background = '#2f3a4f';
+                        document.getElementById('modeTyped').style.color = '#f2f5fb';
                         // Sync with form selector
                         var selector = document.getElementById('field_type_selector');
                         if (selector) selector.value = 'signature';
@@ -13451,10 +14262,10 @@ def set_signature_fields(doc_id):
                     
                     document.getElementById('modeTyped').addEventListener('click', function() {
                         fieldMode = 'typed';
-                        this.style.background = '#ffc107';
-                        this.style.color = '#000';
-                        document.getElementById('modeSignature').style.background = '#e0e0e0';
-                        document.getElementById('modeSignature').style.color = '#000';
+                        this.style.background = '#fe0100';
+                        this.style.color = '#fff';
+                        document.getElementById('modeSignature').style.background = '#2f3a4f';
+                        document.getElementById('modeSignature').style.color = '#f2f5fb';
                         // Sync with form selector
                         var selector = document.getElementById('field_type_selector');
                         if (selector) selector.value = 'typed';
@@ -13721,15 +14532,20 @@ def assign_document(doc_id):
     
     return render_template_string('''
     <!DOCTYPE html>
-    <html>
+    <html lang="en" class="assign-doc-html">
     <head>
         <title>Assign Document - {{ document.name_for_users }}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="dark">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
+            html.assign-doc-html,
+            body.assign-document-page {
+                color-scheme: dark;
+            }
             body {
                 font-family: 'URW Form', Arial, sans-serif;
-                background: #f5f5f5;
+                background: #0a0e14;
             }
             .header {
                 background: #000000;
@@ -13794,11 +14610,13 @@ def assign_document(doc_id):
                 background: #28a745;
             }
             .admin-panel {
-                background: white;
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+                border: 1px solid rgba(255, 255, 255, 0.14);
                 border-radius: 0.5rem;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 padding: 25px;
                 margin-bottom: 20px;
+                color: #f2f5fb;
             }
             .form-group {
                 margin-bottom: 20px;
@@ -13822,32 +14640,39 @@ def assign_document(doc_id):
                 min-height: 80px;
                 resize: vertical;
             }
-            .users-list {
+            .assign-doc-users-list {
                 max-height: 400px;
                 overflow-y: auto;
-                border: 1px solid #ddd;
+                border: 1px solid rgba(255, 255, 255, 0.22);
                 border-radius: 0.5rem;
                 padding: 10px;
-                background: #f8f9fa;
+                background: #070b10;
+                color: #f2f5fb;
             }
-            .user-item {
+            .assign-doc-user-row {
                 padding: 10px;
                 margin-bottom: 5px;
-                background: white;
+                background: #121a26;
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.16);
                 border-radius: 0.5rem;
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
             }
-            .user-item input[type="checkbox"] {
+            .assign-doc-user-row input[type="checkbox"] {
                 margin-right: 10px;
                 min-width: 20px;
                 min-height: 20px; /* Touch-friendly */
             }
-            .user-item label {
+            .assign-doc-user-row label {
                 flex: 1;
                 cursor: pointer;
-                font-weight: normal;
+                font-weight: 600;
+                color: #ffffff;
+            }
+            .assign-doc-user-name {
+                color: #ffffff;
             }
             .assigned-badge {
                 background: #28a745;
@@ -13865,7 +14690,9 @@ def assign_document(doc_id):
             .assignment-item {
                 padding: 10px;
                 margin-bottom: 10px;
-                background: #f8f9fa;
+                background: #121a26;
+                color: #f2f5fb;
+                border: 1px solid rgba(255, 255, 255, 0.12);
                 border-radius: 0.5rem;
                 display: flex;
                 justify-content: space-between;
@@ -13900,10 +14727,10 @@ def assign_document(doc_id):
                     font-size: 16px; /* Prevents zoom on iOS */
                     min-height: 44px;
                 }
-                .users-list {
+                .assign-doc-users-list {
                     max-height: 300px;
                 }
-                .user-item {
+                .assign-doc-user-row {
                     flex-wrap: wrap;
                     gap: 10px;
                 }
@@ -13930,14 +14757,129 @@ def assign_document(doc_id):
                 .admin-panel h2 {
                     font-size: 1.2em;
                 }
-                .users-list {
+                .assign-doc-users-list {
                     max-height: 250px;
                 }
             }
         {{ global_theme_css|safe }}
+            /* Assign Document: high-contrast list (global metallic ::before + light row defaults) */
+            body.assign-document-page {
+                background: linear-gradient(160deg, #0f1419 0%, #0a0e14 100%) !important;
+                color: #f2f5fb !important;
+            }
+            body.assign-document-page .container {
+                position: relative;
+                z-index: 1;
+            }
+            body.assign-document-page .admin-panel::before {
+                opacity: 0.05 !important;
+            }
+            body.assign-document-page .admin-panel {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+                color: #f2f5fb !important;
+                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35) !important;
+            }
+            body.assign-document-page .admin-panel form {
+                position: relative !important;
+                z-index: 2 !important;
+            }
+            body.assign-document-page .admin-panel h2,
+            body.assign-document-page .admin-panel h3 {
+                color: #f2f5fb !important;
+                border-bottom-color: rgba(255, 255, 255, 0.12) !important;
+            }
+            body.assign-document-page .form-group > label {
+                color: #dbe4f5 !important;
+            }
+            body.assign-document-page .assign-doc-users-list {
+                background: #0d1118 !important;
+                border: 1px solid rgba(255, 255, 255, 0.22) !important;
+                box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35) !important;
+            }
+            body.assign-document-page .assign-doc-user-row {
+                background: #1a2332 !important;
+                border: 1px solid rgba(255, 255, 255, 0.16) !important;
+                color: #ffffff !important;
+            }
+            body.assign-document-page .assign-doc-user-row:hover {
+                background: #243044 !important;
+                border-color: rgba(255, 255, 255, 0.24) !important;
+            }
+            body.assign-document-page .assign-doc-user-row label {
+                color: #ffffff !important;
+                font-weight: 600 !important;
+                -webkit-text-fill-color: #ffffff !important;
+            }
+            body.assign-document-page .assign-doc-user-name {
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+                font-weight: 600 !important;
+                font-size: 1rem !important;
+            }
+            body.assign-document-page .form-group input[type="date"],
+            body.assign-document-page .form-group textarea {
+                background: rgba(255, 255, 255, 0.1) !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255, 255, 255, 0.28) !important;
+            }
+            body.assign-document-page .form-group textarea::placeholder {
+                color: #9aa5b8 !important;
+            }
+            body.assign-document-page .current-assignments {
+                border-top-color: rgba(255, 255, 255, 0.12) !important;
+            }
+            body.assign-document-page .assignment-item {
+                background: rgba(255, 255, 255, 0.08) !important;
+                border: 1px solid rgba(255, 255, 255, 0.14) !important;
+                color: #f2f5fb !important;
+            }
+            body.assign-document-page .assignment-item strong {
+                color: #ffffff !important;
+            }
+            body.assign-document-page .assignment-item span:not(.assigned-badge) {
+                color: #c9d4e8 !important;
+            }
+            body.assign-document-page .assign-doc-users-list > p {
+                color: #b7c1d3 !important;
+            }
+            body.assign-document-page .assign-doc-users-shell {
+                background: #03060a !important;
+                background-color: #03060a !important;
+                background-image: none !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255, 255, 255, 0.2) !important;
+                border-radius: 12px !important;
+                padding: 14px !important;
+                margin-top: 8px !important;
+            }
+            body.assign-document-page .assign-doc-users-shell > label {
+                color: #f2f5fb !important;
+            }
+            /* ID-scoped: beats almost all theme class chains if body/page scoping fails */
+            #assign-doc-users-list-root.assign-doc-users-list {
+                background: #0d1118 !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255, 255, 255, 0.22) !important;
+                border-radius: 10px !important;
+                padding: 10px !important;
+                max-height: 400px !important;
+                overflow-y: auto !important;
+                box-sizing: border-box !important;
+            }
+            #assign-doc-users-list-root .assign-doc-user-row {
+                background: #1a2332 !important;
+                color: #ffffff !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            }
+            #assign-doc-users-list-root .assign-doc-user-row label,
+            #assign-doc-users-list-root .assign-doc-user-name {
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+            }
         </style>
     </head>
-    <body>
+    <body class="assign-document-page" data-page="assign-document">
         <div class="header">
             <div class="header-content">
                 <h1>👤 Assign Document - {{ document.original_filename }}</h1>
@@ -13950,23 +14892,30 @@ def assign_document(doc_id):
             <div class="admin-panel">
                 <h2>Assign to Users</h2>
                 <form method="POST" action="{{ url_for('assign_document_submit', doc_id=document.id) }}">
-                    <div class="form-group">
-                        <label>Select Users:</label>
-                        <div class="users-list">
+                    <div class="form-group assign-doc-users-form-group">
+                        <div class="assign-doc-users-shell"
+                             style="background:#03060a !important;background-color:#03060a !important;background-image:none !important;color:#f2f5fb !important;border:1px solid rgba(255,255,255,0.2) !important;border-radius:12px;padding:14px;margin-top:8px;box-sizing:border-box;">
+                        <label style="color:#f2f5fb !important;margin-bottom:10px;display:block;">Select Users:</label>
+                        <div id="assign-doc-users-list-root" class="assign-doc-users-list"
+                             style="background:#070b10 !important;background-color:#070b10 !important;background-image:none !important;color:#f2f5fb !important;border:1px solid rgba(255,255,255,0.22) !important;border-radius:10px;padding:10px;max-height:400px;overflow-y:auto;box-sizing:border-box;">
                             {% if all_users %}
                                 {% for user in all_users %}
-                                <div class="user-item">
+                                <div class="assign-doc-user-row"
+                                     style="background:#121a26 !important;background-color:#121a26 !important;background-image:none !important;color:#ffffff !important;border:1px solid rgba(255,255,255,0.18) !important;border-radius:8px;padding:10px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
                                     <input type="checkbox" name="usernames" value="{{ user.username }}" id="user-{{ user.username }}" 
                                            {% if user.username in assigned_usernames %}checked{% endif %}>
-                                    <label for="user-{{ user.username }}">{{ user_display_names.get(user.username, user.username) }}</label>
+                                    <label for="user-{{ user.username }}" style="color:#ffffff !important;-webkit-text-fill-color:#ffffff !important;flex:1;cursor:pointer;margin:0;">
+                                        <span class="assign-doc-user-name" style="color:#ffffff !important;-webkit-text-fill-color:#ffffff !important;font-weight:600;">{{ user_display_names.get(user.username, user.username) }}</span>
+                                    </label>
                                     {% if user.username in assigned_usernames %}
                                     <span class="assigned-badge">Assigned</span>
                                     {% endif %}
                                 </div>
                                 {% endfor %}
                             {% else %}
-                                <p style="color: #666; padding: 20px;">No users found. Users will appear here after they log in.</p>
+                                <p style="color: #c9d4e8; padding: 20px;">No users found. Users will appear here after they log in.</p>
                             {% endif %}
+                        </div>
                         </div>
                     </div>
                     
@@ -15419,18 +16368,29 @@ def _serve_sign_document_page(doc_id):
         # Today's date for auto-filling date typed fields (YYYY-MM-DD for HTML date input)
         from datetime import date
         today_date = date.today().isoformat()
+        saved_signature_image = None
+        saved_signature_kind = None
+        try:
+            user_row = UserModel.query.filter_by(username=current_user.username).first()
+            if user_row:
+                saved_signature_image = (getattr(user_row, 'saved_signature_image', None) or '').strip() or None
+                saved_signature_kind = (getattr(user_row, 'saved_signature_kind', None) or '').strip() or None
+        except Exception:
+            db.session.rollback()
         
         return render_template_string('''
     <!DOCTYPE html>
-    <html>
+    <html lang="en" class="sign-document-html">
     <head>
         <title>Sign Document - {{ document.name_for_users }}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="dark">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
+            html.sign-document-html, body.sign-document-page { color-scheme: dark; }
             body {
                 font-family: 'URW Form', Arial, sans-serif;
-                background: #f5f5f5;
+                background: #0a0e14;
             }
             .header {
                 background: #000000;
@@ -15710,9 +16670,126 @@ def _serve_sign_document_page(doc_id):
                 }
             }
         {{ global_theme_css|safe }}
+            /* Sign Document page: enforce dark panels + readable text on top of global theme */
+            body.sign-document-page .document-viewer-container,
+            body.sign-document-page .signature-panel {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255,255,255,0.14) !important;
+                color: #f2f5fb !important;
+                position: relative;
+                z-index: 1;
+            }
+            body.sign-document-page .document-viewer-container > *,
+            body.sign-document-page .signature-panel > * {
+                position: relative;
+                z-index: 2;
+            }
+            body.sign-document-page .document-viewer-container::before,
+            body.sign-document-page .signature-panel::before {
+                opacity: 0 !important;
+                background: none !important;
+                display: none !important;
+            }
+            body.sign-document-page h1,
+            body.sign-document-page h2,
+            body.sign-document-page h3,
+            body.sign-document-page h4 {
+                color: #f2f5fb !important;
+                -webkit-text-fill-color: #f2f5fb !important;
+                opacity: 1 !important;
+            }
+            body.sign-document-page .signature-panel p,
+            body.sign-document-page .signature-panel label,
+            body.sign-document-page .signature-panel span {
+                color: #e1e7f2 !important;
+                -webkit-text-fill-color: #e1e7f2 !important;
+                opacity: 1 !important;
+            }
+            body.sign-document-page .signature-field-item {
+                background: #121a26 !important;
+                border-left: 3px solid #007bff !important;
+                color: #f2f5fb !important;
+            }
+            body.sign-document-page .signature-field-item.signed {
+                background: #14361f !important;
+                border-left-color: #28a745 !important;
+            }
+            body.sign-document-page .signature-field-item h4,
+            body.sign-document-page .signature-field-item p,
+            body.sign-document-page .signature-field-item span,
+            body.sign-document-page .signature-field-item label {
+                color: #f2f5fb !important;
+                -webkit-text-fill-color: #f2f5fb !important;
+                opacity: 1 !important;
+            }
+            body.sign-document-page .signature-pad-container {
+                background: #ffffff !important;
+                border: 2px solid rgba(255,255,255,0.3) !important;
+            }
+            body.sign-document-page .signature-preview {
+                background: #ffffff !important;
+                border: 1px solid rgba(255,255,255,0.3) !important;
+            }
+            body.sign-document-page .signature-controls button {
+                background: #1f2a3d !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255,255,255,0.24) !important;
+            }
+            body.sign-document-page .signature-controls button.btn-success {
+                background: #28a745 !important;
+                color: #ffffff !important;
+                border-color: #28a745 !important;
+            }
+            body.sign-document-page .signature-controls button:hover {
+                background: #2a3753 !important;
+            }
+            body.sign-document-page .signature-controls button.btn-success:hover {
+                background: #218838 !important;
+            }
+            body.sign-document-page .typed-field-input,
+            body.sign-document-page input[type="text"].typed-field-input,
+            body.sign-document-page input[type="date"].typed-field-input,
+            body.sign-document-page input[type="number"].typed-field-input {
+                background: #121a26 !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255,255,255,0.24) !important;
+            }
+            body.sign-document-page .signature-panel hr {
+                border: none !important;
+                border-top: 1px solid rgba(255,255,255,0.18) !important;
+            }
+            /* The "Done" link styled as .btn at the bottom */
+            body.sign-document-page .signature-panel .btn {
+                background: #FE0100 !important;
+                color: #ffffff !important;
+                border: none !important;
+            }
+            /* Filled "Value:" preview boxes inside typed fields (inline style background: #f8f9fa) */
+            body.sign-document-page .signature-field-item div[style*="background: #f8f9fa"],
+            body.sign-document-page .signature-field-item div[style*="background:#f8f9fa"] {
+                background: #1a2332 !important;
+                color: #f2f5fb !important;
+                border: 1px solid rgba(255,255,255,0.18) !important;
+            }
+            body.sign-document-page .signature-field-item div[style*="background: #f8f9fa"] *,
+            body.sign-document-page .signature-field-item div[style*="background:#f8f9fa"] * {
+                color: #f2f5fb !important;
+                -webkit-text-fill-color: #f2f5fb !important;
+                opacity: 1 !important;
+            }
+            /* Readonly typed-field inputs (auto-filled name / initials / date) */
+            body.sign-document-page .signature-field-item input.typed-field-input[readonly],
+            body.sign-document-page .signature-field-item input.typed-field-input[style*="background: #f8f9fa"],
+            body.sign-document-page .signature-field-item input.typed-field-input[style*="background:#f8f9fa"] {
+                background: #1a2332 !important;
+                color: #f2f5fb !important;
+                -webkit-text-fill-color: #f2f5fb !important;
+                border: 1px solid rgba(255,255,255,0.18) !important;
+                opacity: 1 !important;
+            }
         </style>
     </head>
-    <body>
+    <body class="sign-document-page">
         <div class="header">
             <div class="header-content">
                 <h1>✍️ Sign Document - {{ document.name_for_users }}</h1>
@@ -15793,6 +16870,19 @@ def _serve_sign_document_page(doc_id):
                                 <div class="signature-pad-container">
                                     <canvas id="signaturePad-{{ field.id }}" width="350" height="200"></canvas>
                                 </div>
+                                {% if saved_signature_image %}
+                                <div style="margin-top: 10px; padding: 10px; border: 1px dashed rgba(255,255,255,0.3); border-radius: 6px;">
+                                    <p style="font-size: 0.85em; margin-bottom: 8px; color: #b7c1d3;">
+                                        Saved signature{% if saved_signature_kind %} ({{ saved_signature_kind }}){% endif %}
+                                    </p>
+                                    <img src="data:image/png;base64,{{ saved_signature_image }}" alt="Saved signature preview" style="max-width: 100%; max-height: 70px; object-fit: contain; display: block; margin-bottom: 8px;">
+                                    <button type="button" onclick="applySavedSignature({{ field.id }})" class="btn" style="width: 100%; margin-bottom: 8px; background: #fe0100;">Apply My Saved Signature</button>
+                                </div>
+                                {% endif %}
+                                <label style="display: flex; align-items: center; margin: 10px 0; font-size: 0.9em;">
+                                    <input type="checkbox" id="consent-image-{{ field.id }}" style="margin-right: 8px; width: 16px; height: 16px;">
+                                    <span>I confirm I intentionally apply my signature to this field.</span>
+                                </label>
                                 <div class="signature-controls">
                                     <button type="button" onclick="clearSignature({{ field.id }})">Clear</button>
                                     <button type="button" onclick="saveSignature({{ field.id }})" class="btn-success">Save Signature</button>
@@ -15876,6 +16966,7 @@ def _serve_sign_document_page(doc_id):
             var pdfScale = 1.0;
             var canvasOffsetX = 0;
             var canvasOffsetY = 0;
+            var savedSignatureImageBase64 = {{ ('"' ~ saved_signature_image ~ '"')|safe if saved_signature_image else 'null' }};
             
             // Scroll sidebar to the first incomplete (unsigned/unfilled) field
             function scrollToFirstIncompleteField() {
@@ -16129,6 +17220,11 @@ def _serve_sign_document_page(doc_id):
             function saveSignature(fieldId) {
                 var canvas = document.getElementById('signaturePad-' + fieldId);
                 if (!canvas) return;
+                var consentCheckbox = document.getElementById('consent-image-' + fieldId);
+                if (!consentCheckbox || !consentCheckbox.checked) {
+                    alert('Please confirm your intent to apply a signature to this field.');
+                    return;
+                }
                 
                 // Check if canvas has any drawing
                 var ctx = canvas.getContext('2d');
@@ -16159,7 +17255,8 @@ def _serve_sign_document_page(doc_id):
                     body: JSON.stringify({
                         signature_field_id: fieldId,
                         signature_image: base64Data,
-                        consent_given: false
+                        consent_given: true,
+                        used_saved_signature: false
                     })
                 })
                 .then(response => response.json())
@@ -16175,6 +17272,47 @@ def _serve_sign_document_page(doc_id):
                 .catch(error => {
                     console.error('Error:', error);
                     alert('Error saving signature. Please try again.');
+                });
+            }
+
+            function applySavedSignature(fieldId) {
+                if (!savedSignatureImageBase64) {
+                    alert('No saved signature found. Set one under Profile > Manage Signature.');
+                    return;
+                }
+                var consentCheckbox = document.getElementById('consent-image-' + fieldId);
+                if (!consentCheckbox || !consentCheckbox.checked) {
+                    alert('Please confirm your intent before applying your saved signature.');
+                    return;
+                }
+                if (!confirm('Apply your saved signature to this field now?')) {
+                    return;
+                }
+
+                fetch('{{ url_for("submit_signature", doc_id=document.id) }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        signature_field_id: fieldId,
+                        signature_image: savedSignatureImageBase64,
+                        consent_given: true,
+                        used_saved_signature: true
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Saved signature applied successfully.');
+                        location.reload();
+                    } else {
+                        alert('Error applying saved signature: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error applying saved signature. Please try again.');
                 });
             }
             
@@ -16388,7 +17526,8 @@ def _serve_sign_document_page(doc_id):
     </html>
     ''', document=document, signature_fields=signature_fields, signed_field_ids=signed_field_ids, 
          user_signatures=user_signatures, typed_fields=typed_fields, filled_typed_field_ids=filled_typed_field_ids, is_pdf=is_pdf,
-         user_display_name=user_display_name, user_initials=user_initials, today_date=today_date)
+         user_display_name=user_display_name, user_initials=user_initials, today_date=today_date,
+         saved_signature_image=saved_signature_image, saved_signature_kind=saved_signature_kind)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -16595,6 +17734,197 @@ def sign_pdf_cryptographically(document, signature_field, username):
         return False, f"Error signing PDF: {str(e)}"
 
 
+def _build_signed_pdf_copy_for_user(document, username, output_path=None):
+    """
+    Build a signed PDF copy from stored signature/typed values without mutating original.
+    Returns (success, path_or_error).
+    """
+    if not FITZ_AVAILABLE:
+        return False, "PyMuPDF not available"
+    if not document or not document.file_path or not os.path.exists(document.file_path):
+        return False, "Original document file not found"
+
+    import tempfile
+    import shutil
+
+    try:
+        try:
+            user_signatures = DocumentSignature.query.filter_by(
+                document_id=document.id,
+                username=username
+            ).all()
+        except Exception:
+            user_signatures = []
+
+        try:
+            user_typed_values = DocumentTypedFieldValue.query.filter_by(
+                document_id=document.id,
+                username=username
+            ).all()
+            typed_value_map = {val.typed_field_id: val.field_value for val in user_typed_values}
+        except Exception:
+            typed_value_map = {}
+
+        # Build a copy even if no fields are filled (keeps copy semantics explicit).
+        if output_path:
+            work_path = str(output_path)
+            Path(work_path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(document.file_path, work_path)
+        else:
+            temp_fd, work_path = tempfile.mkstemp(suffix='.pdf')
+            os.close(temp_fd)
+            shutil.copy2(document.file_path, work_path)
+
+        pdf_doc = fitz.open(work_path)
+
+        # Overlay image signatures
+        for sig in user_signatures:
+            if not sig.signature_image:
+                continue
+
+            field = DocumentSignatureField.query.get(sig.signature_field_id) if sig.signature_field_id else None
+
+            sig_field_page = getattr(sig, 'field_page_number', None)
+            sig_field_x = getattr(sig, 'field_x_position', None)
+            sig_field_y = getattr(sig, 'field_y_position', None)
+            sig_field_width = getattr(sig, 'field_width', None)
+            sig_field_height = getattr(sig, 'field_height', None)
+
+            if not field:
+                if not sig_field_page or sig_field_x is None or sig_field_y is None:
+                    continue
+                page_number = sig_field_page
+                x_position = sig_field_x
+                y_position = sig_field_y
+                width = sig_field_width or 200
+                height = sig_field_height or 80
+            else:
+                page_number = sig_field_page if sig_field_page else field.page_number
+                x_position = sig_field_x if sig_field_x is not None else field.x_position
+                y_position = sig_field_y if sig_field_y is not None else field.y_position
+                width = sig_field_width if sig_field_width else (field.width or 200)
+                height = sig_field_height if sig_field_height else (field.height or 80)
+
+            try:
+                from PIL import Image
+                sig_image_data = base64.b64decode(sig.signature_image)
+                sig_img = Image.open(BytesIO(sig_image_data))
+
+                page_num = int(page_number) - 1
+                if page_num < 0 or page_num >= len(pdf_doc):
+                    continue
+
+                page = pdf_doc[page_num]
+                page_rect = page.rect
+                page_width = page_rect.width
+                page_height = page_rect.height
+
+                viewer_height_px = 800.0
+                scale_y = page_height / viewer_height_px
+                viewer_width_px = viewer_height_px * (page_width / page_height)
+                scale_x = page_width / viewer_width_px
+
+                x_pdf = float(x_position) * scale_x
+                y_pdf = float(y_position) * scale_y
+                width_pdf = float(width) * scale_x
+                height_pdf = float(height) * scale_y
+
+                x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+                y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+
+                img_bytes = BytesIO()
+                sig_img.save(img_bytes, format='PNG')
+                img_bytes.seek(0)
+
+                img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+                page.insert_image(img_rect, stream=img_bytes.getvalue())
+            except Exception:
+                continue
+
+        # Overlay typed fields
+        for typed_field_id, field_value in typed_value_map.items():
+            try:
+                typed_field = DocumentTypedField.query.get(typed_field_id)
+                if not typed_field:
+                    continue
+                page_num = typed_field.page_number - 1
+                if page_num < 0 or page_num >= len(pdf_doc):
+                    continue
+
+                page = pdf_doc[page_num]
+                page_rect = page.rect
+                page_width = page_rect.width
+                page_height = page_rect.height
+
+                viewer_height_px = 800.0
+                scale_y = page_height / viewer_height_px
+                viewer_width_px = viewer_height_px * (page_width / page_height)
+                scale_x = page_width / viewer_width_px
+
+                x_pdf = typed_field.x_position * scale_x
+                y_pdf = typed_field.y_position * scale_y
+                width_pdf = (typed_field.width or 200) * scale_x
+                height_pdf = (typed_field.height or 30) * scale_y
+
+                x_pdf = max(0, min(x_pdf, page_width - width_pdf))
+                y_pdf = max(0, min(y_pdf, page_height - height_pdf))
+                text_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
+
+                font_size = int(height_pdf * 0.7)
+                font_size = 8 if font_size < 8 else (72 if font_size > 72 else font_size)
+
+                rc = page.insert_textbox(
+                    text_rect,
+                    field_value or '',
+                    fontsize=font_size,
+                    align=0,
+                    color=(0, 0, 0),
+                    render_mode=0
+                )
+                if rc < 0:
+                    text_y = y_pdf + font_size + 2
+                    page.insert_text((x_pdf + 2, text_y), (field_value or '')[:100], fontsize=font_size, color=(0, 0, 0))
+            except Exception:
+                continue
+
+        pdf_doc.save(work_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+        pdf_doc.close()
+        return True, work_path
+    except Exception as e:
+        return False, str(e)
+
+
+def _persist_signed_pdf_copy(document, username):
+    """Persist a finalized signed PDF copy to uploads/signed_copies and return its relative path."""
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    base_name = secure_filename(f"{Path(document.original_filename).stem}_signed_{username}_{ts}.pdf")
+    rel_path = Path('uploads') / 'signed_copies' / str(document.id) / base_name
+    abs_path = BASE_DIR / rel_path
+    ok, result = _build_signed_pdf_copy_for_user(document, username, output_path=abs_path)
+    if not ok:
+        raise RuntimeError(result)
+    return str(rel_path).replace('\\', '/')
+
+
+def _create_signature_audit_log(document_id, username, event_type, details='', used_saved_signature=False, signed_copy_path=None):
+    """Best-effort audit logging for signature actions."""
+    try:
+        log = SignatureAuditLog(
+            document_id=document_id,
+            username=username,
+            event_type=event_type,
+            details=details,
+            used_saved_signature=bool(used_saved_signature),
+            signed_copy_path=signed_copy_path,
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent', '')
+        )
+        db.session.add(log)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+
 @app.route('/documents/<int:doc_id>/sign/submit', methods=['POST'])
 @login_required
 def submit_signature(doc_id):
@@ -16615,6 +17945,7 @@ def submit_signature(doc_id):
     signature_field_id = data.get('signature_field_id')
     signature_image = data.get('signature_image')  # Base64 encoded (for image type)
     consent_given = data.get('consent_given', False)  # User consent for electronic signing
+    used_saved_signature = bool(data.get('used_saved_signature', False))
     
     if not signature_field_id:
         return jsonify({'success': False, 'error': 'Missing signature field ID'}), 400
@@ -16636,6 +17967,8 @@ def submit_signature(doc_id):
         # Image signatures require the image
         if not signature_image:
             return jsonify({'success': False, 'error': 'Missing signature image'}), 400
+        if not consent_given:
+            return jsonify({'success': False, 'error': 'Intent confirmation is required before applying a signature'}), 400
     
     try:
         # Check if user already signed this field (by ID or by location for orphaned signatures)
@@ -16680,6 +18013,7 @@ def submit_signature(doc_id):
             existing_signature.ip_address = request.remote_addr
             existing_signature.user_agent = request.headers.get('User-Agent', '')
             existing_signature.consent_given = consent_given
+            existing_signature.used_saved_signature = used_saved_signature
             # Update stored field metadata in case field was recreated
             # Safely set new fields (may not exist if database not migrated yet)
             try:
@@ -16705,7 +18039,8 @@ def submit_signature(doc_id):
                 signed_at=datetime.utcnow(),
                 ip_address=request.remote_addr,
                 user_agent=request.headers.get('User-Agent', ''),
-                consent_given=consent_given
+                consent_given=consent_given,
+                used_saved_signature=used_saved_signature
             )
             
             # Add field metadata if columns exist (handle case where database hasn't been migrated)
@@ -16722,6 +18057,10 @@ def submit_signature(doc_id):
             db.session.add(new_signature)
             sig_to_embed = new_signature
         
+        # Keep original documents immutable:
+        # - Save signature/typed data in DB
+        # - Generate signed copies on demand for preview/download
+        #   (do NOT write image signatures into document.file_path)
         # Embed signature based on type
         if is_cryptographic:
             # Cryptographic signature
@@ -16731,18 +18070,22 @@ def submit_signature(doc_id):
                 pdf_hash = calculate_pdf_hash(document.file_path)
                 sig_to_embed.signature_hash = pdf_hash
         else:
-            # Image signature - embed into the PDF so it appears on the file (download/print)
-            img_b64 = (signature_image or '').split(',')[1] if ',' in (signature_image or '') else signature_image
-            if img_b64:
-                success, message = embed_signature_in_pdf(document, signature_field, img_b64)
-            else:
-                success, message = True, "Signature saved to database"
+            # Image signature: do not mutate the original file.
+            # Signed overlays are rendered into temporary copies for viewing/downloading.
+            success, message = True, "Signature saved to database"
         
         if not success:
             db.session.rollback()
             return jsonify({'success': False, 'error': message}), 500
         
         db.session.commit()
+        _create_signature_audit_log(
+            document_id=doc_id,
+            username=current_user.username,
+            event_type='apply_signature',
+            details=f'Applied signature to field_id={signature_field_id}',
+            used_saved_signature=used_saved_signature
+        )
         
         # Check if all required fields are signed (using helper to handle deleted fields)
         all_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
@@ -16751,6 +18094,7 @@ def submit_signature(doc_id):
         
         # Update task completion if all fields signed
         if all_signed:
+            signed_copy_rel_path = None
             # Mark document assignment as completed
             assignment = DocumentAssignment.query.filter_by(
                 document_id=doc_id,
@@ -16770,13 +18114,36 @@ def submit_signature(doc_id):
                 task.status = 'completed'
                 task.completed_at = datetime.utcnow()
             
+            # Persist a finalized signed PDF copy for audit/download history.
+            try:
+                signed_copy_rel_path = _persist_signed_pdf_copy(document, current_user.username)
+            except Exception as e:
+                app.logger.warning(f"Failed to persist signed PDF copy: {e}")
+                _log_exception_to_file(e)
+
             db.session.commit()
+            any_saved_used = DocumentSignature.query.filter_by(
+                document_id=doc_id,
+                username=current_user.username,
+                used_saved_signature=True
+            ).first() is not None
+            _create_signature_audit_log(
+                document_id=doc_id,
+                username=current_user.username,
+                event_type='complete_document',
+                details='All required signature fields completed',
+                used_saved_signature=any_saved_used,
+                signed_copy_path=signed_copy_rel_path
+            )
 
             # Email a signed copy to the user
             try:
                 to_email = get_email_for_username(current_user.username)
-                if to_email and document.file_path:
-                    pdf_path = Path(document.file_path) if os.path.isabs(document.file_path) else (BASE_DIR / document.file_path)
+                if to_email:
+                    email_source = (BASE_DIR / signed_copy_rel_path) if signed_copy_rel_path else (
+                        Path(document.file_path) if os.path.isabs(document.file_path) else (BASE_DIR / document.file_path)
+                    )
+                    pdf_path = email_source
                     if pdf_path.exists():
                         with open(pdf_path, 'rb') as f:
                             pdf_bytes = f.read()
@@ -16785,12 +18152,12 @@ def submit_signature(doc_id):
                             doc_name += '.pdf'
                         safe_name = "".join(c for c in doc_name if c.isalnum() or c in ' ._-').strip() or 'signed_document.pdf'
                         subject = f"Your signed copy: {doc_name}"
-                        body_html = f"""
-                        <p>Hello,</p>
-                        <p>Please find your signed copy of <strong>{doc_name}</strong> attached.</p>
-                        <p>You completed signing this document in the Ziebart Onboarding portal.</p>
-                        <p>Thank you,<br>Onboarding Team</p>
-                        """
+                        body_html = (
+                            f"<p>Hello,</p>"
+                            f"<p>Please find your signed copy of <strong>{doc_name}</strong> attached.</p>"
+                            f"<p>You completed signing this document in the Ziebart Onboarding portal.</p>"
+                            f"<p>Thank you,<br>Onboarding Team</p>"
+                        )
                         if send_email_with_attachment(to_email, subject, body_html, safe_name, pdf_bytes):
                             app.logger.info(f"Sent signed PDF to {to_email} for document {doc_id}")
                         else:
@@ -18912,7 +20279,12 @@ def view_new_hire_details(username):
             </div>
             
             <div class="section">
-                <h2 class="section-title">Assigned Tasks</h2>
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
+                    <h2 class="section-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Assigned Tasks</h2>
+                    {% if current_user.is_admin() %}
+                    <a href="{{ url_for('admin_assign_task', staff_console='admin', username=username) }}" class="btn" style="padding:8px 14px;font-size:0.9em;text-decoration:none;">+ Assign extra task</a>
+                    {% endif %}
+                </div>
                 {% if user_tasks %}
                     <table>
                         <thead>
@@ -18989,6 +20361,329 @@ def remove_user_task(task_id):
         app.logger.exception('remove_user_task failed')
         flash(f'Could not remove task: {str(e)}', 'error')
     return redirect(url_for('view_new_hire_details', username=username))
+
+
+@app.route('/admin/assign-task', methods=['GET', 'POST'])
+@admin_required
+def admin_assign_task():
+    """Assign a one-off UserTask to any user. Optionally link to a Document so it acts as a sign-document task."""
+    all_users = UserModel.query.order_by(UserModel.username).all()
+    user_display_names = {}
+    for u in all_users:
+        new_hire = NewHire.query.filter_by(username=u.username).first()
+        if new_hire:
+            user_display_names[u.username] = f"{new_hire.first_name} {new_hire.last_name}".strip() or u.username
+        elif getattr(u, 'full_name', None) and u.full_name.strip():
+            user_display_names[u.username] = u.full_name.strip()
+        else:
+            user_display_names[u.username] = u.username
+
+    try:
+        all_documents = Document.query.order_by(Document.original_filename).all()
+    except Exception:
+        all_documents = []
+
+    if request.method == 'POST':
+        sc = (request.form.get('staff_console') or request.args.get('staff_console') or 'admin').strip()
+        username = (request.form.get('username') or '').strip()
+        task_title = (request.form.get('task_title') or '').strip()
+        task_description = (request.form.get('task_description') or '').strip() or None
+        priority = (request.form.get('priority') or 'normal').strip().lower()
+        notes = (request.form.get('notes') or '').strip() or None
+        due_date_str = (request.form.get('due_date') or '').strip()
+        document_id_str = (request.form.get('document_id') or '').strip()
+
+        if priority not in ('low', 'normal', 'high', 'urgent'):
+            priority = 'normal'
+
+        if not username:
+            flash('Please select a user.', 'error')
+            return redirect(url_for('admin_assign_task', staff_console=sc))
+
+        document_id = None
+        document = None
+        if document_id_str.isdigit():
+            document = Document.query.get(int(document_id_str))
+            if not document:
+                flash('Selected document was not found.', 'error')
+                return redirect(url_for('admin_assign_task', staff_console=sc))
+            document_id = document.id
+
+        if not task_title and not document:
+            flash('Please enter a task title or select a document.', 'error')
+            return redirect(url_for('admin_assign_task', staff_console=sc))
+        if not task_title and document:
+            task_title = f"Sign Document: {document.name_for_users}"
+        if len(task_title) > 200:
+            task_title = task_title[:200]
+
+        assignee = UserModel.query.filter_by(username=username).first()
+        if not assignee:
+            flash('Selected user was not found.', 'error')
+            return redirect(url_for('admin_assign_task', staff_console=sc))
+
+        due_date = None
+        if due_date_str:
+            try:
+                due_date = datetime.strptime(due_date_str, '%Y-%m-%d').date()
+            except Exception:
+                pass
+
+        try:
+            if document is not None:
+                existing_assignment = DocumentAssignment.query.filter_by(
+                    document_id=document_id, username=username
+                ).first()
+                if not existing_assignment:
+                    db.session.add(DocumentAssignment(
+                        document_id=document_id,
+                        username=username,
+                        assigned_by=current_user.username,
+                        due_date=due_date,
+                        notes=notes,
+                    ))
+                else:
+                    if due_date:
+                        existing_assignment.due_date = due_date
+                    if notes:
+                        existing_assignment.notes = notes
+
+                if not task_description:
+                    task_description = (
+                        f"Please review and sign the document: "
+                        f"{document.description or document.name_for_users}"
+                    )
+
+            task = UserTask(
+                username=username,
+                task_title=task_title,
+                task_description=task_description,
+                task_type='document' if document else 'general',
+                document_id=document_id,
+                priority=priority,
+                status='pending',
+                due_date=due_date,
+                assigned_by=current_user.username,
+                notes=notes,
+                display_order=5000,
+                depends_on_task_id=None,
+            )
+            db.session.add(task)
+            db.session.commit()
+
+            if document is not None:
+                try:
+                    to_email = get_email_for_username(username)
+                    if to_email:
+                        sign_url = url_for('sign_document', doc_id=document_id, _external=True)
+                        doc_name = document.name_for_users or 'Document'
+                        due_html = f'<p>Due date: {due_date_str}</p>' if due_date_str else ''
+                        send_email(
+                            to_email,
+                            subject=f"Document to sign: {doc_name}",
+                            body_html=(
+                                f"<p>Hello,</p>"
+                                f"<p>You have been assigned to sign the following document: <strong>{doc_name}</strong>.</p>"
+                                f"<p><a href=\"{sign_url}\">Sign the document here</a></p>"
+                                f"{due_html}"
+                                f"<p>— Ziebart Onboarding</p>"
+                            ),
+                        )
+                except Exception:
+                    app.logger.exception('admin_assign_task email notification failed')
+
+            display_name = user_display_names.get(username, username)
+            if document is not None:
+                flash(
+                    f'Document "{document.name_for_users}" assigned to {display_name}. '
+                    f'They will see a sign-document task on their Tasks page.',
+                    'success'
+                )
+            else:
+                flash(f'Task assigned to {display_name}.', 'success')
+        except Exception as e:
+            db.session.rollback()
+            app.logger.exception('admin_assign_task failed')
+            flash(f'Could not assign task: {str(e)}', 'error')
+
+        return redirect(url_for('admin_assign_task', staff_console=sc))
+
+    prefill_username = (request.args.get('username') or '').strip()
+    staff_console_redirect = (request.args.get('staff_console') or 'admin').strip()
+    prefill_document_id = (request.args.get('document_id') or '').strip()
+
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html lang="en" class="assign-task-html">
+    <head>
+        <title>Assign task to user</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="dark">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            html.assign-task-html, body.assign-task-page {
+                color-scheme: dark;
+            }
+            body { font-family: 'URW Form', Arial, sans-serif; background: #0a0e14; }
+            .header {
+                background: #000000; color: white; padding: 12px 30px;
+                display: flex; justify-content: space-between; align-items: center; min-height: 60px;
+            }
+            .header h1 { font-weight: 800; font-size: 1.2em; margin: 0; }
+            .back-btn {
+                background: rgba(255,255,255,0.2); color: #FFFFFF; padding: 8px 16px; border-radius: 0.5rem;
+                text-decoration: none; border: 1px solid rgba(255,255,255,0.3);
+            }
+            .container { max-width: 720px; margin: 20px auto; padding: 0 20px; }
+            .admin-panel {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+                border: 1px solid rgba(255,255,255,0.14);
+                border-radius: 0.5rem;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                padding: 25px; margin-bottom: 20px;
+                color: #f2f5fb;
+            }
+            .form-group { margin-bottom: 18px; }
+            .form-group label { display: block; font-weight: 600; margin-bottom: 6px; color: #f2f5fb; }
+            .form-group input[type="text"], .form-group input[type="date"], .form-group select, .form-group textarea {
+                width: 100%; padding: 10px;
+                border: 1px solid rgba(255,255,255,0.24);
+                border-radius: 4px; font-size: 14px;
+                background: #121a26;
+                color: #f2f5fb;
+            }
+            .form-group textarea { min-height: 100px; resize: vertical; }
+            .form-group input::placeholder, .form-group textarea::placeholder { color: #9aa5b8; }
+            .form-group select option, .form-group select optgroup {
+                background: #121a26;
+                color: #f2f5fb;
+            }
+            .help { font-size: 0.85em; color: #b7c1d3; margin-top: 4px; }
+            .btn { display: inline-block; padding: 12px 24px; background: #FE0100; color: white; border: none;
+                border-radius: 5px; cursor: pointer; font-size: 15px; font-weight: 600; }
+            .flash { padding: 12px 16px; margin-bottom: 16px; border-radius: 0.5rem; }
+            .flash.success { background: #d4edda; color: #155724; }
+            .flash.error { background: #f8d7da; color: #721c24; }
+        {{ global_theme_css|safe }}
+            /* Assign task: keep native <select> dropdown dark in Chromium/Edge */
+            body.assign-task-page .form-group select,
+            body.assign-task-page .form-group select option,
+            body.assign-task-page .form-group select optgroup {
+                background: #121a26 !important;
+                color: #f2f5fb !important;
+            }
+            body.assign-task-page .form-group select option:checked {
+                background: #1f2a3d !important;
+                color: #ffffff !important;
+            }
+        </style>
+    </head>
+    <body class="assign-task-page">
+        <div class="header">
+            <h1>Assign task to user</h1>
+            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+        </div>
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash {{ category }}">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
+            <div class="admin-panel">
+                <p class="help" style="margin-bottom: 16px;">
+                    Creates a one-off task on the user’s <strong>Tasks</strong> page. Pick a <strong>document</strong>
+                    below if the task is to sign a specific form — that will also assign the document to them and
+                    email them the signing link. Leave the document blank for any other type of one-off task.
+                </p>
+                <form method="POST" action="{{ url_for('admin_assign_task') }}">
+                    <input type="hidden" name="staff_console" value="{{ staff_console_redirect }}">
+                    <div class="form-group">
+                        <label for="username">User</label>
+                        <select id="username" name="username" required>
+                            <option value="">— Select user —</option>
+                            {% for u in all_users %}
+                            <option value="{{ u.username }}" {% if u.username == prefill_username %}selected{% endif %}>
+                                {{ user_display_names.get(u.username, u.username) }} ({{ u.username }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="document_id">Document to sign (optional)</label>
+                        <select id="document_id" name="document_id">
+                            <option value="">— None (general task) —</option>
+                            {% for d in all_documents %}
+                            <option value="{{ d.id }}" {% if prefill_document_id == d.id|string %}selected{% endif %}>
+                                {{ d.name_for_users or d.original_filename }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <div class="help">
+                            If a document is selected, the user gets a “Sign Document” task linked to it and an
+                            email with the signing link. Leave blank for a general one-off task.
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="task_title">Task title <span id="task_title_optional" style="display:none; font-weight:400; color:#9aa5b8;">(optional — auto-filled from document)</span></label>
+                        <input type="text" id="task_title" name="task_title" maxlength="200" required placeholder="Short title shown in their task list">
+                    </div>
+                    <div class="form-group">
+                        <label for="task_description">Description (optional)</label>
+                        <textarea id="task_description" name="task_description" placeholder="What they need to do"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="priority">Priority</label>
+                        <select id="priority" name="priority">
+                            <option value="low">Low</option>
+                            <option value="normal" selected>Normal</option>
+                            <option value="high">High</option>
+                            <option value="urgent">Urgent</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="due_date">Due date (optional)</label>
+                        <input type="date" id="due_date" name="due_date">
+                    </div>
+                    <div class="form-group">
+                        <label for="notes">Internal notes (optional)</label>
+                        <input type="text" id="notes" name="notes" maxlength="500" placeholder="Visible to admins on task row">
+                    </div>
+                    <button type="submit" class="btn">Assign task</button>
+                </form>
+            </div>
+        </div>
+        <script>
+            (function() {
+                var docSel = document.getElementById('document_id');
+                var titleInput = document.getElementById('task_title');
+                var optionalLabel = document.getElementById('task_title_optional');
+                if (!docSel || !titleInput) return;
+                function syncTitleRequirement() {
+                    var hasDoc = !!docSel.value;
+                    if (hasDoc) {
+                        titleInput.required = false;
+                        if (optionalLabel) optionalLabel.style.display = 'inline';
+                        if (!titleInput.value.trim()) {
+                            var label = docSel.options[docSel.selectedIndex] ? docSel.options[docSel.selectedIndex].text : '';
+                            titleInput.placeholder = 'Auto: Sign Document: ' + label;
+                        }
+                    } else {
+                        titleInput.required = true;
+                        if (optionalLabel) optionalLabel.style.display = 'none';
+                        titleInput.placeholder = 'Short title shown in their task list';
+                    }
+                }
+                docSel.addEventListener('change', syncTitleRequirement);
+                syncTitleRequirement();
+            })();
+        </script>
+    </body>
+    </html>
+    ''', all_users=all_users, user_display_names=user_display_names, prefill_username=prefill_username,
+         staff_console_redirect=staff_console_redirect, all_documents=all_documents,
+         prefill_document_id=prefill_document_id)
 
 
 @app.route('/admin/new-hire/<username>/nudge-task/<int:task_id>', methods=['POST'])
@@ -24445,12 +26140,14 @@ def view_training_video(video_id):
     
     return render_template_string('''
     <!DOCTYPE html>
-    <html>
+    <html lang="en" class="training-quiz-html">
     <head>
         <title>{{ video.title }} - Harassment Training</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="dark">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
+            html.training-quiz-html, body.training-quiz-page { color-scheme: dark; }
             body {
                 font-family: 'URW Form', Arial, sans-serif;
                 background: #1a1a1a;
@@ -24661,9 +26358,66 @@ def view_training_video(video_id):
                 }
             }
         {{ global_theme_css|safe }}
+            /* Training quiz: force readable text on white quiz card and dark answer options */
+            body.training-quiz-page .quiz-content {
+                background: #ffffff !important;
+                color: #111111 !important;
+            }
+            body.training-quiz-page .quiz-content::before,
+            body.training-quiz-page .answer-option::before {
+                opacity: 0 !important;
+                background: none !important;
+                display: none !important;
+            }
+            body.training-quiz-page .quiz-content h1,
+            body.training-quiz-page .quiz-content h2,
+            body.training-quiz-page .quiz-content h3,
+            body.training-quiz-page .quiz-content .question,
+            body.training-quiz-page .quiz-content p,
+            body.training-quiz-page .quiz-content label,
+            body.training-quiz-page .quiz-content span {
+                color: #111111 !important;
+                -webkit-text-fill-color: #111111 !important;
+                opacity: 1 !important;
+            }
+            body.training-quiz-page .quiz-content h2 {
+                color: #FE0100 !important;
+                -webkit-text-fill-color: #FE0100 !important;
+            }
+            body.training-quiz-page .answer-option {
+                background: #f1f3f6 !important;
+                color: #111111 !important;
+                border: 2px solid #d6dbe4 !important;
+                position: relative;
+                z-index: 1;
+            }
+            body.training-quiz-page .answer-option > * { position: relative; z-index: 2; }
+            body.training-quiz-page .answer-option label,
+            body.training-quiz-page .answer-option span {
+                color: #111111 !important;
+                -webkit-text-fill-color: #111111 !important;
+                opacity: 1 !important;
+                cursor: pointer;
+            }
+            body.training-quiz-page .answer-option:hover {
+                background: #e3e8f0 !important;
+                border-color: #007bff !important;
+            }
+            body.training-quiz-page .answer-option.selected {
+                background: #cfe2ff !important;
+                border-color: #007bff !important;
+            }
+            body.training-quiz-page .quiz-content .btn {
+                background: #FE0100 !important;
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+            }
+            body.training-quiz-page .quiz-content .btn-success {
+                background: #28a745 !important;
+            }
         </style>
     </head>
-    <body>
+    <body class="training-quiz-page">
         <div class="header">
             <h1>{{ video.title }}</h1>
             {% if video.description %}
