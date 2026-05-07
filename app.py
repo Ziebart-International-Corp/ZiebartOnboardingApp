@@ -2,21 +2,30 @@
 Onboarding App - Main Flask Application
 Email + password login with Admin and User roles
 """
-from flask import Flask, render_template_string, redirect, url_for, request, flash, jsonify, send_file, send_from_directory, make_response, abort
+import os
+from pathlib import Path
+
+# Load .env before any config that uses it (this app's folder only)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / '.env', override=True)
+except ImportError:
+    pass
+
+from flask import Flask, render_template_string, redirect, url_for, request, session, flash, jsonify, send_file, send_from_directory, make_response, abort
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from sqlalchemy import exists, or_, and_, text, bindparam
+from sqlalchemy import exists, or_, and_, text, bindparam, func
 from auth import login_required, admin_required, manager_required, User, check_user_can_login_as_admin, authenticate_by_email_password
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
                     DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, document_stores)
 from membership import get_token_groups, get_local_groups
-from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, \
-    MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USE_SSL, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
+from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR
 from datetime import datetime
-import os
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import generate_password_hash
+from markupsafe import Markup
 from io import BytesIO
 import base64
 try:
@@ -79,18 +88,138 @@ def configure_secure_cookies():
     app.config['SESSION_COOKIE_SECURE'] = is_https
     app.config['PREFERRED_URL_SCHEME'] = 'https' if is_https else 'http'
 
-# Mail (optional - only if MAIL_USERNAME/MAIL_PASSWORD set)
+# Remember which staff console (admin vs manager) the user last opened so
+# "Back to Dashboard" on shared /admin/* tools returns to the right home.
+STAFF_CONSOLE_HOME_KEY = 'staff_console_home'
+
+
+def touch_staff_console_home(which):
+    """Persist last staff landing: 'admin' or 'manager' (for hybrid-role users)."""
+    try:
+        if not current_user.is_authenticated:
+            return
+    except Exception:
+        return
+    if which == 'admin' and current_user.is_admin():
+        session[STAFF_CONSOLE_HOME_KEY] = 'admin'
+    elif which == 'manager' and current_user.is_manager():
+        session[STAFF_CONSOLE_HOME_KEY] = 'manager'
+
+
+STAFF_CONSOLE_QUERY_KEY = 'staff_console'
+
+
+@app.before_request
+def apply_staff_console_from_query():
+    """?staff_console=admin|manager on any URL sets which console Back to Dashboard uses."""
+    try:
+        if not current_user.is_authenticated:
+            return
+    except Exception:
+        return
+    sc = (request.args.get(STAFF_CONSOLE_QUERY_KEY) or '').strip().lower()
+    if sc in ('admin', 'manager'):
+        touch_staff_console_home(sc)
+
+
+@app.template_global()
+def staff_console_home_url():
+    """Target for 'Back to Dashboard' on pages shared by admin and manager consoles."""
+    try:
+        authed = current_user.is_authenticated
+    except Exception:
+        authed = False
+    if not authed:
+        return url_for('dashboard')
+    is_ad = current_user.is_admin()
+    is_mg = current_user.is_manager()
+    pref = session.get(STAFF_CONSOLE_HOME_KEY)
+    if pref == 'manager' and is_mg:
+        return url_for('manager_dashboard')
+    if pref == 'admin' and is_ad:
+        return url_for('admin_dashboard')
+    if is_mg and not is_ad:
+        return url_for('manager_dashboard')
+    if is_ad and is_mg:
+        # Hybrid with no session: prefer admin home (managers set session via ?staff_console=manager on links)
+        return url_for('admin_dashboard')
+    if is_ad:
+        return url_for('admin_dashboard')
+    if is_mg:
+        return url_for('manager_dashboard')
+    return url_for('dashboard')
+
+
+def uses_manager_new_hires_home():
+    """True when user should land on /manager/new-hires (not admin home) after onboarding or similar."""
+    try:
+        if not current_user.is_authenticated:
+            return False
+    except Exception:
+        return False
+    pref = (session.get(STAFF_CONSOLE_HOME_KEY) or '').strip().lower()
+    db_role = (getattr(current_user, 'role', None) or '').strip().lower()
+    if db_role == 'manager':
+        return True
+    if pref == 'manager' and current_user.is_manager():
+        return True
+    return False
+
+
+@app.template_global()
+def manager_new_hires_list_url():
+    """URL for the manager-scoped new hires list (/manager/new-hires)."""
+    sid = get_current_user_store_id()
+    if sid is not None:
+        return url_for('manager_new_hires', store_id=sid)
+    return url_for('manager_new_hires')
+
+
+def onboarding_tasks_url():
+    """Public URL for the user tasks page, used in outbound emails."""
+    base = (
+        os.getenv('ONBOARDING_BASE_URL')
+        or os.getenv('APP_BASE_URL')
+        or os.getenv('SITE_URL')
+        or 'https://ziebartonboarding.com'
+    )
+    base = (base or '').strip()
+    if not base:
+        base = 'https://ziebartonboarding.com'
+    if not base.lower().startswith(('http://', 'https://')):
+        base = 'https://' + base
+    return base.rstrip('/') + '/tasks'
+
+
+# Flask-Mail configuration: support both MAIL_* and EMAIL_* from .env
+def _get_mail_server():
+    s = os.getenv('MAIL_SERVER') or os.getenv('EMAIL_SERVER', '')
+    if s and 'outlook.office365.com' in s.lower():
+        return 'smtp.office365.com'  # SMTP uses smtp., not outlook.
+    return s or 'smtp.office365.com'
+
+def _get_mail_user():
+    return os.getenv('MAIL_USERNAME') or os.getenv('EMAIL_ADDRESS', '')
+
+def _get_mail_password():
+    return os.getenv('MAIL_PASSWORD') or os.getenv('EMAIL_PASSWORD', '')
+
 try:
     from flask_mail import Mail, Message
-    app.config['MAIL_SERVER'] = MAIL_SERVER
-    app.config['MAIL_PORT'] = MAIL_PORT
-    app.config['MAIL_USE_TLS'] = MAIL_USE_TLS
-    app.config['MAIL_USE_SSL'] = MAIL_USE_SSL
-    app.config['MAIL_USERNAME'] = MAIL_USERNAME
-    app.config['MAIL_PASSWORD'] = MAIL_PASSWORD
-    app.config['MAIL_DEFAULT_SENDER'] = MAIL_DEFAULT_SENDER
+    app.config['MAIL_SERVER'] = _get_mail_server()
+    app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT') or os.getenv('EMAIL_PORT', '587'))
+    app.config['MAIL_USE_TLS'] = (os.getenv('MAIL_USE_TLS') or os.getenv('EMAIL_USE_SSL', 'true')).lower() == 'true'
+    app.config['MAIL_USE_SSL'] = (os.getenv('MAIL_USE_SSL') or 'false').lower() == 'true'
+    app.config['MAIL_USERNAME'] = _get_mail_user()
+    app.config['MAIL_PASSWORD'] = _get_mail_password()
+    app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER') or _get_mail_user()
     mail = Mail(app)
-    MAIL_AVAILABLE = bool(MAIL_USERNAME and MAIL_PASSWORD)
+    _socketlabs_user = os.getenv('SOCKETLABS_USERNAME', '')
+    _socketlabs_pwd = os.getenv('SOCKETLABS_PASSWORD', '')
+    MAIL_AVAILABLE = bool(
+        (app.config['MAIL_USERNAME'] and app.config['MAIL_PASSWORD']) or
+        (_socketlabs_user and _socketlabs_pwd)
+    )
 except Exception:
     mail = None
     MAIL_AVAILABLE = False
@@ -101,6 +230,995 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access this page.'
+
+GLOBAL_METALLIC_THEME_CSS = """
+/* Global metallic theme layer (balanced premium) */
+:root {
+    --bg-base: #0c1017;
+    --bg-panel: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+    --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.03) 40%, rgba(255,255,255,0.1) 74%, rgba(255,255,255,0.02) 100%);
+    --accent-red: #fe0100;
+    --text-primary: #f2f5fb;
+    --text-muted: #b7c1d3;
+    --border-soft: rgba(255,255,255,0.17);
+    --shadow-elev: 0 18px 42px rgba(0,0,0,0.36);
+}
+body {
+    background:
+        radial-gradient(circle at 20% 0%, rgba(255,255,255,0.07), transparent 46%),
+        linear-gradient(136deg, #090d14 0%, #111824 56%, #0c121d 100%) !important;
+    color: var(--text-primary) !important;
+}
+.top-header {
+    background: linear-gradient(160deg, #121821 0%, #090d14 100%) !important;
+    border-bottom: 1px solid var(--border-soft);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.section, .card, .panel, .dashboard-card, .dashboard-tasks-card, .welcome-banner, .summary-card, .sidebar-section, .video-card, .task-card, .quick-link, .login-box, .welcome-card,
+.admin-panel, .store-banner, .collapsible-upload-panel, .wizard-container, .modal-content,
+.stat-card, .task-section, .task-item, .documents-list, .document-item, .training-card, .profile-header, .info-section, .empty-state,
+.user-card {
+    background: var(--bg-panel) !important;
+    border: 1px solid var(--border-soft) !important;
+    box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.12) !important;
+    color: var(--text-primary) !important;
+}
+.task-item.urgent-priority {
+    background: rgba(254, 1, 0, 0.12) !important;
+}
+.training-card .progress-info {
+    background: rgba(255, 255, 255, 0.08) !important;
+    color: var(--text-muted) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+}
+h1, h2, h3, h4, .section-title, .section-title-dash, .page-title, .sidebar-title, .profile-name, .summary-content .number,
+.task-title, .document-info h3, .training-card h3 {
+    color: var(--text-primary) !important;
+}
+.section-title-dash {
+    border-bottom-color: rgba(255,255,255,0.22) !important;
+}
+.page-subtitle {
+    color: var(--text-muted) !important;
+}
+p, .subtitle, .help-text, .info-label, .summary-content h3, .quick-link-description, .task-content p, .notification-message, .form-status-name,
+.profile-position, .task-description, .task-meta, .document-info p, .document-meta, .training-card p, .empty-state, .stat-label {
+    color: var(--text-muted) !important;
+}
+.badge-type {
+    background: rgba(13, 110, 253, 0.22) !important;
+    color: #dce9ff !important;
+}
+.stat-number {
+    color: var(--accent-red) !important;
+}
+input, select, textarea {
+    background: linear-gradient(150deg, rgba(255,255,255,0.09), rgba(255,255,255,0.04)) !important;
+    border: 1px solid rgba(255,255,255,0.24) !important;
+    color: var(--text-primary) !important;
+}
+input::placeholder, textarea::placeholder {
+    color: #9aa5b8 !important;
+}
+input:focus, select:focus, textarea:focus {
+    border-color: rgba(254,1,0,0.7) !important;
+    box-shadow: 0 0 0 3px rgba(254,1,0,0.18) !important;
+}
+button, .btn, .btn-login, .task-btn, .video-btn, .dashboard-cta-link {
+    background: linear-gradient(180deg, #ff2624 0%, #d50000 65%, #9e0000 100%) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255,255,255,0.28) !important;
+    box-shadow: 0 8px 20px rgba(254,1,0,0.3), inset 0 1px 0 rgba(255,255,255,0.35) !important;
+}
+.dropdown-menu, .notification-dropdown {
+    background: #151b28 !important;
+    border: 1px solid var(--border-soft) !important;
+    box-shadow: var(--shadow-elev) !important;
+}
+.dropdown-item, .notification-title, .quick-link-text, table th, table td, label, .info-value, .progress-name a {
+    color: var(--text-primary) !important;
+}
+table, .table, .table-container {
+    background: var(--bg-panel) !important;
+    border: 1px solid var(--border-soft) !important;
+}
+table tr:hover {
+    background: rgba(255,255,255,0.04) !important;
+}
+/* User top nav: pill bar + dark-red active chip + red glow + bottom indicator (all pages via global_theme_css) */
+.nav-links {
+    gap: 8px !important;
+    align-items: center !important;
+    padding: 6px !important;
+    border-radius: 999px !important;
+    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+    background: rgba(0, 0, 0, 0.38) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
+    backdrop-filter: blur(8px);
+}
+.nav-links a {
+    color: #ffffff !important;
+    text-decoration: none !important;
+    font-size: 0.95em !important;
+    font-weight: 600 !important;
+    font-family: 'URW Form', Arial, sans-serif !important;
+    padding: 8px 16px !important;
+    border-radius: 999px !important;
+    border: 1px solid transparent !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    transition: background 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease !important;
+}
+.nav-links a:hover {
+    color: #ffffff !important;
+    background: rgba(255, 255, 255, 0.08) !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
+.nav-links a.nav-tab-active,
+.nav-links a.active {
+    position: relative !important;
+    color: #ffffff !important;
+    background: linear-gradient(
+        180deg,
+        rgba(95, 14, 18, 0.92) 0%,
+        rgba(52, 8, 12, 0.95) 48%,
+        rgba(32, 5, 8, 0.98) 100%
+    ) !important;
+    border-color: rgba(254, 55, 52, 0.55) !important;
+    box-shadow:
+        0 0 0 1px rgba(254, 40, 38, 0.75),
+        0 0 20px rgba(254, 1, 0, 0.55),
+        0 0 40px rgba(254, 1, 0, 0.22),
+        inset 0 1px 0 rgba(255, 255, 255, 0.16) !important;
+}
+.quick-link-icon img {
+    background: transparent !important;
+}
+.construction-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.construction-banner-icon {
+    flex-shrink: 0;
+    line-height: 1;
+}
+.logo-text-stack {
+    display: none;
+}
+.finale-head-emoji {
+    display: none;
+}
+.mobile-bottom-nav {
+    display: none;
+}
+@media (max-width: 768px) {
+    body.user-app-shell {
+        padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+    }
+    body.user-app-shell .mobile-bottom-nav {
+        display: flex;
+    }
+    body.user-app-shell .mobile-menu-toggle,
+    body.user-app-shell #mobileNav.mobile-nav,
+    body.user-app-shell .mobile-nav {
+        display: none !important;
+    }
+    body.user-app-shell .logo-text.logo-text-desktop {
+        display: none !important;
+    }
+    body.user-app-shell .logo-text-stack {
+        display: flex !important;
+        flex-direction: column;
+        justify-content: center;
+        line-height: 1.06;
+        gap: 1px;
+    }
+    body.user-app-shell .logo-section .logo-title {
+        font-size: 1.05rem;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+        color: #fff;
+    }
+    body.user-app-shell .logo-section .logo-subtitle {
+        font-size: 0.64rem;
+        font-weight: 500;
+        letter-spacing: 0.07em;
+        color: rgba(242, 245, 251, 0.86);
+        text-transform: none;
+    }
+    body.user-app-shell .logo-section img {
+        height: 42px !important;
+        width: auto !important;
+        margin-bottom: 0 !important;
+        align-self: center !important;
+    }
+    body.user-app-shell .top-header {
+        align-items: center !important;
+        padding: max(10px, env(safe-area-inset-top, 0px)) 14px 10px !important;
+        flex-wrap: nowrap !important;
+    }
+    body.user-app-shell .user-section {
+        gap: 10px !important;
+        flex-shrink: 0;
+    }
+    body.user-app-shell .notification-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2px;
+    }
+    body.user-app-shell .notification-icon .notification-bell-svg {
+        display: block;
+        width: 22px;
+        height: 22px;
+        color: #d4af5b;
+        filter: drop-shadow(0 0 5px rgba(212, 175, 91, 0.55))
+            drop-shadow(0 0 10px rgba(212, 175, 91, 0.25));
+    }
+    body.user-app-shell .user-dropdown > span.user-dropdown-label {
+        display: inline-flex !important;
+        max-width: 34vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: #f2f5fb;
+    }
+    body.user-app-shell .user-dropdown > span.user-dropdown-caret {
+        display: inline-flex !important;
+        font-size: 0.55rem;
+        opacity: 0.72;
+        margin-left: 1px;
+        color: #dbe2f0;
+    }
+    body.user-app-shell #notificationBadge.notification-badge-dot {
+        width: 7px !important;
+        height: 7px !important;
+        min-width: 7px !important;
+        padding: 0 !important;
+        font-size: 0 !important;
+        line-height: 0 !important;
+        overflow: hidden !important;
+        color: transparent !important;
+    }
+    body.user-app-shell .construction-banner {
+        margin: 10px 14px 0 !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(255, 210, 90, 0.5) !important;
+        background: linear-gradient(135deg, rgba(38, 30, 10, 0.97), rgba(22, 18, 8, 0.98)) !important;
+        color: #ffe08a !important;
+        width: auto !important;
+    }
+    body.user-app-shell .main-content > .sidebar-right {
+        order: 3 !important;
+    }
+    body.user-app-shell .main-content > .dashboard-tasks-col {
+        order: 1 !important;
+    }
+    body.user-app-shell .finale-head-emoji {
+        display: inline !important;
+    }
+    body.user-app-shell .finale-kicker {
+        display: none !important;
+    }
+    body.user-app-shell .finale-logo {
+        display: none !important;
+    }
+    body.user-app-shell .finale-headline {
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-size: 1.02rem !important;
+    }
+    body.user-app-shell .finale-divider {
+        background: #fe0100 !important;
+        max-width: 120px;
+        height: 2px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+    body.user-app-shell .dashboard-page-wrap .finale-card,
+    body.user-app-shell .finale-card {
+        border-radius: 16px !important;
+        margin-left: 12px !important;
+        margin-right: 12px !important;
+        box-shadow:
+            0 18px 42px rgba(0, 0, 0, 0.45),
+            0 0 0 1px rgba(255, 255, 255, 0.14),
+            0 0 56px rgba(254, 1, 0, 0.12),
+            inset 0 1px 0 rgba(255, 255, 255, 0.16) !important;
+    }
+    body.user-app-shell .finale-doc-btn {
+        box-shadow:
+            0 10px 26px rgba(254, 1, 0, 0.4),
+            0 0 24px rgba(254, 1, 0, 0.22),
+            inset 0 1px 0 rgba(255, 255, 255, 0.38) !important;
+    }
+    body.user-app-shell .sidebar-right .external-links-title::after {
+        height: 2px !important;
+        margin-top: 10px !important;
+        margin-bottom: 14px !important;
+        border-radius: 1px !important;
+        background: linear-gradient(
+            90deg,
+            #e31b23 0,
+            #e31b23 92px,
+            rgba(82, 88, 100, 0.85) 92px,
+            rgba(140, 147, 160, 0.28) 100%
+        ) !important;
+    }
+    body.user-app-shell .sidebar-right .section.dashboard-card,
+    body.user-app-shell .sidebar-right .section {
+        border-radius: 16px !important;
+        margin-left: 2px !important;
+        margin-right: 2px !important;
+    }
+    body.user-app-shell .mobile-bottom-nav {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 10050;
+        justify-content: space-around;
+        align-items: flex-end;
+        padding: 5px 2px calc(11px + env(safe-area-inset-bottom, 0px));
+        background: linear-gradient(180deg, #141922 0%, #090c12 100%);
+        border-top: 1px solid rgba(255, 255, 255, 0.12);
+        box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.55);
+        box-sizing: border-box;
+    }
+    body.user-app-shell .mobile-tab {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 4px;
+        min-width: 0;
+        max-width: 88px;
+        padding: 6px 2px 7px;
+        text-decoration: none !important;
+        color: #7d8696 !important;
+        font-size: 0.58rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        position: relative;
+        box-sizing: border-box;
+    }
+    body.user-app-shell .mobile-tab-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: inherit;
+        line-height: 0;
+        min-height: 24px;
+    }
+    body.user-app-shell .mobile-tab-svg {
+        display: block;
+        overflow: visible;
+    }
+    body.user-app-shell .mobile-tab-label {
+        line-height: 1.1;
+        text-align: center;
+        position: relative;
+        width: 100%;
+    }
+    body.user-app-shell .mobile-tab-label::after {
+        content: "";
+        display: block;
+        height: 0;
+        margin: 0 auto;
+    }
+    body.user-app-shell .mobile-tab.mobile-tab-active {
+        color: #fe0100 !important;
+    }
+    body.user-app-shell .mobile-tab.mobile-tab-active .mobile-tab-icon {
+        color: #fe0100 !important;
+    }
+    body.user-app-shell .mobile-tab.mobile-tab-active .mobile-tab-label::after {
+        height: 3px;
+        width: 26px;
+        margin-top: 4px;
+        border-radius: 2px;
+        background: #fe0100;
+        box-shadow: 0 0 10px rgba(254, 1, 0, 0.75);
+    }
+    /* Finale + external links: compact chrome; readable message + links; main area scrolls if needed */
+    html:has(body.dashboard-home-compact) {
+        height: 100%;
+    }
+    html:has(body.dashboard-home-compact),
+    html:has(body.dashboard-home-compact) body.dashboard-home-compact.user-app-shell {
+        max-height: 100dvh;
+    }
+    body.dashboard-home-compact.user-app-shell {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        height: 100%;
+        max-height: 100dvh;
+        padding-bottom: calc(50px + env(safe-area-inset-bottom, 0px)) !important;
+    }
+    body.dashboard-home-compact .top-header {
+        flex-shrink: 0;
+        padding: max(4px, env(safe-area-inset-top, 0px)) 10px 5px !important;
+    }
+    body.dashboard-home-compact .logo-section img {
+        height: 34px !important;
+    }
+    body.dashboard-home-compact .logo-section .logo-title {
+        font-size: 0.9rem !important;
+    }
+    body.dashboard-home-compact .logo-section .logo-subtitle {
+        font-size: 0.56rem !important;
+    }
+    body.dashboard-home-compact .user-dropdown > span.user-dropdown-label {
+        font-size: 0.7rem !important;
+        max-width: 26vw !important;
+    }
+    body.dashboard-home-compact .notification-icon .notification-bell-svg {
+        width: 20px !important;
+        height: 20px !important;
+    }
+    body.dashboard-home-compact .construction-banner {
+        flex-shrink: 0;
+        margin: 3px 8px 0 !important;
+        padding: 3px 8px !important;
+        font-size: 0.58rem !important;
+        line-height: 1.15 !important;
+        border-radius: 8px !important;
+        gap: 6px !important;
+    }
+    body.dashboard-home-compact .construction-banner-icon {
+        font-size: 0.9em !important;
+    }
+    body.dashboard-home-compact .dashboard-view {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+    body.dashboard-home-compact .dashboard-container,
+    body.dashboard-home-compact .dashboard-page-wrap {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        padding-left: 8px !important;
+        padding-right: 8px !important;
+    }
+    body.dashboard-home-compact .main-content {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        gap: 6px !important;
+        margin-top: 0 !important;
+        overflow-x: hidden;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    body.dashboard-home-compact .dashboard-tasks-col {
+        flex: 0 1 auto;
+        min-height: 0;
+    }
+    body.dashboard-home-compact .finale-card {
+        min-height: 0 !important;
+        justify-content: flex-start !important;
+        padding: 12px 14px !important;
+        margin-left: 8px !important;
+        margin-right: 8px !important;
+        border-radius: 14px !important;
+    }
+    body.dashboard-home-compact .finale-inner {
+        max-width: none;
+        width: 100%;
+    }
+    body.dashboard-home-compact .finale-inner > p {
+        margin-bottom: 0 !important;
+    }
+    body.dashboard-home-compact .finale-headline {
+        margin: 0 0 6px !important;
+        font-size: clamp(1rem, 4.2vw, 1.2rem) !important;
+        letter-spacing: 0.05em !important;
+        line-height: 1.2 !important;
+    }
+    body.dashboard-home-compact .finale-divider {
+        margin-bottom: 10px !important;
+        max-width: 120px !important;
+        height: 3px !important;
+    }
+    body.dashboard-home-compact .finale-message {
+        font-size: clamp(0.95rem, 3.8vw, 1.08rem) !important;
+        line-height: 1.5 !important;
+        margin-bottom: 12px !important;
+    }
+    body.dashboard-home-compact .finale-doc-btn {
+        padding: 12px 18px !important;
+        font-size: clamp(0.88rem, 3.2vw, 1rem) !important;
+        border-radius: 12px !important;
+        gap: 8px !important;
+    }
+    body.dashboard-home-compact .sidebar-right {
+        flex: 0 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+    }
+    body.dashboard-home-compact .sidebar-right .section {
+        flex: 0 1 auto;
+        flex-grow: 0 !important;
+        min-height: 0 !important;
+        padding: 10px 12px 12px !important;
+        display: flex !important;
+        flex-direction: column !important;
+    }
+    body.dashboard-home-compact .sidebar-right .external-links-title {
+        margin-bottom: 0 !important;
+        font-size: clamp(0.82rem, 3vw, 0.95rem) !important;
+        letter-spacing: 0.12em !important;
+    }
+    body.dashboard-home-compact .sidebar-right .external-links-title::after {
+        margin-top: 6px !important;
+        margin-bottom: 10px !important;
+        height: 3px !important;
+    }
+    body.dashboard-home-compact .sidebar-right .quick-links {
+        flex: 0 1 auto;
+        flex-grow: 0 !important;
+        min-height: 0;
+        gap: 8px !important;
+        overflow: visible;
+    }
+    body.dashboard-home-compact .sidebar-right .quick-link {
+        grid-template-columns: 44px minmax(0, 1fr) 32px !important;
+        column-gap: 12px !important;
+        padding: 10px 12px !important;
+        border-radius: 12px !important;
+    }
+    body.dashboard-home-compact .sidebar-right .quick-link-icon {
+        width: 44px !important;
+        height: 44px !important;
+        min-width: 44px !important;
+        padding: 5px !important;
+        border-radius: 10px !important;
+    }
+    body.dashboard-home-compact .sidebar-right .quick-link-text {
+        font-size: clamp(0.92rem, 3.5vw, 1.05rem) !important;
+        line-height: 1.35 !important;
+        font-weight: 600 !important;
+    }
+    body.dashboard-home-compact .sidebar-right .quick-link-description {
+        display: none !important;
+    }
+    body.dashboard-home-compact .sidebar-right .quick-link-external {
+        width: 32px !important;
+        height: 32px !important;
+    }
+    body.dashboard-home-compact .sidebar-right .quick-link-external svg {
+        width: 18px !important;
+        height: 18px !important;
+    }
+    body.dashboard-home-compact .mobile-bottom-nav {
+        padding: 3px 2px calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+    }
+    body.dashboard-home-compact .mobile-tab {
+        padding: 3px 2px 4px !important;
+        gap: 2px !important;
+        font-size: 0.54rem !important;
+    }
+    body.dashboard-home-compact .mobile-tab-icon {
+        min-height: 20px !important;
+    }
+    body.dashboard-home-compact .mobile-tab-svg {
+        width: 20px !important;
+        height: 20px !important;
+    }
+}
+
+/* Admin & manager consoles: shared metallic panels, headers, tables, lists */
+.header {
+    background: linear-gradient(160deg, #121821 0%, #090d14 100%) !important;
+    border-bottom: 1px solid var(--border-soft) !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+    color: var(--text-primary) !important;
+}
+.header h1,
+.header .header-content h1 {
+    color: var(--text-primary) !important;
+}
+.admin-panel,
+.store-banner,
+.collapsible-upload-panel,
+.wizard-container,
+.modal-content {
+    position: relative !important;
+    overflow: hidden !important;
+}
+.admin-panel::before,
+.store-banner::before,
+.collapsible-upload-panel::before,
+.wizard-container::before,
+.modal-content::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--metal-sheen);
+    pointer-events: none;
+    z-index: 0;
+}
+.back-btn {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255, 255, 255, 0.22) !important;
+}
+.back-btn:hover {
+    background: rgba(255, 255, 255, 0.18) !important;
+    color: #ffffff !important;
+}
+.quick-link-item,
+.form-status-item,
+.progress-item {
+    border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+}
+.quick-link-item:hover,
+.form-status-item:hover {
+    background: rgba(255, 255, 255, 0.05) !important;
+}
+thead th,
+table thead th {
+    background: rgba(255, 255, 255, 0.08) !important;
+    color: var(--text-primary) !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12) !important;
+}
+table tbody td {
+    border-bottom-color: rgba(255, 255, 255, 0.08) !important;
+}
+table a {
+    color: #e8ecff !important;
+    text-decoration: none !important;
+}
+table a:hover {
+    color: #ffb4b3 !important;
+    text-decoration: underline !important;
+}
+.btn-primary,
+a.btn-primary {
+    background: linear-gradient(180deg, #3a8eef 0%, #1e6fd0 55%, #1558a8 100%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.28) !important;
+    box-shadow: 0 6px 18px rgba(30, 120, 220, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.28) !important;
+    color: #ffffff !important;
+}
+.btn-success,
+a.btn-success {
+    background: linear-gradient(180deg, #3ecf6a 0%, #239748 55%, #1a7036 100%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.22) !important;
+    box-shadow: 0 6px 16px rgba(40, 160, 80, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.22) !important;
+    color: #ffffff !important;
+}
+.btn-secondary,
+a.btn-secondary {
+    background: linear-gradient(180deg, #5a6578 0%, #3d4656 55%, #2a313d 100%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    color: #f2f5fb !important;
+}
+.badge {
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: var(--text-primary) !important;
+}
+.badge-active,
+.badge.badge-active {
+    background: linear-gradient(180deg, #34c86a 0%, #1f8f4a 100%) !important;
+    color: #ffffff !important;
+}
+.badge-inactive,
+.badge.badge-inactive {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: var(--text-muted) !important;
+}
+.card .hint {
+    color: var(--text-muted) !important;
+}
+.admin-panel small,
+.container small {
+    color: var(--text-muted) !important;
+}
+.notification-item.unread {
+    background: rgba(254, 1, 0, 0.09) !important;
+}
+.notification-item.unread:hover {
+    background: rgba(254, 1, 0, 0.14) !important;
+}
+.search-all-toggle,
+.search-all-toggle span {
+    color: var(--text-muted) !important;
+}
+.legend {
+    border-top-color: rgba(255, 255, 255, 0.12) !important;
+}
+.badge-visible {
+    background: rgba(72, 190, 120, 0.32) !important;
+    color: #e8fff0 !important;
+}
+.badge-hidden {
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: var(--text-primary) !important;
+}
+.badge-revoked {
+    background: rgba(200, 60, 60, 0.38) !important;
+    color: #ffe4e4 !important;
+}
+.badge-admin {
+    background: linear-gradient(180deg, #ff3a38 0%, #b80000 100%) !important;
+    color: #ffffff !important;
+}
+.badge-user {
+    background: rgba(255, 255, 255, 0.14) !important;
+    color: var(--text-primary) !important;
+}
+.store-dropdown-btn {
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid rgba(255, 255, 255, 0.22) !important;
+}
+.store-dropdown-btn:hover {
+    background: rgba(255, 255, 255, 0.18) !important;
+    color: #ffffff !important;
+}
+
+/* Strip remaining light-gray / white “cards” on admin & manager pages */
+.wizard-steps {
+    background: rgba(0, 0, 0, 0.4) !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.14) !important;
+}
+.wizard-step:not(.active):not(.completed) {
+    background: transparent !important;
+    color: var(--text-muted) !important;
+}
+.wizard-step.active {
+    background: linear-gradient(180deg, #ff2f2e 0%, #b80000 100%) !important;
+    color: #ffffff !important;
+}
+.wizard-step.completed {
+    background: linear-gradient(180deg, #2fa85c 0%, #1a6b38 100%) !important;
+    color: #ffffff !important;
+}
+.step-header h2,
+.form-group label,
+.wizard-step-title {
+    color: var(--text-primary) !important;
+}
+.step-header p,
+.form-group .help,
+.sub,
+.count-muted {
+    color: var(--text-muted) !important;
+}
+.count {
+    color: var(--text-primary) !important;
+}
+.new-hire-item {
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+.new-hire-item:hover {
+    background: rgba(255, 255, 255, 0.1) !important;
+}
+.user-card {
+    position: relative !important;
+    overflow: hidden !important;
+}
+.user-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--metal-sheen);
+    pointer-events: none;
+    z-index: 0;
+}
+.user-card > * {
+    position: relative;
+    z-index: 1;
+}
+.user-card:hover {
+    background: rgba(255, 255, 255, 0.12) !important;
+    border-color: rgba(254, 1, 0, 0.45) !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
+}
+.user-card h3,
+.user-card p {
+    color: var(--text-primary) !important;
+}
+.user-card p {
+    color: var(--text-muted) !important;
+}
+.new-hire-name a {
+    color: var(--text-primary) !important;
+}
+.new-hire-meta {
+    color: var(--text-muted) !important;
+}
+.doc-item {
+    background: transparent !important;
+    border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+}
+.progress-item {
+    background: transparent !important;
+}
+tbody td {
+    background: transparent !important;
+    color: var(--text-primary) !important;
+}
+tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.03) !important;
+}
+.flash.success {
+    background: rgba(52, 160, 90, 0.22) !important;
+    color: #d4f5e2 !important;
+    border: 1px solid rgba(80, 200, 130, 0.45) !important;
+}
+.flash.error {
+    background: rgba(200, 70, 70, 0.28) !important;
+    color: #ffecec !important;
+    border: 1px solid rgba(255, 120, 120, 0.45) !important;
+}
+.flash.warning {
+    background: rgba(220, 170, 40, 0.2) !important;
+    color: #fff6d6 !important;
+    border: 1px solid rgba(255, 210, 100, 0.42) !important;
+}
+.info-msg {
+    background: rgba(60, 140, 200, 0.2) !important;
+    color: #d4ecff !important;
+    border: 1px solid rgba(100, 180, 255, 0.38) !important;
+}
+.summary-icon.blue,
+.summary-icon.green {
+    background: rgba(255, 255, 255, 0.1) !important;
+    border: 1px solid rgba(255, 255, 255, 0.14) !important;
+}
+.empty {
+    color: var(--text-muted) !important;
+    background: transparent !important;
+}
+
+/* Checklist admin + user views: rows used #f8f9fa while global h3/p forced light text → unreadable */
+.checklist-item {
+    background: rgba(255, 255, 255, 0.06) !important;
+    border: 1px solid rgba(255, 255, 255, 0.14) !important;
+    border-left: 4px solid #4a9eff !important;
+    color: var(--text-primary) !important;
+}
+.checklist-item.completed {
+    background: rgba(52, 160, 90, 0.22) !important;
+    border-left-color: #3ecf6a !important;
+    opacity: 1 !important;
+}
+.checklist-item .item-info h3,
+.item-content h3 {
+    color: var(--text-primary) !important;
+}
+.checklist-item .item-info p {
+    color: var(--text-muted) !important;
+}
+.item-content.completed h3 {
+    color: var(--text-muted) !important;
+}
+.checklist-item .item-meta,
+.checklist-view .item-meta {
+    color: var(--text-muted) !important;
+}
+
+.store-dropdown-panel {
+    background: #151b28 !important;
+    border: 1px solid var(--border-soft) !important;
+    box-shadow: var(--shadow-elev) !important;
+    color: var(--text-primary) !important;
+}
+"""
+
+USER_MOBILE_TABBAR_SHOW = frozenset({
+    'dashboard', 'user_tasks', 'view_documents', 'list_training_videos', 'profile',
+})
+
+
+def user_mobile_bottom_nav_markup():
+    if not getattr(request, 'endpoint', None):
+        return Markup('')
+    ep = request.endpoint
+    if ep not in USER_MOBILE_TABBAR_SHOW:
+        return Markup('')
+    ar = ep
+    h = (
+        '<path d="M4.5 10.5 12 4.5l7.5 6V19a1 1 0 01-1 1h-4.25v-5.5h-2.5V20H6a1 1 0 01-1-1v-8.5z" '
+        'stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" fill="none"/>'
+    )
+    c = (
+        '<rect x="6" y="5" width="12" height="15" rx="1.75" stroke="currentColor" stroke-width="1.35" fill="none"/>'
+        '<path d="M9 5V4a1 1 0 011-1h4a1 1 0 011 1v1" stroke="currentColor" stroke-width="1.35" fill="none"/>'
+        '<path d="M8.5 10h7M8.5 13h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>'
+    )
+    f = (
+        '<path d="M4.5 8.5a1.5 1.5 0 011.5-1.5h4.2l1.6 2.2h6.2a1.5 1.5 0 011.5 1.5v7.8a1.5 1.5 0 01-1.5 1.5H6a1.5 1.5 0 01-1.5-1.5v-8.5z" '
+        'stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" fill="none"/>'
+    )
+    v = (
+        '<rect x="4.5" y="5.5" width="15" height="13" rx="2.5" stroke="currentColor" stroke-width="1.35" fill="none"/>'
+        '<path d="M10.2 9.2v5.6L15.4 12l-5.2-2.8z" stroke="currentColor" stroke-width="1.35" '
+        'stroke-linejoin="round" fill="none"/>'
+    )
+    p = (
+        '<circle cx="12" cy="8.25" r="3.15" stroke="currentColor" stroke-width="1.35" fill="none"/>'
+        '<path d="M5.5 19.5v-.8a6.5 6.5 0 0113 0v.8" stroke="currentColor" stroke-width="1.35" '
+        'stroke-linecap="round" fill="none"/>'
+    )
+    def svg(inner):
+        return (
+            f'<svg class="mobile-tab-svg" width="24" height="24" viewBox="0 0 24 24" fill="none" '
+            f'xmlns="http://www.w3.org/2000/svg" aria-hidden="true">{inner}</svg>'
+        )
+    def link(route, label, inner_svg):
+        cls = 'mobile-tab mobile-tab-active' if ar == route else 'mobile-tab'
+        return (
+            f'<a href="{url_for(route)}" class="{cls}">'
+            f'<span class="mobile-tab-icon">{svg(inner_svg)}</span>'
+            f'<span class="mobile-tab-label">{label}</span></a>'
+        )
+    parts = [
+        link('dashboard', 'Home', h),
+        link('user_tasks', 'Tasks', c),
+        link('view_documents', 'Files', f),
+        link('list_training_videos', 'Videos', v),
+        link('profile', 'Profile', p),
+    ]
+    return Markup(
+        '<nav class="mobile-bottom-nav" aria-label="Primary navigation">' + ''.join(parts) + '</nav>'
+    )
+
+
+def staff_console_dropdown_links_markup():
+    """User / Admin / Manager / Logout links for staff headers (visibility follows current_user role)."""
+    try:
+        from flask_login import current_user as _cu
+    except Exception:
+        return Markup('')
+    if not getattr(_cu, 'is_authenticated', False):
+        return Markup('')
+    parts = [f'<a href="{url_for("dashboard")}" class="dropdown-item">User Dashboard</a>']
+    try:
+        if _cu.is_admin():
+            parts.append(
+                f'<a href="{url_for("admin_dashboard", staff_console="admin")}" class="dropdown-item">Admin Console</a>'
+            )
+        if _cu.is_manager():
+            parts.append(
+                f'<a href="{url_for("manager_dashboard", staff_console="manager")}" class="dropdown-item">Manager Console</a>'
+            )
+    except Exception:
+        pass
+    parts.append(f'<a href="{url_for("logout")}" class="dropdown-item">Logout</a>')
+    return Markup(''.join(parts))
+
+
+@app.context_processor
+def inject_global_theme_css():
+    return {
+        'global_theme_css': GLOBAL_METALLIC_THEME_CSS,
+        'user_mobile_bottom_nav': user_mobile_bottom_nav_markup(),
+        'staff_console_dropdown_links': staff_console_dropdown_links_markup(),
+    }
 
 
 def _log_exception_to_file(exc):
@@ -144,21 +1262,137 @@ def get_email_for_username(username):
     return None
 
 
+def normalize_email(email):
+    """Normalize email input for login/uniqueness checks."""
+    val = (email or '').strip().lower()
+    return val or None
+
+
+def email_in_use_by_other_user(email, exclude_user_id=None):
+    """True when another user account already has this email (case-insensitive)."""
+    norm = normalize_email(email)
+    if not norm:
+        return False
+    q = UserModel.query.filter(UserModel.email.isnot(None)).filter(func.lower(UserModel.email) == norm)
+    if exclude_user_id is not None:
+        q = q.filter(UserModel.id != exclude_user_id)
+    return q.first() is not None
+
+
 def send_email(to_email, subject, body_html, body_text=None):
-    """Send an email. No-op if mail not configured or send fails."""
+    """Send email via SocketLabs SMTP (if configured) or Flask-Mail (MAIL_* / EMAIL_*)."""
     if not MAIL_AVAILABLE or not to_email or not to_email.strip():
         return False
+    to_email = to_email.strip()
+    plain = body_text if body_text is not None else body_html.replace('<br>', '\n').replace('</p>', '\n')
+
+    # SocketLabs: smtplib to smtp.socketlabs.com, STARTTLS, login with server ID + password
+    sock_server = os.getenv('SOCKETLABS_SERVER', 'smtp.socketlabs.com')
+    sock_port = int(os.getenv('SOCKETLABS_PORT', '587'))
+    sock_user = os.getenv('SOCKETLABS_USERNAME', '')
+    sock_pwd = os.getenv('SOCKETLABS_PASSWORD', '')
+    sock_sender = os.getenv('SOCKETLABS_SENDER_EMAIL', 'noreply@ziebart.com')
+
+    if sock_user and sock_pwd:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = sock_sender
+            msg['To'] = to_email
+            msg.attach(MIMEText(plain, 'plain'))
+            msg.attach(MIMEText(body_html, 'html'))
+            with smtplib.SMTP(sock_server, sock_port) as smtp:
+                smtp.starttls()
+                smtp.login(sock_user, sock_pwd)
+                smtp.sendmail(sock_sender, [to_email], msg.as_string())
+            return True
+        except Exception as e:
+            app.logger.warning(f"SocketLabs send failed to {to_email}: {e}")
+            _log_exception_to_file(e)
+            return False
+
+    # Flask-Mail (MAIL_* / EMAIL_*)
     try:
         msg = Message(
             subject=subject,
-            recipients=[to_email.strip()],
-            body=body_text or body_html.replace('<br>', '\n').replace('</p>', '\n'),
+            recipients=[to_email],
+            body=plain,
             html=body_html
         )
         mail.send(msg)
         return True
     except Exception as e:
         app.logger.warning(f"Email send failed to {to_email}: {e}")
+        try:
+            log_path = BASE_DIR / 'logs' / 'error.log'
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write("send_email env: MAIL_SERVER=%r MAIL_USERNAME=%r MAIL_PASSWORD=%s\n" % (
+                    app.config.get('MAIL_SERVER'), app.config.get('MAIL_USERNAME'),
+                    'SET' if app.config.get('MAIL_PASSWORD') else 'NOT SET'))
+        except Exception:
+            pass
+        _log_exception_to_file(e)
+        return False
+
+
+def send_email_with_attachment(to_email, subject, body_html, attachment_filename, attachment_bytes, body_text=None):
+    """Send email with a single PDF (or other) attachment. Uses same config as send_email."""
+    if not MAIL_AVAILABLE or not to_email or not to_email.strip():
+        return False
+    to_email = to_email.strip()
+    plain = body_text if body_text is not None else body_html.replace('<br>', '\n').replace('</p>', '\n')
+
+    sock_server = os.getenv('SOCKETLABS_SERVER', 'smtp.socketlabs.com')
+    sock_port = int(os.getenv('SOCKETLABS_PORT', '587'))
+    sock_user = os.getenv('SOCKETLABS_USERNAME', '')
+    sock_pwd = os.getenv('SOCKETLABS_PASSWORD', '')
+    sock_sender = os.getenv('SOCKETLABS_SENDER_EMAIL', 'noreply@ziebart.com')
+
+    if sock_user and sock_pwd:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
+            from email.mime.base import MIMEBase
+            from email import encoders
+            msg = MIMEMultipart('mixed')
+            msg['Subject'] = subject
+            msg['From'] = sock_sender
+            msg['To'] = to_email
+            msg.attach(MIMEText(plain, 'plain'))
+            part = MIMEBase('application', 'pdf')
+            part.set_payload(attachment_bytes)
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', 'attachment', filename=attachment_filename)
+            msg.attach(part)
+            with smtplib.SMTP(sock_server, sock_port) as smtp:
+                smtp.starttls()
+                smtp.login(sock_user, sock_pwd)
+                smtp.sendmail(sock_sender, [to_email], msg.as_string())
+            return True
+        except Exception as e:
+            app.logger.warning(f"SocketLabs send with attachment failed to {to_email}: {e}")
+            _log_exception_to_file(e)
+            return False
+
+    try:
+        from flask_mail import Message as MailMessage
+        msg = MailMessage(
+            subject=subject,
+            recipients=[to_email],
+            body=plain,
+            html=body_html
+        )
+        msg.attach(attachment_filename, 'application/pdf', attachment_bytes)
+        mail.send(msg)
+        return True
+    except Exception as e:
+        app.logger.warning(f"Email with attachment failed to {to_email}: {e}")
+        _log_exception_to_file(e)
         return False
 
 
@@ -622,6 +1856,18 @@ def login():
         <title>Log in - Ziebart Onboarding</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
+            :root {
+                --bg-base: #0a0d12;
+                --bg-accent: #121821;
+                --bg-panel: linear-gradient(155deg, #1a1f2b 0%, #0f141d 62%, #090d14 100%);
+                --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.03) 42%, rgba(255,255,255,0.11) 74%, rgba(255,255,255,0.02) 100%);
+                --accent-red: #fe0100;
+                --accent-red-hover: #d20000;
+                --text-primary: #f4f7fc;
+                --text-muted: #a7b0c0;
+                --border-soft: rgba(255,255,255,0.2);
+                --shadow-elev: 0 20px 55px rgba(0,0,0,0.5);
+            }
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -629,69 +1875,156 @@ def login():
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                background: #1a1a1a;
+                background:
+                    radial-gradient(circle at 22% 15%, rgba(255,255,255,0.08) 0%, transparent 48%),
+                    linear-gradient(135deg, #0a0d12 0%, #111722 55%, #090d14 100%);
+                color: var(--text-primary);
+                position: relative;
+                overflow: hidden;
+                padding: 22px;
+            }
+            body::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background:
+                    repeating-linear-gradient(-28deg, rgba(255,255,255,0.02) 0 10px, transparent 10px 34px),
+                    linear-gradient(145deg, rgba(254,1,0,0.24) 0%, transparent 42%);
+                pointer-events: none;
             }
             .login-box {
-                background: #fff;
-                padding: 40px;
-                border-radius: 12px;
-                box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+                position: relative;
+                z-index: 1;
                 width: 100%;
-                max-width: 400px;
+                max-width: 430px;
+                padding: 40px 34px;
+                border-radius: 16px;
+                background: var(--bg-panel);
+                border: 1px solid var(--border-soft);
+                box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.18);
+                overflow: hidden;
+            }
+            .login-box::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background: var(--metal-sheen);
+                pointer-events: none;
             }
             h1 {
-                color: #000;
+                color: var(--text-primary);
                 font-weight: 800;
                 margin-bottom: 8px;
-                font-size: 1.5rem;
+                font-size: 1.6rem;
+                letter-spacing: 0.02em;
+                position: relative;
+                z-index: 1;
             }
-            .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 24px; }
-            .form-group { margin-bottom: 20px; }
+            .subtitle {
+                color: var(--text-muted);
+                font-size: 0.92rem;
+                margin-bottom: 24px;
+                position: relative;
+                z-index: 1;
+            }
+            .form-group {
+                margin-bottom: 20px;
+                position: relative;
+                z-index: 1;
+            }
             .form-group label {
                 display: block;
                 font-weight: 600;
-                color: #333;
+                color: #d4dbea;
                 margin-bottom: 6px;
-                font-size: 0.9rem;
+                font-size: 0.88rem;
+                letter-spacing: 0.02em;
             }
             .form-group input {
                 width: 100%;
                 padding: 12px 14px;
-                border: 1px solid #ccc;
-                border-radius: 6px;
+                border: 1px solid rgba(255,255,255,0.2);
+                border-radius: 8px;
                 font-size: 1rem;
+                color: var(--text-primary);
+                background: linear-gradient(145deg, rgba(255,255,255,0.09), rgba(255,255,255,0.03));
+                transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
             }
+            .form-group input::placeholder { color: #8f99aa; }
             .form-group input:focus {
                 outline: none;
-                border-color: #FE0100;
-                box-shadow: 0 0 0 2px rgba(254,1,0,0.2);
+                border-color: rgba(254,1,0,0.75);
+                box-shadow: 0 0 0 3px rgba(254,1,0,0.2);
+                background: linear-gradient(145deg, rgba(255,255,255,0.14), rgba(255,255,255,0.05));
             }
             .btn-login {
                 width: 100%;
-                padding: 14px;
-                background: #FE0100;
-                color: #fff;
-                border: none;
-                border-radius: 6px;
+                padding: 13px;
+                border-radius: 8px;
+                border: 1px solid rgba(255,255,255,0.28);
                 font-size: 1rem;
-                font-weight: 600;
+                font-weight: 700;
                 cursor: pointer;
                 font-family: inherit;
+                color: #ffffff;
+                background: linear-gradient(180deg, #ff2928 0%, var(--accent-red) 62%, #b30000 100%);
+                box-shadow: 0 8px 18px rgba(254,1,0,0.28), inset 0 1px 0 rgba(255,255,255,0.35);
+                transition: transform 0.15s, box-shadow 0.2s, background 0.2s;
+                position: relative;
+                z-index: 1;
             }
-            .btn-login:hover { background: #d90000; }
+            .btn-login:hover {
+                background: linear-gradient(180deg, #ff2d2c 0%, var(--accent-red-hover) 66%, #980000 100%);
+                box-shadow: 0 10px 24px rgba(254,1,0,0.35), inset 0 1px 0 rgba(255,255,255,0.4);
+                transform: translateY(-1px);
+            }
             .alert {
                 padding: 12px;
-                border-radius: 6px;
+                border-radius: 8px;
                 margin-bottom: 20px;
-                font-size: 0.9rem;
+                font-size: 0.88rem;
+                position: relative;
+                z-index: 1;
+                border: 1px solid;
             }
-            .alert-error { background: #fee; color: #c33; border: 1px solid #fcc; }
+            .alert-error {
+                background: rgba(255, 94, 94, 0.14);
+                color: #ffd5d5;
+                border-color: rgba(255, 117, 117, 0.4);
+            }
+            .construction-banner {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 10px;
+                flex-wrap: wrap;
+                background: linear-gradient(130deg, rgba(255, 220, 102, 0.22), rgba(255, 186, 0, 0.12));
+                color: #ffe7a6;
+                text-align: center;
+                padding: 10px 12px;
+                border-radius: 8px;
+                font-size: 0.84rem;
+                font-weight: 600;
+                margin-bottom: 20px;
+                border: 1px solid rgba(255, 216, 107, 0.45);
+                position: relative;
+                z-index: 1;
+            }
+            .construction-banner-icon {
+                flex-shrink: 0;
+                line-height: 1;
+            }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
         <div class="login-box">
             <h1>Ziebart Onboarding</h1>
             <p class="subtitle">Sign in with your email</p>
+            <div class="construction-banner" role="status">
+                <span class="construction-banner-icon" aria-hidden="true">🔧</span>
+                <span>This app is currently under construction. Some features may change.</span>
+            </div>
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, msg in messages %}
@@ -820,6 +2153,17 @@ def welcome():
         <title>Welcome - Ziebart Onboarding</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
+            :root {
+                --bg-base: #0a0d12;
+                --bg-panel: linear-gradient(155deg, #1a1f2b 0%, #0f141d 62%, #090d14 100%);
+                --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.03) 42%, rgba(255,255,255,0.11) 74%, rgba(255,255,255,0.02) 100%);
+                --accent-red: #fe0100;
+                --accent-red-hover: #d20000;
+                --text-primary: #f4f7fc;
+                --text-muted: #b5becf;
+                --border-soft: rgba(255,255,255,0.2);
+                --shadow-elev: 0 20px 55px rgba(0,0,0,0.5);
+            }
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
                 font-family: 'URW Form', Arial, sans-serif;
@@ -827,55 +2171,102 @@ def welcome():
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                background: #1a1a1a;
-                color: #fff;
+                background:
+                    radial-gradient(circle at 22% 15%, rgba(255,255,255,0.08) 0%, transparent 48%),
+                    linear-gradient(135deg, #0a0d12 0%, #111722 55%, #090d14 100%);
+                color: var(--text-primary);
+                position: relative;
+                overflow: hidden;
+                padding: 24px;
+            }
+            body::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background:
+                    repeating-linear-gradient(-28deg, rgba(255,255,255,0.02) 0 10px, transparent 10px 34px),
+                    linear-gradient(145deg, rgba(254,1,0,0.24) 0%, transparent 42%);
+                pointer-events: none;
             }
             .welcome-card {
-                background: #fff;
-                color: #333;
-                max-width: 720px;
+                position: relative;
+                z-index: 1;
+                max-width: 760px;
                 width: 92%;
                 padding: 56px 52px;
-                border-radius: 14px;
-                box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+                border-radius: 16px;
+                border: 1px solid var(--border-soft);
+                background: var(--bg-panel);
+                box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.18);
                 text-align: center;
+                overflow: hidden;
+            }
+            .welcome-card::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background: var(--metal-sheen);
+                pointer-events: none;
             }
             .welcome-card h1 {
+                position: relative;
+                z-index: 1;
                 font-size: 2em;
                 font-weight: 800;
-                margin-bottom: 28px;
-                color: #000;
+                margin-bottom: 24px;
+                color: var(--text-primary);
                 line-height: 1.35;
+                letter-spacing: 0.01em;
             }
             .welcome-card p {
-                font-size: 1.2em;
+                position: relative;
+                z-index: 1;
+                font-size: 1.1em;
                 line-height: 1.7;
-                color: #444;
-                margin-bottom: 36px;
+                color: var(--text-muted);
+                margin-bottom: 34px;
             }
             .welcome-card .btn {
+                position: relative;
+                z-index: 1;
                 display: inline-block;
-                padding: 14px 32px;
-                background: #FE0100;
+                padding: 13px 34px;
+                background: linear-gradient(180deg, #ff2928 0%, var(--accent-red) 62%, #b30000 100%);
                 color: #fff;
                 text-decoration: none;
                 border-radius: 8px;
-                font-weight: 600;
-                font-size: 1.05em;
-                border: none;
+                font-weight: 700;
+                font-size: 1.02em;
+                border: 1px solid rgba(255,255,255,0.28);
                 cursor: pointer;
+                box-shadow: 0 8px 18px rgba(254,1,0,0.28), inset 0 1px 0 rgba(255,255,255,0.35);
+                transition: transform 0.15s, box-shadow 0.2s, background 0.2s;
             }
             .welcome-card .btn:hover {
-                background: #cc0000;
+                background: linear-gradient(180deg, #ff2d2c 0%, var(--accent-red-hover) 66%, #980000 100%);
                 color: #fff;
+                box-shadow: 0 10px 24px rgba(254,1,0,0.35), inset 0 1px 0 rgba(255,255,255,0.4);
+                transform: translateY(-1px);
             }
             .welcome-card .welcome-logo {
+                position: relative;
+                z-index: 1;
                 display: block;
-                margin: 0 auto 28px;
+                margin: 0 auto 26px;
                 height: 80px;
                 width: auto;
                 object-fit: contain;
+                filter: drop-shadow(0 4px 12px rgba(0,0,0,0.35));
             }
+            @media (max-width: 768px) {
+                .welcome-card {
+                    padding: 42px 28px;
+                    width: 96%;
+                }
+                .welcome-card h1 { font-size: 1.6em; }
+                .welcome-card p { font-size: 1em; }
+            }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -1143,7 +2534,7 @@ def dashboard():
     <html>
     <head>
         <title>Dashboard - Onboarding App</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
@@ -1161,6 +2552,26 @@ def dashboard():
             }
             p, span, div, td, th, label, input, textarea, select, button, a {
                 font-family: 'URW Form', Arial, sans-serif;
+            }
+            .construction-banner {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 10px;
+                flex-wrap: wrap;
+                background: #fff8e1;
+                color: #5d4e00;
+                text-align: center;
+                padding: 10px 16px;
+                font-size: 0.9rem;
+                font-weight: 600;
+                border-bottom: 1px solid #e6c200;
+                width: 100%;
+            }
+            .construction-banner-icon {
+                flex-shrink: 0;
+                font-size: 1.05em;
+                line-height: 1;
             }
             .top-header {
                 background: #000000;
@@ -1210,19 +2621,31 @@ def dashboard():
             }
             .nav-links {
                 display: flex;
-                gap: 30px;
+                gap: 8px;
                 align-items: center;
+                padding: 6px;
+                border-radius: 999px;
+                border: 1px solid rgba(255,255,255,0.16);
+                background: rgba(255,255,255,0.06);
+                box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
+                backdrop-filter: blur(6px);
             }
             .nav-links a {
                 color: #ffffff;
                 text-decoration: none;
-                font-size: 1em;
-                font-weight: 500;
+                font-size: 0.95em;
+                font-weight: 600;
                 font-family: 'URW Form', Arial, sans-serif;
-                transition: color 0.2s;
+                transition: all 0.2s;
+                padding: 8px 14px;
+                border-radius: 999px;
+                border: 1px solid transparent;
+                background: transparent;
+                box-shadow: none;
             }
             .nav-links a:hover {
-                color: #FE0100;
+                color: #ffffff;
+                background: rgba(255,255,255,0.08);
             }
             .user-section {
                 display: flex;
@@ -1235,6 +2658,12 @@ def dashboard():
                 cursor: pointer;
                 position: relative;
                 color: #ffffff;
+            }
+            .notification-icon .notification-bell-svg {
+                display: block;
+                width: 22px;
+                height: 22px;
+                color: #f2f5fb;
             }
             .notification-dropdown {
                 display: none;
@@ -1734,12 +3163,12 @@ def dashboard():
                 font-size: 1.1em;
                 font-weight: 600;
                 text-align: left;
-                color: #000000;
+                color: #f2f5fb;
                 margin-bottom: 4px;
             }
             .quick-link-description {
                 font-size: 0.9em;
-                color: #808080;
+                color: #c4ccda;
                 text-align: left;
             }
             /* Mobile Menu Toggle */
@@ -1907,17 +3336,330 @@ def dashboard():
                     min-height: 44px;
                 }
             }
+            :root {
+                --bg-base: #0c1017;
+                --bg-panel: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+                --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.03) 40%, rgba(255,255,255,0.1) 74%, rgba(255,255,255,0.02) 100%);
+                --accent-red: #fe0100;
+                --text-primary: #f2f5fb;
+                --text-muted: #9ea8b8;
+                --border-soft: rgba(255,255,255,0.17);
+                --shadow-elev: 0 18px 42px rgba(0,0,0,0.36);
+            }
+            body {
+                background:
+                    radial-gradient(circle at 20% 0%, rgba(255,255,255,0.07), transparent 46%),
+                    linear-gradient(136deg, #090d14 0%, #111824 56%, #0c121d 100%);
+                color: var(--text-primary);
+            }
+            .construction-banner {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 10px;
+                flex-wrap: wrap;
+                background: linear-gradient(125deg, rgba(255, 227, 140, 0.2), rgba(255, 184, 40, 0.1));
+                color: #ffe5a3;
+                border-bottom: 1px solid rgba(255, 218, 108, 0.35);
+                backdrop-filter: blur(8px);
+            }
+            .construction-banner-icon {
+                flex-shrink: 0;
+                opacity: 0.95;
+            }
+            .top-header {
+                background: linear-gradient(160deg, #121821 0%, #090d14 100%);
+                border-bottom: 1px solid var(--border-soft);
+                box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            }
+            .nav-links a, .mobile-nav a { color: #dbe2f0; }
+            .nav-links a:hover {
+                color: #ffffff;
+                border-color: transparent;
+                background: rgba(255,255,255,0.08);
+                box-shadow: none;
+            }
+            .mobile-nav a:hover { color: #ff6a6a; }
+            .user-dropdown:hover, .back-btn:hover { background: rgba(255,255,255,0.14); }
+            .user-icon {
+                background: linear-gradient(180deg, #ff2726 0%, #cf0000 100%);
+                box-shadow: 0 6px 16px rgba(254,1,0,0.35);
+            }
+            .notification-dropdown, .dropdown-menu {
+                background: #151b28;
+                border: 1px solid var(--border-soft);
+                box-shadow: var(--shadow-elev);
+            }
+            .notification-header {
+                background: linear-gradient(145deg, #1b2230, #121826);
+                border-bottom-color: rgba(255,255,255,0.1);
+            }
+            .notification-header h3, .dropdown-item { color: var(--text-primary); }
+            .notification-item, .dropdown-item {
+                border-bottom-color: rgba(255,255,255,0.08);
+            }
+            .notification-item:hover, .dropdown-item:hover {
+                background: rgba(255,255,255,0.06);
+            }
+            .section, .dashboard-card, .dashboard-tasks-card, .video-card, .task-card, .quick-link {
+                background: var(--bg-panel);
+                border: 1px solid var(--border-soft);
+                box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.12);
+                color: var(--text-primary);
+                position: relative;
+                overflow: hidden;
+            }
+            .section::before, .dashboard-card::before, .dashboard-tasks-card::before, .video-card::before, .task-card::before, .quick-link::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background: var(--metal-sheen);
+                pointer-events: none;
+            }
+            .section-title, .section-title-dash, .task-content h3, .video-card h3, .welcome-section h1 {
+                color: var(--text-primary);
+            }
+            .task-content p, .video-card p, .quick-link-description {
+                color: var(--text-muted);
+            }
+            .btn, .task-btn, .video-btn, .dashboard-cta-link {
+                background: linear-gradient(180deg, #ff2624 0%, #d50000 65%, #9e0000 100%);
+                color: #ffffff;
+                border: 1px solid rgba(255,255,255,0.28);
+                box-shadow: 0 10px 22px rgba(254,1,0,0.28), inset 0 1px 0 rgba(255,255,255,0.3);
+            }
+            .btn:hover, .task-btn:hover, .video-btn:hover, .dashboard-cta-link:hover {
+                filter: brightness(1.06);
+                transform: translateY(-1px);
+            }
+            .progress-bar-container {
+                background: rgba(255,255,255,0.14);
+                border: 1px solid rgba(255,255,255,0.1);
+            }
+            .progress-bar-fill {
+                background: linear-gradient(90deg, #ff2f2e 0%, #fe0100 100%);
+            }
+            .task-icon, .quick-link-icon {
+                background: rgba(255,255,255,0.08);
+                border: 1px solid rgba(255,255,255,0.15);
+            }
+            .quick-link-icon img {
+                background: transparent !important;
+            }
+            .quick-link {
+                position: relative;
+                z-index: 0;
+            }
+            .quick-link-icon,
+            .quick-link-content,
+            .quick-link-external {
+                position: relative;
+                z-index: 1;
+            }
+            .quick-link-external {
+                flex-shrink: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 36px;
+                height: 36px;
+                color: #fe0100;
+                opacity: 0.95;
+            }
+            .quick-link-external svg {
+                display: block;
+            }
+            .external-links-title {
+                font-size: 0.82rem !important;
+                font-weight: 800 !important;
+                letter-spacing: 0.14em !important;
+                text-transform: uppercase !important;
+                border-bottom: none !important;
+                padding-bottom: 0 !important;
+                margin-bottom: 14px !important;
+            }
+            .finale-card {
+                text-align: center;
+                padding: 48px 36px;
+                min-height: 420px;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                border: 1px solid rgba(255,255,255,0.2);
+            }
+            .finale-inner {
+                position: relative;
+                z-index: 1;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                max-width: 520px;
+                margin: 0 auto;
+            }
+            .finale-logo {
+                height: 76px;
+                width: auto;
+                margin-bottom: 22px;
+                filter: drop-shadow(0 6px 16px rgba(0,0,0,0.45));
+            }
+            .finale-kicker {
+                margin: 0 0 10px;
+                font-size: 0.72rem;
+                font-weight: 700;
+                letter-spacing: 0.28em;
+                text-transform: uppercase;
+                color: #fe0100;
+            }
+            .finale-headline {
+                margin: 0 0 18px;
+                font-size: clamp(1.45rem, 4.2vw, 2.1rem);
+                font-weight: 800;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+                color: var(--text-primary);
+                line-height: 1.15;
+            }
+            .finale-divider {
+                width: min(100%, 400px);
+                height: 2px;
+                margin: 0 0 22px;
+                border-radius: 2px;
+                background: linear-gradient(
+                    90deg,
+                    transparent 0%,
+                    rgba(255,255,255,0.08) 22%,
+                    rgba(254, 1, 0, 0.95) 50%,
+                    rgba(255,255,255,0.08) 78%,
+                    transparent 100%
+                );
+            }
+            .finale-message {
+                white-space: pre-wrap;
+                text-align: center;
+                font-size: 1.05em;
+                line-height: 1.7;
+                color: rgba(242, 245, 251, 0.92);
+                margin-bottom: 28px;
+            }
+            .finale-doc-btn {
+                display: inline-flex;
+                align-items: center;
+                gap: 10px;
+                padding: 14px 26px;
+                background: linear-gradient(180deg, #ff2624 0%, #d50000 65%, #9e0000 100%);
+                color: white;
+                text-decoration: none;
+                border-radius: 12px;
+                font-weight: 600;
+                border: 1px solid rgba(255,255,255,0.3);
+                box-shadow: 0 8px 20px rgba(254,1,0,0.3), inset 0 1px 0 rgba(255,255,255,0.35);
+            }
+        {{ global_theme_css|safe }}
+            /* External links sidebar: fixed columns so icons, titles, and arrows line up */
+            .sidebar-right .quick-links {
+                gap: 10px;
+            }
+            .sidebar-right .quick-link {
+                display: grid !important;
+                grid-template-columns: 52px minmax(0, 1fr) 32px;
+                align-items: center;
+                column-gap: 14px;
+                padding: 12px 14px !important;
+                border-radius: 14px !important;
+                transform: none !important;
+                background: linear-gradient(168deg, rgba(255,255,255,0.11) 0%, rgba(255,255,255,0.04) 55%, rgba(0,0,0,0.12) 100%) !important;
+                border: 1px solid rgba(255,255,255,0.14) !important;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.1) !important;
+            }
+            .sidebar-right .quick-link:hover {
+                transform: none !important;
+                filter: brightness(1.06);
+                border-color: rgba(255,255,255,0.22) !important;
+            }
+            .sidebar-right .quick-link-icon {
+                width: 52px !important;
+                height: 52px !important;
+                min-width: 52px !important;
+                padding: 6px !important;
+                border-radius: 10px !important;
+                box-sizing: border-box;
+                display: flex !important;
+                align-items: center;
+                justify-content: center;
+                background: #ffffff !important;
+                border: 1px solid rgba(0,0,0,0.1) !important;
+            }
+            .sidebar-right .quick-link-content {
+                min-width: 0;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: flex-start;
+                text-align: left;
+            }
+            .sidebar-right .quick-link-text {
+                margin-bottom: 0 !important;
+                font-size: 1rem !important;
+                line-height: 1.3;
+            }
+            .sidebar-right .quick-link-description {
+                margin-top: 3px;
+                font-size: 0.78rem !important;
+                line-height: 1.35;
+            }
+            .sidebar-right .quick-link-external {
+                width: 32px !important;
+                height: 32px !important;
+                justify-self: end;
+            }
+            .sidebar-right .external-links-title {
+                margin-bottom: 0 !important;
+                padding-bottom: 0 !important;
+                border-bottom: none !important;
+            }
+            .sidebar-right .external-links-title::after {
+                content: "";
+                display: block;
+                height: 2px;
+                margin-top: 10px;
+                margin-bottom: 14px;
+                border-radius: 1px;
+                background: linear-gradient(90deg, #fe0100 0, #fe0100 52px, rgba(255,255,255,0.2) 52px, rgba(255,255,255,0.2) 100%);
+            }
+            @media (max-width: 768px) {
+                .sidebar-right .quick-link {
+                    grid-template-columns: 44px minmax(0, 1fr) 28px;
+                    column-gap: 10px;
+                    padding: 10px 12px !important;
+                }
+                .sidebar-right .quick-link-icon {
+                    width: 44px !important;
+                    height: 44px !important;
+                    min-width: 44px !important;
+                    padding: 5px !important;
+                }
+                .sidebar-right .quick-link-external {
+                    width: 28px !important;
+                    height: 28px !important;
+                }
+                .sidebar-right .quick-link-external svg {
+                    width: 16px;
+                    height: 16px;
+                }
+            }
         </style>
     </head>
-    <body>
+    <body class="user-app-shell{% if show_finale and external_links %} dashboard-home-compact{% endif %}">
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                <span class="logo-text">Ziebart Onboarding</span>
+                <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+                <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
-                <a href="{{ url_for('dashboard') }}">Home</a>
+                <a href="{{ url_for('dashboard') }}" class="nav-tab-active">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
@@ -1932,9 +3674,12 @@ def dashboard():
             </div>
             <div class="user-section">
                 <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
-                    🔔
+                    <svg class="notification-bell-svg" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M12 5a4 4 0 00-4 4v2.3L6.5 17h11L16 11.3V9a4 4 0 00-4-4z"/>
+                        <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M10.5 17a1.5 1.5 0 003 0"/>
+                    </svg>
                     {% if pending_count > 0 %}
-                    <span class="notification-badge" id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;">{{ pending_count }}</span>
+                    <span class="notification-badge notification-badge-dot" id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;">{{ pending_count }}</span>
                     {% endif %}
                     <div class="notification-dropdown" id="notificationDropdown">
                         <div class="notification-header">
@@ -1959,35 +3704,38 @@ def dashboard():
                 </div>
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
                     <div class="user-icon">{{ user_first_name[0].upper() if user_first_name else 'U' }}</div>
-                    <span>{{ user_full_name }}</span>
-                    <span>▼</span>
+                    <span class="user-dropdown-label">{{ user_full_name }}</span>
+                    <span class="user-dropdown-caret" aria-hidden="true">▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
-                    {% if is_admin %}
-                    <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                    {% endif %}
-                    {% if current_user.is_manager() %}
-                    <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                    {% endif %}
-                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    {{ staff_console_dropdown_links }}
                 </div>
             </div>
         </div>
         
+        <div class="construction-banner" role="status">
+            <span class="construction-banner-icon" aria-hidden="true">🔧</span>
+            <span>This app is currently under construction. Some features may change.</span>
+        </div>
         <div class="dashboard-view">
         <div class="dashboard-container">
         <div class="dashboard-page-wrap">
             <div class="main-content{% if not external_links %} main-content-two-col{% endif %}">
                 {% if show_finale %}
                 <div class="dashboard-tasks-col">
-                    <div class="section dashboard-tasks-card" style="text-align: center; padding: 48px 40px; min-height: 400px; display: flex; flex-direction: column; justify-content: center; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border: 2px solid #28a745;">
-                        <h2 class="section-title-dash" style="font-size: 1.75em; margin-bottom: 20px;">🎉 Message for you</h2>
-                        <div style="white-space: pre-wrap; text-align: center; font-size: 1.2em; line-height: 1.75; color: #333; margin-bottom: 24px;">{{ finale_message }}</div>
-                        {% if finale_document %}
-                        <p style="margin-bottom: 0;">
-                            <a href="{{ url_for('view_document_embed', doc_id=finale_document.id) }}" target="_blank" style="display: inline-block; padding: 12px 24px; background: #FE0100; color: white; text-decoration: none; border-radius: 8px; font-weight: 600;">📄 {{ finale_document.name_for_users or finale_document.original_filename }}</a>
-                        </p>
-                        {% endif %}
+                    <div class="section dashboard-tasks-card finale-card">
+                        <div class="finale-inner">
+                            <img src="{{ url_for('serve_ziebart_logo') }}" alt="" class="finale-logo">
+                            <p class="finale-kicker">Welcome to Ziebart</p>
+                            <h2 class="finale-headline"><span class="finale-head-emoji" aria-hidden="true">🎉</span><span>Message for you</span></h2>
+                            <div class="finale-divider" aria-hidden="true"></div>
+                            <div class="finale-message">{{ finale_message }}</div>
+                            {% if finale_document %}
+                            <p style="margin-bottom: 0;">
+                                <a href="{{ url_for('view_document_embed', doc_id=finale_document.id) }}" target="_blank" rel="noopener noreferrer" class="finale-doc-btn"><span aria-hidden="true">📄</span><span>{{ finale_document.name_for_users or finale_document.original_filename }}</span></a>
+                            </p>
+                            {% endif %}
+                        </div>
                     </div>
                 </div>
                 {% else %}
@@ -2061,7 +3809,7 @@ def dashboard():
                 {% if external_links %}
                 <div class="sidebar-right">
                     <div class="section">
-                        <h2 class="section-title-dash">External Links</h2>
+                        <h2 class="section-title-dash external-links-title">External Links</h2>
                     <div class="quick-links">
                         {% for link in external_links %}
                         <a href="{{ link.url }}" target="_blank" rel="noopener noreferrer" class="quick-link">
@@ -2082,6 +3830,7 @@ def dashboard():
                                 <div class="quick-link-description">{{ link.description }}</div>
                                 {% endif %}
                             </div>
+                            <span class="quick-link-external" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M14 3h7v7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 14L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M21 14v6a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
                         </a>
                         {% endfor %}
                     </div>
@@ -2205,7 +3954,7 @@ def dashboard():
                             if (icon) {
                                 var newBadge = document.createElement('span');
                                 newBadge.id = 'notificationBadge';
-                                newBadge.className = 'notification-badge';
+                                newBadge.className = 'notification-badge notification-badge-dot';
                                 newBadge.textContent = data.count;
                                 newBadge.style.cssText = 'position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;';
                                 icon.appendChild(newBadge);
@@ -2251,6 +4000,7 @@ def dashboard():
                 }
             }
         </script>
+        {{ user_mobile_bottom_nav }}
     </body>
     </html>
     ''', is_admin=is_admin, user_first_name=user_first_name, user_full_name=user_full_name,
@@ -2293,12 +4043,13 @@ def dashboard():
         <html>
         <head>
             <title>Dashboard - Onboarding App</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
             <style>
                 body { font-family: 'URW Form', Arial, sans-serif; padding: 20px; background: #f5f5f5; }
                 .error-box { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
                 .error-box strong { color: #856404; }
-            </style>
+            {{ global_theme_css|safe }}
+        </style>
         </head>
         <body>
             <div class="error-box">
@@ -2588,7 +4339,7 @@ def user_tasks():
     <html>
     <head>
         <title>My Tasks - Onboarding App</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
@@ -3048,18 +4799,20 @@ def user_tasks():
                     padding: 15px;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
-    <body>
+    <body class="user-app-shell">
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                <span class="logo-text">Ziebart Onboarding</span>
+                <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+                <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
-                <a href="{{ url_for('user_tasks') }}" class="active">Tasks</a>
+                <a href="{{ url_for('user_tasks') }}" class="nav-tab-active">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
@@ -3074,18 +4827,11 @@ def user_tasks():
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
                     <div class="user-icon">{{ user_first_name[0].upper() if user_first_name else 'U' }}</div>
-                    <span>{{ user_full_name }}</span>
-                    <span>▼</span>
+                    <span class="user-dropdown-label">{{ user_full_name }}</span>
+                    <span class="user-dropdown-caret" aria-hidden="true">▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
-                    <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
-                    {% if is_admin %}
-                    <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                    {% endif %}
-                    {% if current_user.is_manager() %}
-                    <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                    {% endif %}
-                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    {{ staff_console_dropdown_links }}
                 </div>
             </div>
         </div>
@@ -3264,6 +5010,7 @@ def user_tasks():
                 });
             }
         </script>
+        {{ user_mobile_bottom_nav }}
     </body>
     </html>
     ''', is_admin=is_admin, user_first_name=user_first_name, user_full_name=user_full_name,
@@ -3291,12 +5038,13 @@ def user_tasks():
         <html>
         <head>
             <title>My Tasks - Onboarding App</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
             <style>
                 body { font-family: 'URW Form', Arial, sans-serif; padding: 20px; background: #f5f5f5; }
                 .error-box { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
                 .error-box strong { color: #856404; }
-            </style>
+            {{ global_theme_css|safe }}
+        </style>
         </head>
         <body>
             <div class="error-box">
@@ -3530,7 +5278,7 @@ def profile():
     <head>
         <title>Profile - Onboarding App</title>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body {
@@ -3853,13 +5601,15 @@ def profile():
                     padding: 15px;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
-    <body>
+    <body class="user-app-shell">
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                <span class="logo-text">Ziebart Onboarding</span>
+                <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+                <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
@@ -3867,7 +5617,7 @@ def profile():
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
-                <a href="{{ url_for('profile') }}">Profile</a>
+                <a href="{{ url_for('profile') }}" class="nav-tab-active">Profile</a>
             </div>
             <div class="mobile-nav" id="mobileNav">
                 <a href="{{ url_for('dashboard') }}">Home</a>
@@ -3879,17 +5629,11 @@ def profile():
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
                     <div class="user-icon">{{ user_name[0].upper() if user_name else 'U' }}</div>
-                    <span>{{ user_name }}</span>
-                    <span>▼</span>
+                    <span class="user-dropdown-label">{{ user_name }}</span>
+                    <span class="user-dropdown-caret" aria-hidden="true">▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
-                    {% if is_admin %}
-                    <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                    {% endif %}
-                    {% if current_user.is_manager() %}
-                    <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                    {% endif %}
-                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    {{ staff_console_dropdown_links }}
                 </div>
             </div>
         </div>
@@ -3946,6 +5690,7 @@ def profile():
                 }
             }
         </script>
+        {{ user_mobile_bottom_nav }}
     </body>
     </html>
     ''', is_admin=is_admin, user_name=user_name, user_email=user_email,
@@ -3967,16 +5712,85 @@ def view_all_new_hires():
         return f'<html><body><h1>New Hires Page Error</h1><pre>{traceback.format_exc()}</pre></body></html>', 500
 
 
-def _view_all_new_hires_impl():
-    """Implementation for admin/manager new-hires list. Managers (non-admin) see only their store; admins see all."""
+@app.route('/manager/new-hires')
+@manager_required
+def manager_new_hires():
+    """New hires list at a manager URL (same data as /admin/new-hires with staff_console=manager)."""
+    import traceback
+    try:
+        touch_staff_console_home('manager')
+        return _view_all_new_hires_impl(force_staff_console_manager=True)
+    except Exception as e:
+        app.logger.exception("manager_new_hires failed")
+        db.session.rollback()
+        return f'<html><body><h1>New Hires Page Error</h1><pre>{traceback.format_exc()}</pre></body></html>', 500
+
+
+def _access_revoke_calendar_date(val):
+    """Normalize access_revoked_at from the DB to a calendar date (drivers may return datetime)."""
+    if val is None:
+        return None
+    from datetime import date as _date_cls, datetime as _datetime_cls
+    if isinstance(val, _datetime_cls):
+        return val.date()
+    if isinstance(val, _date_cls):
+        return val
+    return None
+
+
+def staff_header_display_name(username):
+    """Label for staff headers: User.full_name, else NewHire first+last, else username."""
+    if not username:
+        return 'User'
+    try:
+        row = UserModel.query.filter_by(username=username).first()
+        if row and (getattr(row, 'full_name', None) or '').strip():
+            return (row.full_name or '').strip()
+        nh = NewHire.query.filter_by(username=username).first()
+        if nh:
+            fn = (nh.first_name or '').strip()
+            ln = (nh.last_name or '').strip()
+            composed = f'{fn} {ln}'.strip()
+            if composed:
+                return composed
+    except Exception:
+        db.session.rollback()
+    return username
+
+
+def _view_all_new_hires_impl(force_staff_console_manager=False):
+    """Implementation for admin/manager new-hires list. Managers (non-admin) see only their store; admins see all or filter by ?store_id=."""
     q = NewHire.query.filter(NewHire.status != 'removed')
+    _sc = (request.args.get(STAFF_CONSOLE_QUERY_KEY) or '').strip().lower()
+    if force_staff_console_manager:
+        _sc = 'manager'
+    _mgr_uri = _sc == 'manager'
+    _sid_user = get_current_user_store_id()
+    sp = (request.args.get('store_id') or '').strip()
+
     if current_user.is_manager() and not current_user.is_admin():
-        store_id = get_current_user_store_id()
-        if store_id is not None:
-            q = q.filter(NewHire.store_id == store_id)
+        if _sid_user is not None:
+            q = q.filter(NewHire.store_id == _sid_user)
+    elif current_user.is_admin():
+        # Admins acting from Manager Console (?staff_console=manager) must stay store-scoped like managers.
+        if _mgr_uri and sp.isdigit():
+            q = q.filter(NewHire.store_id == int(sp))
+        elif _mgr_uri and _sid_user is not None:
+            q = q.filter(NewHire.store_id == _sid_user)
+        elif sp == 'none':
+            q = q.filter(NewHire.store_id.is_(None))
+        elif sp.isdigit():
+            q = q.filter(NewHire.store_id == int(sp))
     all_new_hires = q.order_by(NewHire.created_at.desc()).all()
     new_hires_with_progress = []
-    
+    from datetime import date as _nh_list_date
+    _nh_today = _nh_list_date.today()
+    # Fresh reads for users.access_revoked_at (avoid stale identity map; matches login after cancel-access).
+    try:
+        db.session.expire_all()
+    except Exception:
+        db.session.rollback()
+
     for new_hire in all_new_hires:
         # Training videos progress
         required_videos = list(new_hire.required_training_videos)
@@ -4009,7 +5823,12 @@ def _view_all_new_hires_impl():
         total_items = total_videos + total_user_tasks + checklist_total
         completed_items = completed_videos + completed_user_tasks + checklist_completed
         progress_percentage = int((completed_items / total_items * 100)) if total_items > 0 else 0
-        
+
+        _nh_user = UserModel.query.filter_by(username=new_hire.username).first()
+        _ur = _access_revoke_calendar_date(getattr(_nh_user, 'access_revoked_at', None)) if _nh_user else None
+        # Same rule as authenticate_by_email_password: revoked when today >= revoke calendar date.
+        login_active = bool(_nh_user) and not (_ur is not None and _nh_today >= _ur)
+
         new_hires_with_progress.append({
             'new_hire': new_hire,
             'progress': progress_percentage,
@@ -4017,16 +5836,39 @@ def _view_all_new_hires_impl():
             'total': total_items,
             'training': {'completed': completed_videos, 'total': total_videos},
             'tasks': {'completed': completed_user_tasks, 'total': total_user_tasks},
-            'checklist': {'completed': checklist_completed, 'total': checklist_total}
+            'checklist': {'completed': checklist_completed, 'total': checklist_total},
+            'login_active': login_active,
         })
     
-    admin_name = current_user.username
-    
-    return render_template_string('''
+    _nh_list_un = (current_user.username if current_user else '') or ''
+    admin_name = staff_header_display_name(_nh_list_un) if _nh_list_un else 'Admin'
+    new_hires_list_heading = 'New Hires List'
+    if current_user.is_manager() and not current_user.is_admin():
+        _msid = get_current_user_store_id()
+        if _msid is not None:
+            _mst = Store.query.get(_msid)
+            if _mst and (_mst.name or '').strip():
+                new_hires_list_heading = _mst.name.strip()
+    elif current_user.is_admin():
+        _asp = sp
+        if _mgr_uri and _asp.isdigit():
+            _ast = Store.query.get(int(_asp))
+            new_hires_list_heading = (_ast.name.strip() if _ast and (_ast.name or '').strip() else f'Store #{_asp}')
+        elif _mgr_uri and _sid_user is not None:
+            _mst = Store.query.get(_sid_user)
+            if _mst and (_mst.name or '').strip():
+                new_hires_list_heading = _mst.name.strip()
+        elif _asp == 'none':
+            new_hires_list_heading = 'No store assigned'
+        elif _asp.isdigit():
+            _ast = Store.query.get(int(_asp))
+            new_hires_list_heading = (_ast.name.strip() if _ast and (_ast.name or '').strip() else f'Store #{_asp}')
+
+    _nh_list_html = render_template_string('''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>New Hires List - Admin Dashboard</title>
+        <title>{{ new_hires_list_heading }} - Onboarding</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
@@ -4108,76 +5950,129 @@ def _view_all_new_hires_impl():
                 color: #000000;
                 margin-bottom: 20px;
             }
-            .new-hires-list {
-                display: flex;
-                flex-direction: column;
-                gap: 12px;
-            }
-            .new-hire-item {
-                display: flex;
-                align-items: center;
-                gap: 15px;
-                padding: 15px;
-                background: #f8f9fa;
+            .new-hires-table-wrap {
+                width: 100%;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
                 border-radius: 0.5rem;
-                transition: all 0.2s;
             }
-            .new-hire-item:hover {
-                background: #e9ecef;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            .new-hires-table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 0.95em;
             }
-            .progress-avatar {
-                width: 40px;
-                height: 40px;
-                border-radius: 50%;
-                background: #FE0100;
-                color: white;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-weight: bold;
-                flex-shrink: 0;
+            .new-hires-table th {
+                text-align: left;
+                padding: 12px 14px;
+                font-weight: 700;
+                font-size: 0.82em;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: #505050;
+                border-bottom: 2px solid #e0e0e0;
+                white-space: nowrap;
             }
-            .new-hire-info {
-                flex: 1;
+            .new-hires-table td {
+                padding: 14px;
+                border-bottom: 1px solid #eee;
+                vertical-align: middle;
             }
-            .new-hire-name {
-                font-weight: 600;
-                margin-bottom: 5px;
+            .new-hires-table tbody tr:hover {
+                background: #f5f6f8;
             }
-            .new-hire-name a {
+            .new-hires-table .col-name a {
                 color: #000000;
+                font-weight: 600;
                 text-decoration: none;
             }
-            .new-hire-name a:hover {
+            .new-hires-table .col-name a:hover {
                 color: #FE0100;
             }
-            .new-hire-meta {
-                font-size: 0.85em;
-                color: #808080;
-            }
-            .progress-percentage {
-                font-weight: 600;
-                color: #1976d2;
-                min-width: 60px;
+            .new-hires-table .col-actions {
+                white-space: nowrap;
                 text-align: right;
             }
-            .progress-bar-container {
-                width: 150px;
-                height: 8px;
-                background: #e0e0e0;
-                border-radius: 0.5rem;
-                overflow: hidden;
+            .remove-user-link {
+                color: #0d6efd;
+                font-size: 0.88em;
+                text-decoration: none;
+                margin-left: 10px;
             }
-            .progress-bar-fill {
-                height: 100%;
-                border-radius: 0.5rem;
-                transition: width 0.3s;
+            .remove-user-link:hover {
+                text-decoration: underline;
             }
-            .progress-bar-fill.completed { background: #4caf50; }
-            .progress-bar-fill.in-progress { background: #ff9800; }
-            .progress-bar-fill.not-started { background: #2196f3; }
-            
+            .section-title-row {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: flex-end;
+                justify-content: space-between;
+                gap: 16px;
+                margin-bottom: 18px;
+            }
+            .section-title-row .section-title { margin-bottom: 0; }
+            .nh-filter-bar {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 10px 16px;
+                font-size: 0.88em;
+                color: #333;
+            }
+            .nh-filter-bar fieldset {
+                border: none;
+                padding: 0;
+                margin: 0;
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 12px 16px;
+            }
+            .nh-filter-bar legend {
+                font-weight: 700;
+                padding: 0;
+                margin: 0 10px 0 0;
+                display: inline;
+            }
+            .nh-filter-bar label {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                cursor: pointer;
+                font-weight: 500;
+            }
+            .nh-filter-bar input { accent-color: #FE0100; cursor: pointer; }
+            .nh-filter-empty {
+                text-align: center;
+                padding: 20px;
+                color: #666;
+                font-size: 0.95em;
+            }
+            .new-hires-table th.sortable {
+                cursor: pointer;
+                user-select: none;
+            }
+            .new-hires-table th.sortable:hover {
+                color: #111;
+                background: rgba(0,0,0,0.05);
+            }
+            .new-hires-table th.sortable:focus {
+                outline: 2px solid #FE0100;
+                outline-offset: 2px;
+            }
+            .new-hires-table th .th-inner {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .new-hires-table th .sort-ind {
+                font-size: 0.72em;
+                opacity: 0.5;
+                min-width: 1em;
+                display: inline-block;
+            }
+            .new-hires-table th.sortable[data-sort-dir="asc"] .sort-ind::after { content: '▲'; opacity: 1; }
+            .new-hires-table th.sortable[data-sort-dir="desc"] .sort-ind::after { content: '▼'; opacity: 1; }
+            .new-hires-table tr.row-inactive td { opacity: 0.72; }
             @media (max-width: 768px) {
                 .top-header {
                     padding: 12px 15px;
@@ -4196,14 +6091,26 @@ def _view_all_new_hires_impl():
                 .section {
                     padding: 20px;
                 }
-                .new-hire-item {
-                    flex-wrap: wrap;
-                    gap: 10px;
+                .section-title-row {
+                    flex-direction: column;
+                    align-items: flex-start;
                 }
-                .progress-bar-container {
-                    width: 100%;
-                    margin-top: 10px;
+                .new-hires-table th,
+                .new-hires-table td {
+                    padding: 10px 8px;
+                    font-size: 0.85em;
                 }
+            }
+        {{ global_theme_css|safe }}
+            .nh-filter-bar, .nh-filter-bar label, .nh-filter-bar legend {
+                color: var(--text-primary, #f2f5fb);
+            }
+            .nh-filter-empty {
+                color: var(--text-muted, #9aa4b6);
+            }
+            .new-hires-table th.sortable:hover {
+                background: rgba(255,255,255,0.07);
+                color: var(--text-primary, #f2f5fb);
             }
         </style>
     </head>
@@ -4214,16 +6121,11 @@ def _view_all_new_hires_impl():
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <div class="header-right">
-                <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('viewNewHiresUserDropdown').classList.toggle('show');">
                     <div class="user-icon">{{ (admin_name or 'A')[0].upper() }}</div>
                     <div class="dropdown-menu" id="viewNewHiresUserDropdown">
-                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
-                        {% if current_user.is_admin() %}
-                        <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                        {% endif %}
-                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                        {{ staff_console_dropdown_links }}
                     </div>
                 </div>
             </div>
@@ -4232,39 +6134,115 @@ def _view_all_new_hires_impl():
         
         <div class="container">
             <div class="section">
-                <h2 class="section-title">New Hires List</h2>
-                {% if new_hires_with_progress %}
-                <div class="new-hires-list">
-                    {% for item in new_hires_with_progress %}
-                    <div class="new-hire-item">
-                        <div class="progress-avatar">{{ item.new_hire.first_name[0].upper() if item.new_hire.first_name else 'N' }}</div>
-                        <div class="new-hire-info">
-                            <div class="new-hire-name">
-                                <a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}">
-                                    {{ item.new_hire.first_name }} {{ item.new_hire.last_name }}
-                                </a>
-                            </div>
-                            <div class="new-hire-meta">
-                                {{ item.new_hire.username }}
-                                {% if item.new_hire.department %} • {{ item.new_hire.department }}{% endif %}
-                                {% if item.new_hire.position %} • {{ item.new_hire.position }}{% endif %}
-                                {% if item.total > 0 %} • {{ item.completed }}/{{ item.total }} videos{% endif %}
-                            </div>
-                        </div>
-                        <div class="progress-bar-container">
-                            {% if item.progress == 100 %}
-                            <div class="progress-bar-fill completed" style="width: 100%;"></div>
-                            {% elif item.progress > 0 %}
-                            <div class="progress-bar-fill in-progress" style="width: {{ item.progress }}%;"></div>
-                            {% else %}
-                            <div class="progress-bar-fill not-started" style="width: 100%;"></div>
-                            {% endif %}
-                        </div>
-                        <div class="progress-percentage">{{ item.progress }}%</div>
-                        <a href="{{ url_for('remove_new_hire_user', username=item.new_hire.username) }}" class="remove-user-link" title="Remove user from active list">Remove user</a>
+                <div class="section-title-row">
+                    <h2 class="section-title">{{ new_hires_list_heading }}</h2>
+                    {% if new_hires_with_progress %}
+                    <div class="nh-filter-bar" role="group" aria-label="Filter new hires by login access">
+                        <fieldset>
+                            <legend>Show</legend>
+                            <label><input type="radio" name="nhShowFilter" value="active" checked> Active only</label>
+                            <label><input type="radio" name="nhShowFilter" value="all"> All</label>
+                            <label><input type="radio" name="nhShowFilter" value="inactive"> Inactive only</label>
+                        </fieldset>
                     </div>
-                    {% endfor %}
+                    {% endif %}
                 </div>
+                {% if new_hires_with_progress %}
+                <p id="nhFilterEmpty" class="nh-filter-empty" hidden>No rows match this filter.</p>
+                <div class="new-hires-table-wrap">
+                    <table class="new-hires-table" id="newHiresTable">
+                        <thead>
+                            <tr>
+                                <th class="col-name sortable" data-sort="name" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Name<span class="sort-ind" aria-hidden="true"></span></span></th>
+                                <th class="sortable" data-sort="username" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Username<span class="sort-ind" aria-hidden="true"></span></span></th>
+                                <th class="sortable" data-sort="position" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Position<span class="sort-ind" aria-hidden="true"></span></span></th>
+                                <th class="sortable" data-sort="email" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Email<span class="sort-ind" aria-hidden="true"></span></span></th>
+                                <th class="sortable" data-sort="start" data-sort-type="date" tabindex="0" scope="col"><span class="th-inner">Start date<span class="sort-ind" aria-hidden="true"></span></span></th>
+                                <th class="sortable" data-sort="active" data-sort-type="number" tabindex="0" scope="col"><span class="th-inner">Active?<span class="sort-ind" aria-hidden="true"></span></span></th>
+                                <th class="col-actions sortable" data-sort="progress" data-sort-type="number" tabindex="0" scope="col"><span class="th-inner">Actions<span class="sort-ind" aria-hidden="true"></span></span></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in new_hires_with_progress %}
+                            <tr class="{% if not item.login_active %}row-inactive{% endif %}" data-login-active="{% if item.login_active %}1{% else %}0{% endif %}"
+                                data-sort-name="{{ ((item.new_hire.first_name or '') ~ ' ' ~ (item.new_hire.last_name or ''))|trim|lower|e }}"
+                                data-sort-username="{{ (item.new_hire.username or '')|lower|e }}"
+                                data-sort-position="{{ ((item.new_hire.position or '')|lower)|e }}"
+                                data-sort-email="{{ ((item.new_hire.email or '')|lower)|e }}"
+                                data-sort-start="{{ item.new_hire.start_date.isoformat() if item.new_hire.start_date else '' }}"
+                                data-sort-active="{{ 1 if item.login_active else 0 }}"
+                                data-sort-progress="{{ item.progress }}">
+                                <td class="col-name">
+                                    <a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" title="Open details — onboarding progress {{ item.progress }}%{% if item.total > 0 %} ({{ item.completed }}/{{ item.total }} items){% endif %}">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a>
+                                </td>
+                                <td>{{ item.new_hire.username }}</td>
+                                <td>{{ item.new_hire.position or '—' }}</td>
+                                <td>{{ item.new_hire.email or '—' }}</td>
+                                <td>{% if item.new_hire.start_date %}{{ item.new_hire.start_date.strftime('%b %d, %Y') }}{% else %}—{% endif %}</td>
+                                <td>{% if item.login_active %}Yes{% else %}No{% endif %}</td>
+                                <td class="col-actions">
+                                    <a href="{{ url_for('remove_new_hire_user', username=item.new_hire.username) }}" class="remove-user-link" title="Remove user from active list">Remove</a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <script>
+                (function() {
+                    var table = document.getElementById('newHiresTable');
+                    if (!table) return;
+                    var tbody = table.querySelector('tbody');
+                    var sortState = { key: null, dir: 'asc' };
+                    function rowVal(tr, key) { return tr.getAttribute('data-sort-' + key) || ''; }
+                    function cmp(a, b, type) {
+                        if (type === 'number') return (parseFloat(a) || 0) - (parseFloat(b) || 0);
+                        return String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true });
+                    }
+                    function applySort() {
+                        if (!sortState.key || !tbody) return;
+                        var th = table.querySelector('th.sortable[data-sort="' + sortState.key + '"]');
+                        var type = (th && th.getAttribute('data-sort-type')) || 'text';
+                        var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+                        rows.sort(function(r1, r2) {
+                            var c = cmp(rowVal(r1, sortState.key), rowVal(r2, sortState.key), type);
+                            return sortState.dir === 'asc' ? c : -c;
+                        });
+                        rows.forEach(function(r) { tbody.appendChild(r); });
+                    }
+                    function onSortClick(th) {
+                        var k = th.getAttribute('data-sort');
+                        if (!k) return;
+                        if (sortState.key === k) sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+                        else { sortState.key = k; sortState.dir = 'asc'; }
+                        table.querySelectorAll('th.sortable').forEach(function(h) { h.removeAttribute('data-sort-dir'); });
+                        th.setAttribute('data-sort-dir', sortState.dir);
+                        applySort();
+                    }
+                    table.querySelectorAll('th.sortable').forEach(function(th) {
+                        th.addEventListener('click', function() { onSortClick(th); });
+                        th.addEventListener('keydown', function(ev) {
+                            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onSortClick(th); }
+                        });
+                    });
+                    var radios = document.querySelectorAll('input[name="nhShowFilter"]');
+                    var emptyEl = document.getElementById('nhFilterEmpty');
+                    function applyFilter() {
+                        var mode = 'active';
+                        for (var i = 0; i < radios.length; i++) { if (radios[i].checked) mode = radios[i].value; }
+                        var n = 0;
+                        tbody.querySelectorAll('tr').forEach(function(tr) {
+                            var on = tr.getAttribute('data-login-active') === '1';
+                            var show = mode === 'all' || (mode === 'active' && on) || (mode === 'inactive' && !on);
+                            tr.style.display = show ? '' : 'none';
+                            if (show) n++;
+                        });
+                        if (emptyEl) emptyEl.hidden = n > 0;
+                    }
+                    for (var j = 0; j < radios.length; j++) radios[j].addEventListener('change', applyFilter);
+                    applyFilter();
+                })();
+                </script>
                 {% else %}
                 <p style="color: #666; text-align: center; padding: 40px;">No new hires found.</p>
                 {% endif %}
@@ -4272,7 +6250,12 @@ def _view_all_new_hires_impl():
         </div>
     </body>
     </html>
-    ''', new_hires_with_progress=new_hires_with_progress, admin_name=admin_name)
+    ''', new_hires_with_progress=new_hires_with_progress, admin_name=admin_name,
+         new_hires_list_heading=new_hires_list_heading)
+    _nh_list_resp = make_response(_nh_list_html)
+    _nh_list_resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    _nh_list_resp.headers['Pragma'] = 'no-cache'
+    return _nh_list_resp
 
 
 @app.route('/admin/new-hire/add')
@@ -4664,14 +6647,123 @@ def add_new_hire():
                     font-size: 1.3em;
                 }
             }
+        {{ global_theme_css|safe }}
+        /* New hire wizard: keep app-wide dark metallic look; override template light (#f8f9fa) surfaces so theme text is readable */
+        body.new-hire-wizard-page .wizard-container .wizard-content {
+            position: relative !important;
+            z-index: 1 !important;
+        }
+        body.new-hire-wizard-page .wizard-container .wizard-steps {
+            background: rgba(0, 0, 0, 0.28) !important;
+            color: var(--text-muted) !important;
+            border-bottom: 1px solid var(--border-soft) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .wizard-step:not(.active):not(.completed) {
+            color: var(--text-muted) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .wizard-content h2,
+        body.new-hire-wizard-page .wizard-container .review-summary h3 {
+            color: var(--text-primary) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .wizard-content .step-header p,
+        body.new-hire-wizard-page .wizard-container .wizard-content .form-group small,
+        body.new-hire-wizard-page .wizard-container .review-summary small {
+            color: var(--text-muted) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .wizard-content label,
+        body.new-hire-wizard-page .wizard-container .wizard-content .form-group label {
+            color: var(--text-primary) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .checkbox-group,
+        body.new-hire-wizard-page .wizard-container .document-group {
+            background: rgba(0, 0, 0, 0.22) !important;
+            color: var(--text-primary) !important;
+            border: 1px solid var(--border-soft) !important;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .checkbox-group p,
+        body.new-hire-wizard-page .wizard-container .checkbox-group a {
+            color: var(--text-muted) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .checkbox-item,
+        body.new-hire-wizard-page .wizard-container .document-item {
+            background: rgba(255, 255, 255, 0.06) !important;
+            color: var(--text-primary) !important;
+            border: 1px solid rgba(255, 255, 255, 0.12) !important;
+            box-shadow: none !important;
+        }
+        body.new-hire-wizard-page .wizard-container .checkbox-item label,
+        body.new-hire-wizard-page .wizard-container .document-item label {
+            color: var(--text-primary) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .document-item strong {
+            color: var(--text-primary) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .document-item label span {
+            color: var(--text-muted) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .review-summary {
+            background: rgba(0, 0, 0, 0.22) !important;
+            color: var(--text-primary) !important;
+            border: 1px solid var(--border-soft) !important;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .review-section {
+            border-bottom-color: rgba(255, 255, 255, 0.12) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .review-item,
+        body.new-hire-wizard-page .wizard-container .review-summary span,
+        body.new-hire-wizard-page .wizard-container .review-summary li,
+        body.new-hire-wizard-page .wizard-container #review-videos,
+        body.new-hire-wizard-page .wizard-container #review-documents {
+            color: var(--text-primary) !important;
+        }
+        body.new-hire-wizard-page .wizard-container #review-password {
+            background: linear-gradient(150deg, rgba(255,255,255,0.09), rgba(255,255,255,0.04)) !important;
+            color: var(--text-primary) !important;
+            border: 1px solid rgba(255,255,255,0.24) !important;
+        }
+        body.new-hire-wizard-page .wizard-container select option {
+            background: #1a202c !important;
+            color: var(--text-primary) !important;
+        }
+        body.new-hire-wizard-page .wizard-container input[type="checkbox"] {
+            width: 20px !important;
+            height: 20px !important;
+            min-height: 20px !important;
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid var(--border-soft) !important;
+            accent-color: var(--accent-red) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .password-toggle {
+            background: none !important;
+            color: var(--text-muted) !important;
+            border: none !important;
+            box-shadow: none !important;
+        }
+        body.new-hire-wizard-page .wizard-container .btn-secondary {
+            background: linear-gradient(180deg, #5a6268 0%, #454d54 65%, #343a40 100%) !important;
+            color: #ffffff !important;
+            border: 1px solid rgba(255, 255, 255, 0.22) !important;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .btn-success {
+            background: linear-gradient(180deg, #34ce57 0%, #28a745 55%, #1e7e34 100%) !important;
+            color: #ffffff !important;
+            border: 1px solid rgba(255, 255, 255, 0.22) !important;
+            box-shadow: 0 4px 14px rgba(40, 167, 69, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25) !important;
+        }
+        body.new-hire-wizard-page .wizard-container .wizard-actions {
+            border-top-color: rgba(255, 255, 255, 0.12) !important;
+        }
         </style>
     </head>
-    <body>
+    <body class="new-hire-wizard-page">
         <div class="header">
             <div class="header-content">
                 <h1>🚀 New Hire Onboarding Wizard</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -5111,7 +7203,7 @@ def create_new_hire():
     username = request.form.get('username', '').strip()
     first_name = request.form.get('first_name', '').strip()
     last_name = request.form.get('last_name', '').strip()
-    email = request.form.get('email', '').strip()
+    email = normalize_email(request.form.get('email'))
     password = request.form.get('password', '').strip()
     department = request.form.get('department', '').strip()
     position = request.form.get('position', '').strip()
@@ -5133,6 +7225,7 @@ def create_new_hire():
         return redirect(url_for('add_new_hire'))
     
     try:
+        _ensure_user_task_order_columns()
         # Ensure access_revoked_at column exists (for existing databases)
         try:
             db.session.execute(text("SELECT access_revoked_at FROM new_hires WHERE 1=0"))
@@ -5157,7 +7250,21 @@ def create_new_hire():
         if not email:
             import config
             email_domain = config.EMAIL_DOMAIN if hasattr(config, 'EMAIL_DOMAIN') else 'ziebart.com'
-            email = f"{username}@{email_domain}"
+            email = normalize_email(f"{username}@{email_domain}")
+        existing_user = UserModel.query.filter_by(username=username).first()
+        existing_user_email = normalize_email(getattr(existing_user, 'email', None)) if existing_user else None
+        if existing_user and existing_user_email and email != existing_user_email:
+            flash(
+                f'Email cannot be changed for existing user "{username}". '
+                f'Current login email is "{existing_user.email}".',
+                'error'
+            )
+            return redirect(url_for('add_new_hire'))
+        if existing_user_email:
+            email = existing_user_email
+        if email_in_use_by_other_user(email, exclude_user_id=existing_user.id if existing_user else None):
+            flash(f'Email "{email}" is already in use by another account.', 'error')
+            return redirect(url_for('add_new_hire'))
         
         # Parse start date
         start_date = None
@@ -5186,19 +7293,24 @@ def create_new_hire():
             except (ValueError, TypeError):
                 role_id = None
         
-        # Store: admin can choose from form; manager uses their store
+        # Store: admins pick from form; managers use hidden field or dropdown (must honor POST when DB store is unset)
         store_id = None
-        if current_user.is_admin():
-            store_id_raw = request.form.get('store_id', '').strip()
-            if store_id_raw.isdigit():
-                try:
-                    store_id = int(store_id_raw)
-                    if Store.query.get(store_id) is None:
-                        store_id = None
-                except (ValueError, TypeError):
-                    store_id = None
-        else:
-            store_id = get_current_user_store_id()
+        mgr_db_store = get_current_user_store_id() if not current_user.is_admin() else None
+        store_id_raw = (request.form.get('store_id') or '').strip()
+        if store_id_raw.isdigit():
+            try:
+                cand = int(store_id_raw)
+                if Store.query.get(cand) is not None:
+                    if current_user.is_admin():
+                        store_id = cand
+                    elif mgr_db_store is None:
+                        store_id = cand
+                    elif cand == mgr_db_store:
+                        store_id = cand
+            except (ValueError, TypeError):
+                pass
+        if store_id is None and not current_user.is_admin():
+            store_id = mgr_db_store
         
         # Create new hire
         new_hire = NewHire(
@@ -5220,7 +7332,7 @@ def create_new_hire():
         db.session.flush()  # Get the ID
         
         # Ensure User exists with email and password so new hire can log in (email + password)
-        user = UserModel.query.filter_by(username=username).first()
+        user = existing_user
         if not user:
             user = UserModel(
                 username=username,
@@ -5230,7 +7342,7 @@ def create_new_hire():
             )
             db.session.add(user)
         else:
-            user.email = email
+            # Existing users keep their original login email; only reset password for onboarding.
             user.password_hash = generate_password_hash(password)
         if hasattr(user, 'store_id'):
             user.store_id = store_id
@@ -5312,9 +7424,9 @@ def create_new_hire():
         msg_parts.append('.')
         
         flash(' '.join(msg_parts), 'success')
-        if current_user.is_manager():
-            return redirect(url_for('manager_dashboard'))
-        return redirect(url_for('admin_dashboard'))
+        if uses_manager_new_hires_home():
+            return redirect(manager_new_hires_list_url())
+        return redirect(url_for('admin_dashboard', staff_console='admin'))
     except Exception as e:
         db.session.rollback()
         flash(f'Error starting onboarding: {str(e)}', 'error')
@@ -5327,6 +7439,7 @@ def admin_dashboard():
     """Admin dashboard"""
     import traceback
     try:
+        touch_staff_console_home('admin')
         return _admin_dashboard_impl()
     except Exception as e:
         app.logger.exception("admin_dashboard failed")
@@ -5335,75 +7448,19 @@ def admin_dashboard():
 
 
 def _admin_dashboard_impl():
-    """Admin dashboard implementation (called from admin_dashboard)."""
-    total_users = 0
-    total_new_hires = 0
-    admin_users = 0
-    forms_completed = 0
-    total_checklist_items = 0
-    all_new_hires = []
-    new_hires_with_progress = []
-    form_status_data = []
-    recent_activity = []
-    admin_name = current_user.username if current_user else "Admin"
+    """Admin dashboard: stores table → new hires list; quick links sidebar."""
+    from collections import Counter
+    from datetime import date as _date
+
+    _admin_un = (current_user.username if current_user else '') or ''
+    admin_name = staff_header_display_name(_admin_un) if _admin_un else 'Admin'
     pending_count = 0
     notifications = []
-
-    try:
-        total_users = UserModel.query.count()
-    except Exception as e:
-        db.session.rollback()
-        app.logger.warning(f"admin_dashboard: total_users failed: {e}")
-    try:
-        total_new_hires = NewHire.query.filter(NewHire.status != 'removed').count()
-    except Exception as e:
-        db.session.rollback()
-        app.logger.warning(f"admin_dashboard: total_new_hires failed: {e}")
-    try:
-        admin_users = UserModel.query.filter_by(role='admin').count()
-    except Exception as e:
-        db.session.rollback()
-        app.logger.warning(f"admin_dashboard: admin_users failed: {e}")
-    try:
-        forms_completed = Document.query.filter_by(is_visible=True).count()
-    except Exception as e:
-        db.session.rollback()
-        app.logger.warning(f"admin_dashboard: forms_completed failed: {e}")
-    try:
-        total_checklist_items = ChecklistItem.query.filter_by(is_active=True).count()
-    except Exception as e:
-        db.session.rollback()
-        app.logger.warning(f"admin_dashboard: total_checklist_items failed: {e}")
-    try:
-        all_new_hires = NewHire.query.filter(NewHire.status != 'removed').order_by(NewHire.created_at.desc()).all()
-        # Exclude new hires whose user was revoked or deleted (so they don't show in Progress/Recent Activity)
-        from datetime import date as _date
-        today = _date.today()
-        kept = []
-        for nh in all_new_hires:
-            user = UserModel.query.filter_by(username=nh.username).first()
-            if not user:
-                continue  # User deleted (revoked = remove)
-            revoked_at = getattr(user, 'access_revoked_at', None)
-            if revoked_at is not None and today >= revoked_at:
-                continue  # Access revoked (old revoke flow)
-            kept.append(nh)
-        all_new_hires = kept
-        total_new_hires = len(all_new_hires)  # Keep count in sync with filtered list
-        # Filter by store if requested
-        store_filter = request.args.get('store_id', '')
-        if store_filter == 'none':
-            all_new_hires = [nh for nh in all_new_hires if not nh.store_id]
-        elif store_filter and store_filter.isdigit():
-            sid = int(store_filter)
-            all_new_hires = [nh for nh in all_new_hires if nh.store_id == sid]
-        total_new_hires = len(all_new_hires)
-    except Exception as e:
-        db.session.rollback()
-        app.logger.warning(f"admin_dashboard: all_new_hires failed: {e}")
-        all_new_hires = []
-
     all_stores = []
+    store_dashboard_rows = []
+    total_active_new_hires = 0
+    hire_search_rows = []
+
     try:
         all_stores = Store.query.order_by(Store.name).all()
     except Exception as e:
@@ -5411,164 +7468,63 @@ def _admin_dashboard_impl():
         app.logger.warning(f"admin_dashboard: all_stores failed: {e}")
 
     try:
-        for new_hire in all_new_hires:
-            try:
-                # Training videos progress
-                required_videos = list(new_hire.required_training_videos)
-                total_videos = len(required_videos)
-                completed_videos = 0
-                
-                for video in required_videos:
-                    try:
-                        progress = UserTrainingProgress.query.filter_by(
-                            username=new_hire.username,
-                            video_id=video.id,
-                            is_completed=True,
-                            is_passed=True
-                        ).first()
-                        if progress:
-                            completed_videos += 1
-                    except Exception as e:
-                        # Skip this video if there's an error
-                        continue
-                
-                # User tasks progress
-                try:
-                    all_user_tasks = UserTask.query.filter_by(username=new_hire.username).all()
-                    total_user_tasks = len(all_user_tasks)
-                    completed_user_tasks = len([t for t in all_user_tasks if t.status == 'completed'])
-                except Exception as e:
-                    # If there's an error getting tasks, use defaults
-                    all_user_tasks = []
-                    total_user_tasks = 0
-                    completed_user_tasks = 0
-                
-                # Checklist progress
-                try:
-                    checklist_completed = NewHireChecklist.query.filter_by(
-                        new_hire_id=new_hire.id,
-                        is_completed=True
-                    ).count()
-                    checklist_total = ChecklistItem.query.filter_by(is_active=True).count()
-                except Exception as e:
-                    # If there's an error getting checklist, use defaults
-                    checklist_completed = 0
-                    checklist_total = 0
-                
-                # Calculate overall progress (training videos + user tasks + checklist items)
-                total_items = total_videos + total_user_tasks + checklist_total
-                completed_items = completed_videos + completed_user_tasks + checklist_completed
-                progress_percentage = int((completed_items / total_items * 100)) if total_items > 0 else 0
-                
-                store_name = '—'
-                if new_hire.store_id:
-                    store = Store.query.get(new_hire.store_id)
-                    if store:
-                        store_name = store.name
-                new_hires_with_progress.append({
-                    'new_hire': new_hire,
-                    'progress': progress_percentage,
-                    'completed': completed_items,
-                    'total': total_items,
-                    'store_name': store_name,
-                    'training': {'completed': completed_videos, 'total': total_videos},
-                    'tasks': {'completed': completed_user_tasks, 'total': total_user_tasks},
-                    'checklist': {'completed': checklist_completed, 'total': checklist_total}
-                })
-            except Exception as e:
-                # If there's an error processing this new hire, skip it or use defaults
-                import traceback
-                app.logger.error(f'Error processing new hire {new_hire.username}: {str(e)}')
-                app.logger.error(traceback.format_exc())
-                store_name = '—'
-                if new_hire.store_id:
-                    store = Store.query.get(new_hire.store_id)
-                    if store:
-                        store_name = store.name
-                # Add with default values so the dashboard still shows
-                new_hires_with_progress.append({
-                    'new_hire': new_hire,
-                    'progress': 0,
-                    'completed': 0,
-                    'total': 0,
-                    'store_name': store_name,
-                    'training': {'completed': 0, 'total': 0},
-                    'tasks': {'completed': 0, 'total': 0},
-                    'checklist': {'completed': 0, 'total': 0}
-                })
-        
-        # Get recent activity (new hires ordered by creation date)
-        recent_activity = all_new_hires[:10]
-        
-        # Get form status stats - documents with signature fields
-        # Use only users who are assigned each document (not all users in the system)
-        form_status_data = []
-        try:
-            documents_with_signatures = Document.query.join(DocumentSignatureField).distinct().all()
-            
-            for doc in documents_with_signatures:
-                # Get all required signature fields for this document
-                required_fields = DocumentSignatureField.query.filter_by(
-                    document_id=doc.id,
-                    is_required=True
-                ).all()
-                
-                total_required = len(required_fields)
-                if total_required == 0:
-                    continue  # Skip documents with no required fields
-                
-                # Only count users who have this document assigned (same logic as view_form_signatures)
-                assignments = DocumentAssignment.query.filter_by(document_id=doc.id).all()
-                assigned_usernames = [a.username for a in assignments]
-                total_assigned = len(assigned_usernames)
-                
-                if total_assigned == 0:
-                    # No one assigned - show 0/0 or skip; include so admin can see the form exists
-                    form_status_data.append({
-                        'doc_id': doc.id,
-                        'name': doc.name_for_users or 'Untitled Document',
-                        'signed': 0,
-                        'total': 0,
-                        'percentage': 0
-                    })
-                    continue
-                
-                # Count how many assigned users have signed all required fields
-                signed_count = 0
-                for username in assigned_usernames:
-                    try:
-                        all_signed = all(is_signature_field_signed(doc.id, f, username) for f in required_fields)
-                        if all_signed:
-                            signed_count += 1
-                    except Exception as e:
-                        print(f"Error checking signatures for user {username}: {e}")
-                        continue
-                
-                percentage = int((signed_count / total_assigned * 100)) if total_assigned > 0 else 0
-                
-                form_status_data.append({
-                    'doc_id': doc.id,
-                    'name': doc.name_for_users or 'Untitled Document',
-                    'signed': signed_count,
-                    'total': total_assigned,
-                    'percentage': percentage
-                })
-        except Exception as e:
-            # If form status calculation fails, just use empty list
-            print(f"Error calculating form status: {e}")
-            import traceback
-            traceback.print_exc()
-            form_status_data = []
-        
-        # Sort by percentage descending and limit to 4 items
-        form_status_data.sort(key=lambda x: x['percentage'], reverse=True)
-        form_status_data = form_status_data[:4]
-        
-        # Get admin user info
+        all_new_hires = NewHire.query.filter(NewHire.status != 'removed').order_by(NewHire.created_at.desc()).all()
+        today = _date.today()
+        eligible_pairs = []
+        for nh in all_new_hires:
+            user = UserModel.query.filter_by(username=nh.username).first()
+            if not user:
+                continue
+            revoked_at = getattr(user, 'access_revoked_at', None)
+            if revoked_at is not None and today >= revoked_at:
+                continue
+            eligible_pairs.append((nh, user))
+        total_active_new_hires = len(eligible_pairs)
+        by_store = Counter()
+        for nh, user in eligible_pairs:
+            by_store[nh.store_id] += 1
+            fn = (nh.first_name or '').strip()
+            ln = (nh.last_name or '').strip()
+            display_name = f"{fn} {ln}".strip() or (nh.username or '')
+            email = (getattr(user, 'email', None) or getattr(nh, 'email', None) or '') or ''
+            store_name = 'No store assigned'
+            list_url = url_for('view_all_new_hires', store_id='none', staff_console='admin')
+            if nh.store_id:
+                st = Store.query.get(nh.store_id)
+                if st:
+                    store_name = st.name
+                    list_url = url_for('view_all_new_hires', store_id=st.id, staff_console='admin')
+                else:
+                    store_name = 'Unknown store'
+            parts = [display_name, nh.username or '', email, store_name]
+            hire_search_rows.append({
+                'display_name': display_name,
+                'username': nh.username or '',
+                'email': email,
+                'store_name': store_name,
+                'list_url': list_url,
+                'search_text': ' '.join(p for p in parts if p).lower(),
+            })
+        for st in all_stores:
+            store_dashboard_rows.append({
+                'store_name': st.name,
+                'store_code': (getattr(st, 'code', None) or '') or '—',
+                'new_hire_count': by_store.get(st.id, 0),
+                'list_url': url_for('view_all_new_hires', store_id=st.id, staff_console='admin'),
+            })
+        if by_store.get(None, 0) > 0:
+            store_dashboard_rows.append({
+                'store_name': 'No store assigned',
+                'store_code': '—',
+                'new_hire_count': by_store.get(None, 0),
+                'list_url': url_for('view_all_new_hires', store_id='none', staff_console='admin'),
+            })
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f"admin_dashboard: store rows failed: {e}")
+
+    try:
         admin_user = current_user
-        admin_name = f"{admin_user.username}"
-        
-        # Build notifications for admin (can be empty for now, or add admin-specific notifications)
         notifications = []
         
         # Add test notification for "aka" user
@@ -5594,17 +7550,13 @@ def _admin_dashboard_impl():
         
         pending_count = len([n for n in notifications if not n['is_read']])
     except Exception as e:
-        # Log error but keep counts already computed (so summary cards still show data)
         import traceback
         traceback.print_exc()
-        app.logger.error(f"Error in admin_dashboard (progress/form status): {e}")
+        app.logger.error(f"Error in admin_dashboard (notifications): {e}")
         db.session.rollback()
-        new_hires_with_progress = new_hires_with_progress if new_hires_with_progress else []
-        recent_activity = all_new_hires[:10] if all_new_hires else []
-        # form_status_data, notifications, pending_count already have defaults from above
         if not notifications:
             pending_count = 0
-    
+
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -5667,27 +7619,27 @@ def _admin_dashboard_impl():
                 align-self: flex-end;
                 margin-bottom: -40px;
             }
-            .nav-links {
+            .admin-header-page-label {
                 display: flex;
-                gap: 30px;
                 align-items: center;
+                justify-content: center;
+                flex: 1 1 auto;
+                min-width: 0;
             }
-            .nav-links a {
+            .admin-header-page-label .admin-header-title,
+            .mobile-nav .admin-header-title {
                 color: #ffffff;
-                text-decoration: none;
-                font-size: 1em;
-                font-weight: 500;
-                transition: color 0.2s;
-                padding: 5px 10px;
-                border-radius: 0.5rem;
-            }
-            .nav-links a:hover {
-                color: #FE0100;
-            }
-            .nav-links a.active {
-                color: #FE0100;
-                background: rgba(254, 1, 0, 0.1);
-                font-weight: 600;
+                font-size: 1.15em;
+                font-weight: 800;
+                font-family: 'URW Form', Arial, sans-serif;
+                letter-spacing: 0.02em;
+                padding: 0;
+                display: block;
+                margin: 0;
+                line-height: 1.2;
+                border: none;
+                background: none;
+                box-shadow: none;
             }
             .user-section {
                 display: flex;
@@ -5700,6 +7652,12 @@ def _admin_dashboard_impl():
                 cursor: pointer;
                 position: relative;
                 color: #ffffff;
+            }
+            .notification-icon .notification-bell-svg {
+                display: block;
+                width: 22px;
+                height: 22px;
+                color: #f2f5fb;
             }
             .notification-dropdown {
                 display: none;
@@ -5866,6 +7824,109 @@ def _admin_dashboard_impl():
                 font-family: 'URW Form', Arial, sans-serif;
                 color: #000000;
             }
+            .admin-dash-intro {
+                align-items: flex-start;
+                gap: 24px;
+                flex-wrap: wrap;
+            }
+            .admin-dash-intro > div {
+                flex: 1;
+                min-width: 220px;
+                position: relative;
+                z-index: 1;
+            }
+            .admin-dash-sub {
+                margin-top: 10px;
+                font-size: 0.95em;
+                color: #505050;
+                line-height: 1.45;
+                max-width: 52rem;
+            }
+            .stores-section .section-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                flex-wrap: wrap;
+                gap: 12px;
+            }
+            .stores-total {
+                font-size: 0.88rem;
+                color: #808080;
+            }
+            .stores-table-wrap {
+                position: relative;
+                z-index: 1;
+                overflow-x: auto;
+            }
+            .stores-table {
+                width: 100%;
+                border-collapse: collapse;
+            }
+            .store-row-click {
+                cursor: pointer;
+                transition: background 0.15s ease;
+            }
+            .store-row-click:hover {
+                background: rgba(0, 0, 0, 0.04);
+            }
+            .store-hire-search-wrap {
+                margin-bottom: 4px;
+            }
+            .store-hire-search-wrap label {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                padding: 0;
+                margin: -1px;
+                overflow: hidden;
+                clip: rect(0, 0, 0, 0);
+                white-space: nowrap;
+                border: 0;
+            }
+            .store-hire-search-results {
+                margin-top: 10px;
+                border-radius: 10px;
+                border: 1px solid rgba(0, 0, 0, 0.12);
+                background: rgba(255, 255, 255, 0.95);
+                max-height: 300px;
+                overflow-y: auto;
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+            }
+            .store-hire-result-item {
+                display: block;
+                padding: 10px 14px;
+                border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+                text-decoration: none;
+                color: #111;
+            }
+            .store-hire-result-item:last-child {
+                border-bottom: none;
+            }
+            .store-hire-result-item:hover {
+                background: rgba(254, 1, 0, 0.06);
+            }
+            .store-hire-result-store {
+                font-weight: 700;
+                color: #fe0100;
+                margin-top: 4px;
+                font-size: 0.92em;
+            }
+            .store-hire-result-sub {
+                font-size: 0.82em;
+                color: #555;
+                margin-top: 2px;
+            }
+            .store-hire-search-inner {
+                position: relative;
+                z-index: 2;
+                width: 100%;
+                max-width: 28rem;
+                margin-bottom: 6px;
+            }
+            .store-hire-search-input {
+                width: 100%;
+                box-sizing: border-box;
+            }
             .filter-dropdown {
                 padding: 8px 15px;
                 border: 1px solid #ddd;
@@ -5934,6 +7995,54 @@ def _admin_dashboard_impl():
             }
             .progress-item:last-child {
                 border-bottom: none;
+            }
+            .progress-list {
+                max-height: 420px;
+                overflow-y: auto;
+            }
+            .progress-overview-search {
+                flex: 1;
+                min-width: 160px;
+                max-width: 280px;
+                padding: 8px 12px;
+                font-size: 0.85em;
+                border: 1px solid #ccc;
+                border-radius: 6px;
+                font-family: inherit;
+            }
+            .progress-overview-search:focus {
+                outline: none;
+                border-color: #FE0100;
+                box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.15);
+            }
+            .progress-overview-empty {
+                display: none;
+                padding: 20px;
+                text-align: center;
+                color: #808080;
+                font-size: 0.9em;
+            }
+            .filter-dropdown:disabled {
+                opacity: 0.55;
+                cursor: not-allowed;
+                background: #f0f0f0;
+                color: #666;
+            }
+            .search-all-toggle {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 0.85em;
+                color: #333;
+                cursor: pointer;
+                user-select: none;
+                white-space: nowrap;
+            }
+            .search-all-toggle input {
+                width: 16px;
+                height: 16px;
+                cursor: pointer;
+                accent-color: #FE0100;
             }
             .progress-avatar {
                 width: 40px;
@@ -6200,7 +8309,7 @@ def _admin_dashboard_impl():
                     height: 50px;
                     margin-bottom: -25px;
                 }
-                .nav-links {
+                .admin-header-page-label {
                     display: none;
                 }
                 .mobile-menu-toggle {
@@ -6359,6 +8468,12 @@ def _admin_dashboard_impl():
                     font-size: 16px;
                     min-height: 44px;
                 }
+                .section-header .progress-overview-search {
+                    width: 100%;
+                    max-width: none;
+                    font-size: 16px;
+                    min-height: 44px;
+                }
                 .progress-item {
                     padding: 10px 0;
                 }
@@ -6368,6 +8483,126 @@ def _admin_dashboard_impl():
                     font-size: 0.9em;
                 }
             }
+            :root {
+                --bg-base: #0c1017;
+                --bg-panel: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+                --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.03) 40%, rgba(255,255,255,0.1) 74%, rgba(255,255,255,0.02) 100%);
+                --accent-red: #fe0100;
+                --text-primary: #f2f5fb;
+                --text-muted: #9ea8b8;
+                --border-soft: rgba(255,255,255,0.17);
+                --shadow-elev: 0 18px 42px rgba(0,0,0,0.36);
+            }
+            body {
+                background:
+                    radial-gradient(circle at 20% 0%, rgba(255,255,255,0.07), transparent 46%),
+                    linear-gradient(136deg, #090d14 0%, #111824 56%, #0c121d 100%);
+                color: var(--text-primary);
+            }
+            .top-header {
+                background: linear-gradient(160deg, #121821 0%, #090d14 100%);
+                border-bottom: 1px solid var(--border-soft);
+                box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            }
+            .nav-links a, .mobile-nav a, .user-dropdown { color: #dbe2f0; }
+            .nav-links a:hover, .mobile-nav a:hover { color: #ff6a6a; }
+            .admin-header-page-label .admin-header-title,
+            .mobile-nav .admin-header-title {
+                color: var(--text-primary) !important;
+            }
+            .user-dropdown:hover, .back-btn:hover { background: rgba(255,255,255,0.14); }
+            .user-icon {
+                background: linear-gradient(180deg, #ff2726 0%, #cf0000 100%);
+                box-shadow: 0 6px 16px rgba(254,1,0,0.35);
+            }
+            .notification-dropdown, .dropdown-menu {
+                background: #151b28;
+                border: 1px solid var(--border-soft);
+                box-shadow: var(--shadow-elev);
+            }
+            .notification-header {
+                background: linear-gradient(145deg, #1b2230, #121826);
+                border-bottom-color: rgba(255,255,255,0.1);
+            }
+            .notification-header h3, .dropdown-item { color: var(--text-primary); }
+            .notification-item, .dropdown-item {
+                border-bottom-color: rgba(255,255,255,0.08);
+            }
+            .notification-item:hover, .dropdown-item:hover {
+                background: rgba(255,255,255,0.06);
+            }
+            .welcome-banner, .summary-card, .section, .sidebar-section, table {
+                background: var(--bg-panel);
+                border: 1px solid var(--border-soft);
+                box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.12);
+                color: var(--text-primary);
+                position: relative;
+                overflow: hidden;
+            }
+            .welcome-banner::before, .summary-card::before, .section::before, .sidebar-section::before {
+                content: "";
+                position: absolute;
+                inset: 0;
+                background: var(--metal-sheen);
+                pointer-events: none;
+            }
+            .welcome-banner h1, .section-title, .sidebar-title, th, td {
+                color: var(--text-primary);
+            }
+            .admin-dash-sub,
+            .stores-total {
+                color: var(--text-muted);
+            }
+            .store-row-click:hover {
+                background: rgba(255, 255, 255, 0.06);
+            }
+            .store-hire-search-results {
+                border-color: rgba(255, 255, 255, 0.14);
+                background: rgba(18, 24, 38, 0.98);
+                box-shadow: var(--shadow-elev);
+            }
+            .store-hire-result-item {
+                color: var(--text-primary);
+                border-bottom-color: rgba(255, 255, 255, 0.08);
+            }
+            .store-hire-result-item:hover {
+                background: rgba(255, 255, 255, 0.06);
+            }
+            .store-hire-result-sub {
+                color: var(--text-muted);
+            }
+            .summary-content h3, .quick-link-text, .form-status-count, .form-status-name, .progress-store {
+                color: var(--text-muted);
+            }
+            .summary-content .number, .progress-percentage { color: var(--text-primary); }
+            .filter-dropdown, .progress-overview-search {
+                background: linear-gradient(150deg, rgba(255,255,255,0.09), rgba(255,255,255,0.04));
+                border: 1px solid rgba(255,255,255,0.24);
+                color: var(--text-primary);
+            }
+            .filter-dropdown:focus, .progress-overview-search:focus {
+                border-color: rgba(254,1,0,0.7);
+                box-shadow: 0 0 0 3px rgba(254,1,0,0.18);
+            }
+            .filter-dropdown:disabled {
+                background: rgba(255,255,255,0.08);
+                color: #9aa4b6;
+                border-color: rgba(255,255,255,0.15);
+            }
+            .progress-bar, .table-progress, .form-status-progress {
+                background: rgba(255,255,255,0.14);
+                border: 1px solid rgba(255,255,255,0.1);
+            }
+            .progress-fill.completed, .table-progress-fill, .form-status-fill {
+                background: linear-gradient(90deg, #ff2f2e 0%, #fe0100 100%);
+            }
+            .progress-fill.in-progress { background: linear-gradient(90deg, #ffc83d 0%, #d39a00 100%); }
+            .progress-fill.not-started { background: linear-gradient(90deg, #9fa8b7 0%, #7b8392 100%); }
+            .legend { border-top-color: rgba(255,255,255,0.15); }
+            .legend-item span, .progress-name a { color: var(--text-primary) !important; }
+            table th, table td { border-bottom-color: rgba(255,255,255,0.1); }
+            table tr:hover { background: rgba(255,255,255,0.04); }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -6377,11 +8612,11 @@ def _admin_dashboard_impl():
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
-            <div class="nav-links">
-                <a href="{{ url_for('dashboard') }}" style="background: rgba(255,255,255,0.1); padding: 8px 16px; border-radius: 4px;">User Dashboard</a>
+            <div class="admin-header-page-label">
+                <h1 class="admin-header-title">Admin Dashboard</h1>
             </div>
             <div class="mobile-nav" id="mobileNav">
-                <a href="{{ url_for('dashboard') }}">User Dashboard</a>
+                <span class="admin-header-title">Admin Dashboard</span>
             </div>
             <div class="user-section">
                 <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
@@ -6416,193 +8651,82 @@ def _admin_dashboard_impl():
                     <span>▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
-                    <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
-                    <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    {{ staff_console_dropdown_links }}
                 </div>
             </div>
         </div>
         
         <div class="main-container">
             <div class="main-content">
-                <div class="welcome-banner">
-                    <h1>Welcome to the Admin Dashboard</h1>
-                    <select class="filter-dropdown">
-                        <option>Last 30 Days</option>
-                        <option>Last 7 Days</option>
-                        <option>Last 90 Days</option>
-                        <option>All Time</option>
-                    </select>
-                </div>
-                
-                <div class="summary-cards">
-                    <div class="summary-card" style="cursor: pointer;" onclick="window.location.href='{{ url_for('view_all_new_hires') }}'">
-                        <div class="summary-icon blue">👥</div>
-                        <div class="summary-content">
-                            <h3>New Hires</h3>
-                            <div class="number">{{ total_new_hires }}</div>
-                        </div>
-                    </div>
-                    <div class="summary-card">
-                        <div class="summary-icon green">📋</div>
-                        <div class="summary-content">
-                            <h3>Forms Completed</h3>
-                            <div class="number">{{ forms_completed }}</div>
-                        </div>
-                    </div>
-                    <div class="summary-card" style="cursor: pointer;" onclick="window.location.href='{{ url_for('view_user_checklists') }}'">
-                        <div class="summary-icon blue">✅</div>
-                        <div class="summary-content">
-                            <h3>Onboarding Checklists</h3>
-                            <div class="number">{{ total_checklist_items }}</div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="section">
+                <div class="section stores-section">
                     <div class="section-header">
-                        <h2 class="section-title">Progress Overview</h2>
-                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                            <select class="filter-dropdown" style="font-size: 0.85em;" id="storeFilter" onchange="window.location.href='{{ url_for('admin_dashboard') }}' + (this.value ? '?store_id=' + encodeURIComponent(this.value) : '');">
-                                <option value="" {{ 'selected' if not store_filter else '' }}>All Stores</option>
-                                <option value="none" {{ 'selected' if store_filter == 'none' else '' }}>No store</option>
-                                {% for store in all_stores %}
-                                <option value="{{ store.id }}" {{ 'selected' if store_filter == store.id|string else '' }}>{{ store.name }}</option>
-                                {% endfor %}
-                            </select>
-                            <select class="filter-dropdown" style="font-size: 0.85em;">
-                                <option>Last 30 Days</option>
-                                <option>Last 7 Days</option>
-                                <option>Last 90 Days</option>
-                            </select>
-                        </div>
+                        <h2 class="section-title">Stores</h2>
+                        <span class="stores-total">{{ total_active_new_hires }} active new hire{% if total_active_new_hires != 1 %}s{% endif %} total</span>
                     </div>
-                    <div class="progress-list">
-                        {% for item in new_hires_with_progress[:7] %}
-                        <div class="progress-item">
-                            <div class="progress-avatar">{{ item.new_hire.first_name[0].upper() if item.new_hire.first_name else 'N' }}</div>
-                            <div class="progress-info">
-                                <div class="progress-name"><a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" style="color: #000000; text-decoration: none; cursor: pointer;">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a></div>
-                                <div class="progress-bar">
-                                    {% if item.progress == 100 %}
-                                    <div class="progress-fill completed" style="width: 100%;"></div>
-                                    {% elif item.progress > 0 %}
-                                    <div class="progress-fill in-progress" style="width: {{ item.progress }}%;"></div>
-                                    {% else %}
-                                    <div class="progress-fill not-started" style="width: 0%;"></div>
-                                    {% endif %}
-                                </div>
-                            </div>
-                            <div class="progress-store" style="min-width: 100px; font-size: 0.85em; color: #555;">{{ item.store_name }}</div>
-                            <div class="progress-percentage">{{ item.progress }}%</div>
+                    <div class="store-hire-search-inner">
+                        <div class="store-hire-search-wrap">
+                            <label for="storeHireSearch">Find new hire by name, username, or email</label>
+                            <input type="search" id="storeHireSearch" class="store-hire-search-input filter-dropdown" autocomplete="off" placeholder="Search new hires by name…">
                         </div>
-                        {% endfor %}
+                        <div id="storeHireSearchResults" class="store-hire-search-results" role="region" aria-label="New hire search results" hidden></div>
                     </div>
-                    <div class="legend">
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #2196f3;"></div>
-                            <span>Not Started</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #ff9800;"></div>
-                            <span>In Progress</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #4caf50;"></div>
-                            <span>Completed</span>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="section">
-                    <h2 class="section-title">Recent Activity</h2>
-                    <table>
+                    {% if store_dashboard_rows %}
+                    <div class="stores-table-wrap">
+                    <table class="stores-table">
                         <thead>
                             <tr>
-                                <th>Name</th>
-                                <th>Position</th>
-                                <th>Department</th>
-                                <th>Progress</th>
+                                <th>Store</th>
+                                <th>Code</th>
+                                <th style="text-align: right;">New hires</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {% for item in new_hires_with_progress[:6] %}
-                            <tr>
-                                <td data-label="Name"><a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" style="color: #333; text-decoration: none; font-weight: 600;">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a></td>
-                                <td data-label="Position">{{ item.new_hire.position or '-' }}</td>
-                                <td data-label="Department">{{ item.new_hire.department or '-' }}</td>
-                                <td data-label="Progress">
-                                    <div class="table-progress">
-                                        {% if item.progress > 0 %}
-                                        <div class="table-progress-fill" style="width: {{ item.progress }}%;"></div>
-                                        {% else %}
-                                        <div class="table-progress-fill" style="width: 0%;"></div>
-                                        {% endif %}
-                                    </div>
-                                    <span style="font-size: 0.85em; color: #808080; margin-left: 8px;">{{ item.progress }}%</span>
-                                </td>
+                            {% for row in store_dashboard_rows %}
+                            <tr class="store-row-click" role="link" tabindex="0" onclick="window.location.href='{{ row.list_url }}'" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.location.href='{{ row.list_url }}';}">
+                                <td><strong>{{ row.store_name }}</strong></td>
+                                <td>{{ row.store_code }}</td>
+                                <td style="text-align: right;">{{ row.new_hire_count }}</td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
+                    </div>
+                    {% else %}
+                    <p style="padding: 16px 0; color: #808080;">No stores configured yet. Use <strong>Manage Stores</strong> in Quick Links to add one.</p>
+                    {% endif %}
                 </div>
-                
             </div>
             
             <div class="sidebar">
                 <div class="sidebar-section">
                     <div class="sidebar-header">
-                        <h3 class="sidebar-title">Form Status</h3>
-                    </div>
-                    <div class="form-status-list">
-                        {% if form_status_data %}
-                            {% for form in form_status_data %}
-                            <a href="{{ url_for('view_form_signatures', doc_id=form.doc_id) }}" style="text-decoration: none; color: inherit; display: block;">
-                                <div class="form-status-item" style="cursor: pointer; transition: background 0.2s;">
-                                    <span class="form-status-name">{{ form.name }}</span>
-                                    <div class="form-status-progress">
-                                        {% if form.percentage > 0 %}
-                                        <div class="form-status-fill" style="width: {{ form.percentage }}%;"></div>
-                                        {% else %}
-                                        <span style="color: #666; font-size: 0.75em;">0%</span>
-                                        {% endif %}
-                                    </div>
-                                    <span class="form-status-count">{{ form.signed }}/{{ form.total }}</span>
-                                </div>
-                            </a>
-                            {% endfor %}
-                        {% else %}
-                            <div class="form-status-item">
-                                <span class="form-status-name" style="color: #999; font-style: italic;">No forms with signatures yet</span>
-                            </div>
-                        {% endif %}
-                    </div>
-                </div>
-                
-                <div class="sidebar-section">
-                    <div class="sidebar-header">
                         <h3 class="sidebar-title">Quick Links</h3>
                     </div>
                     <div class="quick-links-list">
-                        <a href="{{ url_for('manage_checklist') }}" class="quick-link-item" style="text-decoration: none;">
+                        <a href="{{ url_for('view_all_new_hires', staff_console='admin') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">👥</span>
+                            <span class="quick-link-text">New hires (all stores)</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
+                        <a href="{{ url_for('manage_checklist', staff_console='admin') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">📋</span>
                             <span class="quick-link-text">Onboarding Tasks</span>
                             <span class="quick-link-count">→</span>
                         </a>
-                        <a href="{{ url_for('manage_training') }}" class="quick-link-item" style="text-decoration: none;">
+                        <a href="{{ url_for('manage_training', staff_console='admin') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">▶️</span>
                             <span class="quick-link-text">Training Library</span>
                             <span class="quick-link-count">→</span>
                         </a>
                         {% if current_user.is_admin() or manager_has_permission('manage_documents') %}
-                        <a href="{{ url_for('manage_documents') }}" class="quick-link-item" style="text-decoration: none;">
+                        <a href="{{ url_for('manage_documents', staff_console='admin') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">📄</span>
                             <span class="quick-link-text">Manage Forms</span>
                             <span class="quick-link-count">→</span>
                         </a>
                         {% endif %}
                         {% if current_user.is_admin() or manager_has_permission('start_onboarding') %}
-                        <a href="{{ url_for('add_new_hire') }}" class="quick-link-item" style="text-decoration: none;">
+                        <a href="{{ url_for('add_new_hire', staff_console='admin') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">➕</span>
                             <span class="quick-link-text">Start Onboarding</span>
                             <span class="quick-link-count">→</span>
@@ -6769,7 +8893,7 @@ def _admin_dashboard_impl():
                             if (icon) {
                                 var newBadge = document.createElement('span');
                                 newBadge.id = 'notificationBadge';
-                                newBadge.className = 'notification-badge';
+                                newBadge.className = 'notification-badge notification-badge-dot';
                                 newBadge.textContent = data.count;
                                 newBadge.style.cssText = 'position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;';
                                 icon.appendChild(newBadge);
@@ -6808,19 +8932,80 @@ def _admin_dashboard_impl():
                 }
             }
         </script>
+        <script type="application/json" id="hireSearchData">{{ hire_search_rows | tojson }}</script>
+        <script>
+        (function() {
+            var raw = document.getElementById('hireSearchData');
+            var rows = [];
+            if (raw && raw.textContent) {
+                try { rows = JSON.parse(raw.textContent); } catch (e) { rows = []; }
+            }
+            var input = document.getElementById('storeHireSearch');
+            var out = document.getElementById('storeHireSearchResults');
+            if (!input || !out) return;
+            var MAX = 50;
+            function render() {
+                var q = (input.value || '').trim().toLowerCase();
+                if (!q) {
+                    out.innerHTML = '';
+                    out.hidden = true;
+                    return;
+                }
+                var matches = [];
+                for (var i = 0; i < rows.length; i++) {
+                    if (String(rows[i].search_text || '').indexOf(q) !== -1) {
+                        matches.push(rows[i]);
+                        if (matches.length >= MAX) break;
+                    }
+                }
+                out.innerHTML = '';
+                out.hidden = false;
+                if (!matches.length) {
+                    var empty = document.createElement('div');
+                    empty.className = 'store-hire-result-item';
+                    empty.style.cursor = 'default';
+                    empty.textContent = 'No matches.';
+                    out.appendChild(empty);
+                    return;
+                }
+                for (var j = 0; j < matches.length; j++) {
+                    var m = matches[j];
+                    var a = document.createElement('a');
+                    a.href = m.list_url || '#';
+                    a.className = 'store-hire-result-item';
+                    var nameEl = document.createElement('div');
+                    nameEl.textContent = m.display_name || m.username || 'Unknown';
+                    var storeEl = document.createElement('div');
+                    storeEl.className = 'store-hire-result-store';
+                    storeEl.textContent = m.store_name || '';
+                    var subEl = document.createElement('div');
+                    subEl.className = 'store-hire-result-sub';
+                    var bits = [];
+                    if (m.username) bits.push('@' + m.username);
+                    if (m.email) bits.push(m.email);
+                    subEl.textContent = bits.join(' · ');
+                    a.appendChild(nameEl);
+                    a.appendChild(storeEl);
+                    if (bits.length) a.appendChild(subEl);
+                    out.appendChild(a);
+                }
+            }
+            input.addEventListener('input', render);
+            input.addEventListener('search', render);
+        })();
+        </script>
     </body>
     </html>
-    ''', total_users=total_users, total_new_hires=total_new_hires, admin_users=admin_users,
-         forms_completed=forms_completed, total_checklist_items=total_checklist_items,
-         new_hires_with_progress=new_hires_with_progress, recent_activity=recent_activity,
-         form_status_data=form_status_data, admin_name=admin_name, pending_count=pending_count, notifications=notifications,
-         all_stores=all_stores, store_filter=request.args.get('store_id', ''))
+    ''', admin_name=admin_name, pending_count=pending_count, notifications=notifications,
+         store_dashboard_rows=store_dashboard_rows, total_active_new_hires=total_active_new_hires,
+         hire_search_rows=hire_search_rows)
 
 
 @app.route('/manager')
 @manager_required
 def manager_dashboard():
     """Manager Console: store-scoped onboarding, new hires, and documents."""
+    touch_staff_console_home('manager')
     store_id = get_current_user_store_id()
     store_name = None
     if store_id:
@@ -6845,7 +9030,8 @@ def manager_dashboard():
     except Exception:
         pass
 
-    manager_name = current_user.username if current_user else 'Manager'
+    _mgr_un = (current_user.username if current_user else '') or ''
+    manager_name = staff_header_display_name(_mgr_un) if _mgr_un else 'Manager'
     can_start = manager_has_permission('start_onboarding')
     can_documents = manager_has_permission('manage_documents')
     can_training = manager_has_permission('manage_training')
@@ -6926,6 +9112,7 @@ def manager_dashboard():
             .dropdown-menu.show { display: block; }
             .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
             .dropdown-item:hover { background: #f5f5f5; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -6939,12 +9126,7 @@ def manager_dashboard():
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('managerUserDropdown').classList.toggle('show');">
                     <div class="user-icon">{{ (manager_name or 'M')[0].upper() }}</div>
                     <div class="dropdown-menu" id="managerUserDropdown">
-                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
-                        {% if current_user.is_admin() %}
-                        <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                        {% endif %}
-                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                        {{ staff_console_dropdown_links }}
                     </div>
                 </div>
             </div>
@@ -6962,33 +9144,33 @@ def manager_dashboard():
             </div>
             <div class="cards">
                 {% if can_start %}
-                <a href="{{ url_for('add_new_hire') }}" class="card">
+                <a href="{{ url_for('add_new_hire', staff_console='manager') }}" class="card">
                     <h3>Start onboarding</h3>
                     <div class="number">+</div>
                     <p class="hint">Add a new hire for this store and assign training & documents.</p>
                 </a>
                 {% endif %}
-                <a href="{{ url_for('view_all_new_hires') }}" class="card">
+                <a href="{{ manager_new_hires_list_url() }}" class="card">
                     <h3>New hires</h3>
                     <div class="number">{{ new_hires_count }}</div>
                     <p class="hint">View and track onboarding progress for this store.</p>
                 </a>
                 {% if can_documents %}
-                <a href="{{ url_for('manage_documents') }}" class="card">
+                <a href="{{ url_for('manage_documents', staff_console='manager') }}" class="card">
                     <h3>Forms / documents</h3>
                     <div class="number">{{ documents_count }}</div>
                     <p class="hint">Forms visible to this store. Upload and manage visibility.</p>
                 </a>
                 {% endif %}
                 {% if can_training %}
-                <a href="{{ url_for('manage_training') }}" class="card">
+                <a href="{{ url_for('manage_training', staff_console='manager') }}" class="card">
                     <h3>Training library</h3>
                     <div class="number">→</div>
                     <p class="hint">Manage training videos for onboarding.</p>
                 </a>
                 {% endif %}
                 {% if can_checklist or can_user_checklists %}
-                <a href="{{ url_for('view_user_checklists') }}" class="card">
+                <a href="{{ url_for('view_user_checklists', staff_console='manager') }}" class="card">
                     <h3>Onboarding checklists</h3>
                     <div class="number">→</div>
                     <p class="hint">View checklist progress for new hires at your store.</p>
@@ -6998,7 +9180,7 @@ def manager_dashboard():
         </div>
     </body>
     </html>
-    ''', store_name=store_name, new_hires_count=new_hires_count, documents_count=documents_count,
+    ''', store_id=store_id, store_name=store_name, new_hires_count=new_hires_count, documents_count=documents_count,
          manager_name=manager_name, can_start=can_start, can_documents=can_documents,
          can_training=can_training, can_checklist=can_checklist, can_user_checklists=can_user_checklists)
 
@@ -7045,20 +9227,18 @@ def settings_page():
             .btn-secondary { background: #6c757d; color: white; }
             p { margin-bottom: 12px; color: #444; }
             ul { margin-left: 20px; margin-bottom: 12px; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>⚙️ Settings</h1>
             <div class="header-right">
-                <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('settingsUserDropdown').classList.toggle('show');">
                     <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
                     <div class="dropdown-menu" id="settingsUserDropdown">
-                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
-                        {% if current_user.is_admin() %}<a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>{% endif %}
-                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                        {{ staff_console_dropdown_links }}
                     </div>
                 </div>
             </div>
@@ -7175,6 +9355,7 @@ def settings_edit_store(store_id):
             .btn { display: inline-block; padding: 10px 20px; border-radius: 0.35rem; border: none; cursor: pointer; font-size: 1em; text-decoration: none; }
             .btn-primary { background: #FE0100; color: white; }
             .btn-secondary { background: #6c757d; color: white; margin-left: 8px; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -7302,20 +9483,18 @@ def manage_stores():
             .btn-secondary:hover { background: #5a6268; color: white; }
             .count { font-weight: 600; color: #333; }
             .count-muted { color: #666; font-weight: normal; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>🏪 Manage Stores</h1>
             <div class="header-right">
-                <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('manageStoresUserDropdown').classList.toggle('show');">
                     <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
                     <div class="dropdown-menu" id="manageStoresUserDropdown">
-                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
-                        {% if current_user.is_admin() %}<a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>{% endif %}
-                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                        {{ staff_console_dropdown_links }}
                     </div>
                 </div>
             </div>
@@ -7395,6 +9574,7 @@ def store_detail(store_id):
             .btn-primary { background: #FE0100; color: white; }
             .btn-secondary { background: #6c757d; color: white; }
             .empty { color: #999; font-style: italic; padding: 12px 0; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -7569,20 +9749,18 @@ def manage_users():
             .flash.success { background: #d4edda; color: #155724; }
             .flash.error { background: #f8d7da; color: #721c24; }
             @media (max-width: 768px) { .form-row { flex-direction: column; } .form-group { min-width: 100%; } th, td { padding: 10px; font-size: 0.9em; } .actions-cell { flex-direction: column; } }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>👥 Manage Users</h1>
             <div class="header-right">
-                <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('manageUsersUserDropdown').classList.toggle('show');">
                     <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
                     <div class="dropdown-menu" id="manageUsersUserDropdown">
-                        <a href="{{ url_for('dashboard') }}" class="dropdown-item">User Dashboard</a>
-                        {% if current_user.is_admin() %}<a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>{% endif %}
-                        <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                        <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                        {{ staff_console_dropdown_links }}
                     </div>
                 </div>
             </div>
@@ -7661,7 +9839,8 @@ def manage_users():
                     </div>
                     <div class="form-group">
                         <label>Email</label>
-                        <input type="email" name="email" id="editUserEmail" placeholder="user@example.com">
+                        <input type="email" name="email" id="editUserEmail" readonly style="background: #f0f0f0;" placeholder="Email is locked after creation">
+                        <small style="color: #666;">Login email is locked after account creation.</small>
                     </div>
                     <div class="form-group">
                         <label>Full name</label>
@@ -7802,13 +9981,16 @@ def users_update(user_id):
     if not user:
         flash('User not found.', 'error')
         return redirect(url_for('manage_users'))
-    email = (request.form.get('email') or '').strip()
+    email = normalize_email(request.form.get('email'))
     full_name = (request.form.get('full_name') or '').strip()
     store_id_raw = request.form.get('store_id') or ''
     role = (request.form.get('role') or 'user').strip().lower()
     if role not in ('user', 'manager'):
         role = 'user'
-    user.email = email or None
+    current_email = normalize_email(getattr(user, 'email', None))
+    if email != current_email:
+        flash('Email is locked after account creation. Use username/password reset only.', 'error')
+        return redirect(url_for('manage_users'))
     user.full_name = full_name or None
     try:
         user.store_id = int(store_id_raw) if store_id_raw.isdigit() else None
@@ -7958,12 +10140,13 @@ def manage_roles():
             .form-group label { display: block; margin-bottom: 6px; font-weight: 600; }
             .form-group input[type="text"] { width: 100%; max-width: 300px; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem; }
             .role-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>🎭 Manage Roles</h1>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         <div class="container">
             <div class="panel">
@@ -8109,6 +10292,7 @@ def role_default_documents(role_id):
             .doc-item { padding: 12px 0; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 12px; }
             .doc-item:last-child { border-bottom: none; }
             .doc-item input[type="checkbox"] { width: 18px; height: 18px; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -8315,12 +10499,13 @@ def manage_admins():
                 th, td { padding: 10px; font-size: 0.9em; }
                 .actions-cell { flex-direction: column; }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>🛡️ Manage Admins</h1>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -8411,7 +10596,8 @@ def manage_admins():
                     </div>
                     <div class="form-group">
                         <label>Email</label>
-                        <input type="email" name="email" id="editEmail" placeholder="admin@example.com">
+                        <input type="email" name="email" id="editEmail" readonly style="background: #f0f0f0;" placeholder="Email is locked after creation">
+                        <small style="color: #666;">Login email is locked after account creation.</small>
                     </div>
                     <div class="form-group">
                         <label>Full name</label>
@@ -8512,7 +10698,7 @@ def manage_admins():
 def manage_admins_add():
     """Add a new admin user"""
     username = (request.form.get('username') or '').strip()
-    email = (request.form.get('email') or '').strip()
+    email = normalize_email(request.form.get('email'))
     password = (request.form.get('password') or '').strip()
     full_name = (request.form.get('full_name') or '').strip()
 
@@ -8526,6 +10712,9 @@ def manage_admins_add():
     existing = UserModel.query.filter_by(username=username).first()
     if existing:
         flash(f'User "{username}" already exists. Use Edit or Make Admin from Manage Users.', 'error')
+        return redirect(url_for('manage_admins'))
+    if email_in_use_by_other_user(email):
+        flash(f'Email "{email}" is already in use by another account.', 'error')
         return redirect(url_for('manage_admins'))
 
     try:
@@ -8554,9 +10743,12 @@ def manage_admins_update(user_id):
         flash('Admin not found.', 'error')
         return redirect(url_for('manage_admins'))
 
-    email = (request.form.get('email') or '').strip()
+    email = normalize_email(request.form.get('email'))
     full_name = (request.form.get('full_name') or '').strip()
-    user.email = email or None
+    current_email = normalize_email(getattr(user, 'email', None))
+    if email != current_email:
+        flash('Email is locked after account creation. Use username/password reset only.', 'error')
+        return redirect(url_for('manage_admins'))
     user.full_name = full_name or None
     try:
         db.session.commit()
@@ -8639,7 +10831,7 @@ def manage_documents():
             except Exception as alter_e:
                 db.session.rollback()
                 flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL;', 'error')
-                return redirect(url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard'))
+                return redirect(staff_console_home_url())
             if current_user.is_manager() and get_current_user_store_id() is not None:
                 sid = get_current_user_store_id()
                 documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
@@ -9206,6 +11398,7 @@ def manage_documents():
                     height: 50vh !important;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -9213,7 +11406,7 @@ def manage_documents():
             <div class="header-content">
                 <h1>📄 Manage Documents</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -9937,6 +12130,7 @@ def rename_document(doc_id):
             .btn-secondary { background: #6c757d; }
             .btn-secondary:hover { background: #5a6268; color: white; }
             .file-name { color: #666; font-size: 0.9em; margin-top: 8px; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -10253,6 +12447,7 @@ def set_signature_fields(doc_id):
                 margin-bottom: 5px;
                 font-size: 0.9em;
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -11739,6 +13934,7 @@ def assign_document(doc_id):
                     max-height: 250px;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -12047,6 +14243,7 @@ def _view_documents_impl():
     <html>
     <head>
         <title>Documents - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -12437,19 +14634,21 @@ def _view_documents_impl():
                     padding: 12px;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
-    <body>
+    <body class="user-app-shell">
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                <span class="logo-text">Ziebart Onboarding</span>
+                <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+                <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
-                <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('view_documents') }}" class="nav-tab-active">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
             </div>
@@ -12463,15 +14662,11 @@ def _view_documents_impl():
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
                     <div class="user-icon">{{ user_first_name[0].upper() if user_first_name else 'U' }}</div>
-                    <span>{{ user_full_name }}</span>
-                    <span>▼</span>
+                    <span class="user-dropdown-label">{{ user_full_name }}</span>
+                    <span class="user-dropdown-caret" aria-hidden="true">▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
-                    <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
-                    {% if is_admin %}
-                    <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                    {% endif %}
-                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    {{ staff_console_dropdown_links }}
                 </div>
             </div>
         </div>
@@ -12567,6 +14762,7 @@ def _view_documents_impl():
                 }
             }
         </script>
+        {{ user_mobile_bottom_nav }}
     </body>
     </html>
     ''', is_admin=is_admin, user_first_name=user_first_name, user_full_name=user_full_name, documents=documents)
@@ -13513,6 +15709,7 @@ def _serve_sign_document_page(doc_id):
                     padding: 10px;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -14534,9 +16731,12 @@ def submit_signature(doc_id):
                 pdf_hash = calculate_pdf_hash(document.file_path)
                 sig_to_embed.signature_hash = pdf_hash
         else:
-            # Image signature - don't embed into original, just save to database
-            # The signature will be displayed as an overlay when viewing
-            success, message = True, "Signature saved to database"
+            # Image signature - embed into the PDF so it appears on the file (download/print)
+            img_b64 = (signature_image or '').split(',')[1] if ',' in (signature_image or '') else signature_image
+            if img_b64:
+                success, message = embed_signature_in_pdf(document, signature_field, img_b64)
+            else:
+                success, message = True, "Signature saved to database"
         
         if not success:
             db.session.rollback()
@@ -14571,6 +16771,33 @@ def submit_signature(doc_id):
                 task.completed_at = datetime.utcnow()
             
             db.session.commit()
+
+            # Email a signed copy to the user
+            try:
+                to_email = get_email_for_username(current_user.username)
+                if to_email and document.file_path:
+                    pdf_path = Path(document.file_path) if os.path.isabs(document.file_path) else (BASE_DIR / document.file_path)
+                    if pdf_path.exists():
+                        with open(pdf_path, 'rb') as f:
+                            pdf_bytes = f.read()
+                        doc_name = (document.display_name or document.original_filename or 'document').strip()
+                        if not doc_name.lower().endswith('.pdf'):
+                            doc_name += '.pdf'
+                        safe_name = "".join(c for c in doc_name if c.isalnum() or c in ' ._-').strip() or 'signed_document.pdf'
+                        subject = f"Your signed copy: {doc_name}"
+                        body_html = f"""
+                        <p>Hello,</p>
+                        <p>Please find your signed copy of <strong>{doc_name}</strong> attached.</p>
+                        <p>You completed signing this document in the Ziebart Onboarding portal.</p>
+                        <p>Thank you,<br>Onboarding Team</p>
+                        """
+                        if send_email_with_attachment(to_email, subject, body_html, safe_name, pdf_bytes):
+                            app.logger.info(f"Sent signed PDF to {to_email} for document {doc_id}")
+                        else:
+                            app.logger.warning(f"Could not email signed PDF to {to_email}")
+            except Exception as e:
+                app.logger.warning(f"Failed to email signed copy: {e}")
+                _log_exception_to_file(e)
         
         return jsonify({'success': True, 'message': 'Signature saved and embedded in PDF'})
         
@@ -15247,6 +17474,7 @@ def view_signed_documents(doc_id):
                     padding: 15px;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -15678,6 +17906,7 @@ def view_form_signatures(doc_id):
                     font-size: 0.8em;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -15686,7 +17915,7 @@ def view_form_signatures(doc_id):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -16042,13 +18271,13 @@ def view_new_hire_details(username):
         new_hire = NewHire.query.filter_by(username=username).first()
         if not new_hire:
             flash('New hire not found.', 'error')
-            return redirect(url_for('view_all_new_hires') if current_user.is_manager() and not current_user.is_admin() else url_for('admin_dashboard'))
+            return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(staff_console_home_url())
         # Managers (non-admin) can only view new hires that appear on their store's list; admins can view all
         if current_user.is_manager() and not current_user.is_admin():
             store_id = get_current_user_store_id()
             if store_id is None:
                 flash('You can only view new hires at your store.', 'error')
-                return redirect(url_for('view_all_new_hires'))
+                return redirect(manager_new_hires_list_url())
             allowed = NewHire.query.filter(
                 NewHire.status != 'removed',
                 NewHire.store_id == store_id,
@@ -16056,7 +18285,7 @@ def view_new_hire_details(username):
             ).first()
             if not allowed:
                 flash('You can only view new hires at your store.', 'error')
-                return redirect(url_for('view_all_new_hires'))
+                return redirect(manager_new_hires_list_url())
         
         # Get training video progress and quiz results
         required_videos = list(new_hire.required_training_videos)
@@ -16126,17 +18355,23 @@ def view_new_hire_details(username):
             # If there's an error getting tasks, use empty list
             user_tasks = []
         
-        # Get user account (for Cancel / Restore access)
+        # Get user account (for Cancel / Restore access); revoke date normalized like login check
         user_record = None
         user_is_revoked = False
         try:
             user_record = UserModel.query.filter_by(username=username).first()
             if user_record:
-                from datetime import date
-                revoked_at = getattr(user_record, 'access_revoked_at', None)
-                user_is_revoked = bool(revoked_at is not None and date.today() >= revoked_at)
+                from datetime import date as _detail_today
+                _ur = _access_revoke_calendar_date(getattr(user_record, 'access_revoked_at', None))
+                user_is_revoked = bool(_ur is not None and _detail_today.today() >= _ur)
         except Exception:
             pass
+        
+        all_stores = []
+        try:
+            all_stores = Store.query.order_by(Store.name).all()
+        except Exception:
+            all_stores = []
         
         return render_template_string('''
     <!DOCTYPE html>
@@ -16505,6 +18740,7 @@ def view_new_hire_details(username):
                     font-size: 0.8em;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -16513,7 +18749,7 @@ def view_new_hire_details(username):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -16546,7 +18782,10 @@ def view_new_hire_details(username):
                         </tr>
                         <tr>
                             <td>Email</td>
-                            <td><input type="email" name="email" value="{{ new_hire.email or '' }}" placeholder="Not set"></td>
+                            <td>
+                                <input type="email" name="email" value="{{ new_hire.email or '' }}" readonly style="background: #f0f0f0;" placeholder="Not set">
+                                <small style="color: #666;">Login email is locked after account creation.</small>
+                            </td>
                         </tr>
                         <tr>
                             <td>Department</td>
@@ -16557,8 +18796,23 @@ def view_new_hire_details(username):
                             <td><input type="text" name="position" value="{{ new_hire.position or '' }}" placeholder="Not set"></td>
                         </tr>
                         <tr>
+                            <td>Store</td>
+                            <td>
+                                <select name="store_id" aria-label="Store location">
+                                    <option value="" {% if not new_hire.store_id %}selected{% endif %}>— None —</option>
+                                    {% for store in all_stores %}
+                                    <option value="{{ store.id }}" {% if new_hire.store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
                             <td>Start Date</td>
                             <td><input type="date" name="start_date" value="{{ new_hire.start_date.strftime('%Y-%m-%d') if new_hire.start_date else '' }}"></td>
+                        </tr>
+                        <tr>
+                            <td>Active?</td>
+                            <td><div class="info-value" id="newHireLoginActive">{% if user_record and not user_is_revoked %}Yes{% else %}No{% endif %}</div></td>
                         </tr>
                         <tr>
                             <td>Status</td>
@@ -16574,22 +18828,24 @@ def view_new_hire_details(username):
                     </table>
                     <div style="margin-top: 25px; text-align: center;">
                         <button type="submit" class="btn" style="background: rgba(255,255,255,0.2); border: 2px solid white; font-size: 1.1em; padding: 12px 30px;">💾 Save Changes</button>
-                        {% if new_hire.status != 'removed' %}
-                        {% if user_record and user_record.role != 'admin' %}
-                        {% if user_is_revoked %}
-                        <form method="POST" action="{{ url_for('new_hire_restore_access', username=username) }}" style="display: inline;" onsubmit="return confirm('Restore access for {{ username }}? They will be able to log in again.');">
-                            <button type="submit" class="btn" style="background: #28a745; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin-left: 10px;">Restore access</button>
-                        </form>
-                        {% else %}
-                        <form method="POST" action="{{ url_for('new_hire_cancel_access', username=username) }}" style="display: inline;" onsubmit="return confirm('Cancel access for {{ username }}? They will no longer be able to log in. You can restore access later from here or Manage Users.');">
-                            <button type="submit" class="btn" style="background: #dc3545; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin-left: 10px;">Cancel access</button>
-                        </form>
-                        {% endif %}
-                        {% endif %}
-                        <a href="{{ url_for('remove_new_hire_user', username=username) }}" class="btn" style="background: #333; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin-left: 10px;">Remove user</a>
-                        {% endif %}
                     </div>
                 </form>
+                <div style="margin-top: 18px; text-align: center;">
+                    {% if new_hire.status != 'removed' %}
+                    {% if user_record and user_record.role != 'admin' %}
+                    {% if user_is_revoked %}
+                    <form method="POST" action="{{ url_for('new_hire_restore_access', username=username) }}" style="display: inline;" onsubmit="return confirm('Restore access for {{ username }}? They will be able to log in again.');">
+                        <button type="submit" class="btn" style="background: #28a745; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin: 4px;">Restore access</button>
+                    </form>
+                    {% else %}
+                    <form method="POST" action="{{ url_for('new_hire_cancel_access', username=username) }}" style="display: inline;" onsubmit="return confirm('Cancel access for {{ username }}? They will no longer be able to log in. You can restore access later from here or Manage Users.');">
+                        <button type="submit" class="btn" style="background: #dc3545; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin: 4px;">Cancel access</button>
+                    </form>
+                    {% endif %}
+                    {% endif %}
+                    <a href="{{ url_for('remove_new_hire_user', username=username) }}" class="btn" style="background: #333; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin: 4px; display: inline-block;">Remove user</a>
+                    {% endif %}
+                </div>
             </div>
             
             <div class="section">
@@ -16703,14 +18959,15 @@ def view_new_hire_details(username):
     </body>
     </html>
     ''', new_hire=new_hire, video_progress=video_progress, signed_documents=signed_documents, 
-         user_tasks=user_tasks, username=username, user_record=user_record, user_is_revoked=user_is_revoked)
+         user_tasks=user_tasks, username=username, user_record=user_record, user_is_revoked=user_is_revoked,
+         all_stores=all_stores)
     except Exception as e:
         # Log the error for debugging
         import traceback
         app.logger.error(f'Error in view_new_hire_details for {username}: {str(e)}')
         app.logger.error(traceback.format_exc())
         flash(f'Error loading new hire details: {str(e)}', 'error')
-        return redirect(url_for('view_all_new_hires') if current_user.is_manager() else url_for('admin_dashboard'))
+        return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(staff_console_home_url())
 
 
 @app.route('/admin/tasks/<int:task_id>/remove', methods=['POST'])
@@ -16740,7 +18997,7 @@ def nudge_user_task(username, task_id):
     """Send an email nudge to the user reminding them to complete the task. Admin or manager (store) only. Only for pending tasks."""
     if not _manager_can_act_on_new_hire(username):
         flash('You do not have permission to nudge this user.', 'error')
-        return redirect(url_for('view_all_new_hires') if current_user.is_manager() and not current_user.is_admin() else url_for('admin_dashboard'))
+        return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(staff_console_home_url())
     task = UserTask.query.filter_by(id=task_id, username=username).first()
     if not task:
         flash('Task not found.', 'error')
@@ -16762,14 +19019,26 @@ def nudge_user_task(username, task_id):
         return redirect(url_for('view_new_hire_details', username=username))
     task_title = task.task_title or 'Your assigned task'
     subject = f'Reminder: Complete your onboarding task – {task_title}'
+    tasks_link = onboarding_tasks_url()
     body_html = f'''
     <p>Hello,</p>
     <p>This is a reminder that the following task <strong>needs to be completed to continue onboarding</strong>:</p>
     <p><strong>{task_title}</strong></p>
     <p>Please log in to the onboarding portal and complete this task at your earliest convenience.</p>
+    <p><a href="{tasks_link}">Open your onboarding tasks</a></p>
+    <p>If the button does not work, copy and paste this link into your browser:<br>{tasks_link}</p>
     <p>Thank you,<br>Onboarding Team</p>
     '''
-    if send_email(to_email, subject, body_html):
+    body_text = (
+        "Hello,\n\n"
+        "This is a reminder that the following task needs to be completed to continue onboarding:\n"
+        f"{task_title}\n\n"
+        "Open your onboarding tasks here:\n"
+        f"{tasks_link}\n\n"
+        "Thank you,\n"
+        "Onboarding Team"
+    )
+    if send_email(to_email, subject, body_html, body_text=body_text):
         flash(f'Nudge email sent to {to_email} for task "{task_title}".', 'success')
     else:
         flash('Email could not be sent. Check mail configuration.', 'error')
@@ -16802,12 +19071,24 @@ def update_new_hire_details(username):
     new_hire = NewHire.query.filter_by(username=username).first()
     if not new_hire:
         flash('New hire not found.', 'error')
-        return redirect(url_for('view_all_new_hires') if current_user.is_manager() else url_for('admin_dashboard'))
+        return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(staff_console_home_url())
     if not _manager_can_act_on_new_hire(username):
         flash('You can only update new hires at your store.', 'error')
-        return redirect(url_for('view_all_new_hires'))
+        return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(url_for('view_all_new_hires', staff_console='admin'))
     
     try:
+        store_raw = (request.form.get('store_id') or '').strip()
+        new_store_id = None
+        if store_raw.isdigit():
+            sid_int = int(store_raw)
+            if Store.query.get(sid_int):
+                new_store_id = sid_int
+        if not current_user.is_admin():
+            mgr_sid = get_current_user_store_id()
+            if mgr_sid is not None and new_store_id is not None and new_store_id != mgr_sid:
+                flash('Managers can only assign this employee to their own store or leave store unset.', 'error')
+                return redirect(url_for('view_new_hire_details', username=username))
+
         # Update first name and last name (required on model; keep existing if blank)
         first_name = request.form.get('first_name', '').strip() or (new_hire.first_name or '')
         last_name = request.form.get('last_name', '').strip() or (new_hire.last_name or '')
@@ -16816,10 +19097,12 @@ def update_new_hire_details(username):
         if last_name:
             new_hire.last_name = last_name
 
-        # Update email
-        email = request.form.get('email', '').strip()
-        if email:
-            new_hire.email = email
+        # Email is immutable after account creation.
+        submitted_email = normalize_email(request.form.get('email'))
+        current_new_hire_email = normalize_email(getattr(new_hire, 'email', None))
+        if submitted_email != current_new_hire_email:
+            flash('Email is locked after account creation. Use password reset for access issues.', 'error')
+            return redirect(url_for('view_new_hire_details', username=username))
         
         # Update department
         department = request.form.get('department', '').strip()
@@ -16850,6 +19133,11 @@ def update_new_hire_details(username):
         status = request.form.get('status', 'pending').strip()
         if status in ['pending', 'active', 'completed', 'removed']:
             new_hire.status = status
+
+        new_hire.store_id = new_store_id
+        user_row = UserModel.query.filter_by(username=username).first()
+        if user_row is not None:
+            user_row.store_id = new_store_id
         
         db.session.commit()
         flash('New hire details updated successfully.', 'success')
@@ -16868,7 +19156,7 @@ def new_hire_cancel_access(username):
         abort(403)
     if not _manager_can_act_on_new_hire(username):
         flash('You can only revoke access for new hires at your store.', 'error')
-        return redirect(url_for('view_all_new_hires'))
+        return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(url_for('view_all_new_hires', staff_console='admin'))
     user = UserModel.query.filter_by(username=username).first()
     if not user:
         flash('No login account found for this user.', 'error')
@@ -16880,6 +19168,10 @@ def new_hire_cancel_access(username):
         flash('You cannot revoke your own access.', 'error')
         return redirect(url_for('view_new_hire_details', username=username))
     from datetime import date
+    _already = _access_revoke_calendar_date(getattr(user, 'access_revoked_at', None))
+    if _already is not None and date.today() >= _already:
+        flash('Access is already cancelled for this user. Use Restore access if you want them to log in again.', 'info')
+        return redirect(url_for('view_new_hire_details', username=username))
     try:
         user.access_revoked_at = date.today()
         db.session.commit()
@@ -16910,7 +19202,7 @@ def new_hire_restore_access(username):
         abort(403)
     if not _manager_can_act_on_new_hire(username):
         flash('You can only restore access for new hires at your store.', 'error')
-        return redirect(url_for('view_all_new_hires'))
+        return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(url_for('view_all_new_hires', staff_console='admin'))
     user = UserModel.query.filter_by(username=username).first()
     if not user:
         flash('No login account found for this user.', 'error')
@@ -16968,7 +19260,7 @@ def remove_new_hire_user(username):
         except Exception as e:
             db.session.rollback()
             flash(f'Error removing user: {str(e)}', 'error')
-        return redirect(url_for('view_all_new_hires'))
+        return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(url_for('view_all_new_hires', staff_console='admin'))
 
     # GET: show confirmation page
     no_account_msg = 'No login account exists for this new hire. You may still mark their record as removed.' if not user_record else ''
@@ -16997,6 +19289,7 @@ def remove_new_hire_user(username):
             .actions { display: flex; gap: 12px; margin-top: 20px; }
             form { display: inline; }
             .info-msg { color: #0c5460; background: #d1ecf1; padding: 10px; border-radius: 0.5rem; margin-bottom: 16px; }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -17220,6 +19513,7 @@ def manage_checklist():
             .badge-inactive {
                 background: #6c757d;
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -17227,7 +19521,7 @@ def manage_checklist():
             <div class="header-content">
                 <h1>✅ Manage New Hire Checklist</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -17461,6 +19755,7 @@ def edit_checklist_item(item_id):
                 grid-template-columns: 2fr 1fr 100px;
                 gap: 15px;
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -17812,6 +20107,7 @@ def view_checklist():
                 font-size: 0.9em;
                 margin-top: 5px;
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -17819,7 +20115,7 @@ def view_checklist():
             <div class="header-content">
                 <h1>✅ New Hire Checklist</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -18210,6 +20506,7 @@ def view_user_checklists():
                 color: #808080;
                 font-size: 0.9em;
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -18218,7 +20515,7 @@ def view_user_checklists():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -18243,7 +20540,7 @@ def view_user_checklists():
                             <h3>{{ new_hire.first_name }} {{ new_hire.last_name }}</h3>
                             <p>{{ new_hire.username }}</p>
                             {% if new_hire.department %}
-                            <p style="margin-top: 5px; color: #999;">{{ new_hire.department }}</p>
+                            <p class="user-card-dept" style="margin-top: 5px;">{{ new_hire.department }}</p>
                             {% endif %}
                         </a>
                         {% endfor %}
@@ -18517,6 +20814,7 @@ def view_user_checklist(username):
                 font-size: 0.9em;
                 margin-top: 5px;
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -19101,6 +21399,7 @@ def manage_external_links():
                     font-size: 0.8em;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -19109,7 +21408,7 @@ def manage_external_links():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -19754,6 +22053,7 @@ def edit_external_link(link_id):
                 grid-template-columns: 1fr 1fr;
                 gap: 15px;
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -20844,6 +23144,7 @@ def admin_reports():
                     font-size: 0.8em;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -20852,7 +23153,7 @@ def admin_reports():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -21235,14 +23536,15 @@ def admin_reports():
                 body { font-family: 'URW Form', Arial, sans-serif; padding: 20px; background: #f5f5f5; }
                 .error-box { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
                 .error-box strong { color: #856404; }
-            </style>
+            {{ global_theme_css|safe }}
+        </style>
         </head>
         <body>
             <div class="error-box">
                 <strong>⚠️ Reports Page Error</strong>
                 <p>There was an error loading the reports. Please refresh the page or contact support if the problem persists.</p>
             </div>
-            <p><a href="{{ url_for('admin_reports') }}">Refresh Reports</a> | <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}">Back to Dashboard</a></p>
+            <p><a href="{{ url_for('admin_reports') }}">Refresh Reports</a> | <a href="{{ url_for('admin_dashboard') }}">Back to Dashboard</a></p>
         </body>
         </html>
         ''')
@@ -21433,6 +23735,7 @@ def manage_training():
             .badge-active {
                 background: #28a745;
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -21440,7 +23743,7 @@ def manage_training():
             <div class="header-content">
                 <h1>🎓 Training Management</h1>
             </div>
-            <a href="{{ url_for('admin_dashboard') if current_user.is_admin() else url_for('manager_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
         </div>
         
         <div class="container">
@@ -21852,6 +24155,7 @@ def manage_video_quiz(video_id):
                     padding: 12px;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -22356,6 +24660,7 @@ def view_training_video(video_id):
                     padding: 10px;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
     <body>
@@ -23147,7 +25452,7 @@ def list_training_videos():
     <html>
     <head>
         <title>Harassment Training - Onboarding App</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -23461,20 +25766,22 @@ def list_training_videos():
                     padding: 1rem;
                 }
             }
+        {{ global_theme_css|safe }}
         </style>
     </head>
-    <body>
+    <body class="user-app-shell">
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
-                <span class="logo-text">Ziebart Onboarding</span>
+                <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+                <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
             </div>
             <button class="mobile-menu-toggle" onclick="toggleMobileMenu()" style="display: none; background: none; border: none; color: #ffffff; font-size: 1.5em; cursor: pointer; padding: 8px;">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
-                <a href="{{ url_for('list_training_videos') }}" class="active">Videos</a>
+                <a href="{{ url_for('list_training_videos') }}" class="nav-tab-active">Videos</a>
                 <a href="{{ url_for('profile') }}">Profile</a>
             </div>
             <div class="mobile-nav" id="mobileNav" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: #000000; flex-direction: column; padding: 20px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
@@ -23487,18 +25794,11 @@ def list_training_videos():
             <div class="user-section">
                 <div class="user-dropdown" onclick="toggleUserDropdown()">
                     <div class="user-icon">{{ user_first_name[0].upper() if user_first_name else 'U' }}</div>
-                    <span>{{ user_full_name }}</span>
-                    <span>▼</span>
+                    <span class="user-dropdown-label">{{ user_full_name }}</span>
+                    <span class="user-dropdown-caret" aria-hidden="true">▼</span>
                 </div>
                 <div class="dropdown-menu" id="userDropdown">
-                    <a href="{{ url_for('dashboard') }}" class="dropdown-item">Dashboard</a>
-                    {% if is_admin %}
-                    <a href="{{ url_for('admin_dashboard') }}" class="dropdown-item">Admin Console</a>
-                    {% endif %}
-                    {% if current_user.is_manager() %}
-                    <a href="{{ url_for('manager_dashboard') }}" class="dropdown-item">Manager Console</a>
-                    {% endif %}
-                    <a href="{{ url_for('logout') }}" class="dropdown-item">Logout</a>
+                    {{ staff_console_dropdown_links }}
                 </div>
             </div>
         </div>
@@ -23592,6 +25892,7 @@ def list_training_videos():
                 }
             }
         </script>
+        {{ user_mobile_bottom_nav }}
     </body>
     </html>
     ''', is_admin=is_admin, user_first_name=user_first_name, user_full_name=user_full_name, videos=videos, user_progress=user_progress)

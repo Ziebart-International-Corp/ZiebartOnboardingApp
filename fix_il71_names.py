@@ -3,6 +3,7 @@ Fix all il71-related names in the database: update usernames, emails, names, and
 Add a couple more il71 people. Roles: Ziebart - Detailing, Window Tinting, Rhino Lining.
 Run from project root with venv: python fix_il71_names.py
 """
+import os
 from datetime import datetime
 from app import app
 from models import (
@@ -31,7 +32,8 @@ IL71_REPLACEMENTS = [
     {"username": "rthompson", "email": "rthompson@il71.com", "first_name": "Ryan", "last_name": "Thompson", "department": "Window Tinting", "position": "Tint Technician"},
 ]
 
-DEFAULT_PASSWORD_NEW_HIRES = "Ziebart1!"  # For newly added il71 users; they can change on first login
+# For newly added il71 users (set in .env as DEFAULT_PASSWORD_NEW_HIRES if needed)
+DEFAULT_PASSWORD_NEW_HIRES = os.environ.get('DEFAULT_PASSWORD_NEW_HIRES', 'Ziebart1!')
 
 
 def is_il71_record(nh):

@@ -366,6 +366,8 @@ class UserTask(db.Model):
     assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
     notes = db.Column(db.Text)  # User notes or admin notes
+    display_order = db.Column(db.Integer, nullable=True)  # Sequence for onboarding / task list
+    depends_on_task_id = db.Column(db.Integer, db.ForeignKey('user_tasks.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

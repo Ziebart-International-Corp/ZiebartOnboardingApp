@@ -21,7 +21,7 @@ def _env_value(key: str, default: str = '') -> str:
             with open(_env_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith(key + '='):
+                    if '=' in line and line.split('=', 1)[0].strip() == key:
                         return line.split('=', 1)[1].strip().strip('"').strip("'") or default
     except Exception:
         pass
@@ -38,15 +38,15 @@ DOMAIN_NAME = os.environ.get('DOMAIN_NAME', 'YOURDOMAIN')  # e.g., 'CONTOSO'
 DOMAIN_CONTROLLER = os.environ.get('DOMAIN_CONTROLLER', None)  # Optional: specific DC
 LDAP_BASE_DN = os.environ.get('LDAP_BASE_DN', None)  # Optional: e.g., 'DC=contoso,DC=com'
 
-# Email Configuration
+# Email Configuration (read from .env file first so IIS env cannot override)
 EMAIL_DOMAIN = os.environ.get('EMAIL_DOMAIN', 'ziebart.com')  # Email domain for default email addresses
-MAIL_SERVER = os.environ.get('MAIL_SERVER', '')
-MAIL_PORT = int(os.environ.get('MAIL_PORT', '587') or 587)
-MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'true').lower() == 'true'
-MAIL_USE_SSL = os.environ.get('MAIL_USE_SSL', 'false').lower() == 'true'
-MAIL_USERNAME = os.environ.get('MAIL_USERNAME', '')
-MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD', '')
-MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER', '')
+MAIL_SERVER = _env_value('MAIL_SERVER') or os.environ.get('MAIL_SERVER', '')
+MAIL_PORT = int(_env_value('MAIL_PORT') or os.environ.get('MAIL_PORT', '587') or 587)
+MAIL_USE_TLS = (_env_value('MAIL_USE_TLS') or os.environ.get('MAIL_USE_TLS', 'true')).lower() == 'true'
+MAIL_USE_SSL = (_env_value('MAIL_USE_SSL') or os.environ.get('MAIL_USE_SSL', 'false')).lower() == 'true'
+MAIL_USERNAME = _env_value('MAIL_USERNAME') or os.environ.get('MAIL_USERNAME', '')
+MAIL_PASSWORD = _env_value('MAIL_PASSWORD') or os.environ.get('MAIL_PASSWORD', '')
+MAIL_DEFAULT_SENDER = _env_value('MAIL_DEFAULT_SENDER') or os.environ.get('MAIL_DEFAULT_SENDER', '')
 
 # Admin Configuration
 # Option 1: List of admin usernames (without domain)
