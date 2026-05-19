@@ -627,6 +627,56 @@ table tr:hover {
         background: #fe0100;
         box-shadow: 0 0 10px rgba(254, 1, 0, 0.75);
     }
+    html:has(body.user-app-shell),
+    body.user-app-shell {
+        overflow-x: hidden;
+        max-width: 100vw;
+    }
+    body.user-app-shell .main-content {
+        padding: 12px 14px 16px !important;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+    body.user-app-shell .page-title,
+    body.user-app-shell .section,
+    body.user-app-shell .task-card,
+    body.user-app-shell .document-item,
+    body.user-app-shell .training-card,
+    body.user-app-shell .documents-list,
+    body.user-app-shell .training-list {
+        min-width: 0;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+    body.user-app-shell .page-title,
+    body.user-app-shell .document-info h3,
+    body.user-app-shell .task-title,
+    body.user-app-shell .training-card h3 {
+        word-break: break-word;
+        overflow-wrap: break-word;
+    }
+    body.user-app-shell .btn,
+    body.user-app-shell .task-btn,
+    body.user-app-shell a.btn {
+        min-height: 44px;
+        box-sizing: border-box;
+    }
+    body.user-app-shell input[type="text"],
+    body.user-app-shell input[type="email"],
+    body.user-app-shell input[type="password"],
+    body.user-app-shell input[type="date"],
+    body.user-app-shell input[type="number"],
+    body.user-app-shell select,
+    body.user-app-shell textarea {
+        font-size: 16px;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+    body.user-app-shell .notification-dropdown {
+        max-width: calc(100vw - 24px) !important;
+        right: 0 !important;
+        left: auto !important;
+    }
     /* Finale + external links: compact chrome; readable message + links; main area scrolls if needed */
     html:has(body.dashboard-home-compact) {
         height: 100%;
@@ -823,6 +873,22 @@ table tr:hover {
     body.dashboard-home-compact .mobile-tab-svg {
         width: 20px !important;
         height: 20px !important;
+    }
+}
+@media (max-width: 480px) {
+    body.user-app-shell .main-content {
+        padding: 10px 12px 14px !important;
+    }
+    body.user-app-shell .section-title,
+    body.user-app-shell .page-title {
+        font-size: 1.35rem !important;
+    }
+    body.user-app-shell .section {
+        padding: 1rem !important;
+    }
+    body.user-app-shell .top-header {
+        padding-left: 10px !important;
+        padding-right: 10px !important;
     }
 }
 
@@ -3458,37 +3524,6 @@ def dashboard():
             }
             
             @media (max-width: 768px) {
-                .top-header {
-                    padding: 12px 15px;
-                    flex-wrap: wrap;
-                }
-                .logo-section {
-                    font-size: 1.1em;
-                }
-                .logo-section img {
-                    height: 60px;
-                    margin-bottom: -30px;
-                }
-                .nav-links {
-                    display: none;
-                }
-                .mobile-menu-toggle {
-                    display: block;
-                }
-                .user-section {
-                    gap: 10px;
-                }
-                .user-dropdown span:not(.user-icon) {
-                    display: none;
-                }
-                .notification-icon {
-                    font-size: 1.2em;
-                }
-                .notification-dropdown {
-                    min-width: 280px;
-                    max-width: 90vw;
-                    right: -10px;
-                }
                 .dashboard-page-wrap {
                     padding: 0 15px 20px;
                 }
@@ -3509,21 +3544,11 @@ def dashboard():
                 .dashboard-tasks-card {
                     max-height: none;
                 }
-                .sidebar-right {
-                    order: -1;
-                }
                 .welcome-section h1 {
                     font-size: 2em;
                 }
                 .welcome-section p {
                     font-size: 1em;
-                }
-                .section {
-                    padding: 1.5rem;
-                    margin-bottom: 20px;
-                }
-                .section-title {
-                    font-size: 1.3em;
                 }
                 .videos-grid {
                     grid-template-columns: 1fr;
@@ -3555,32 +3580,11 @@ def dashboard():
             }
             
             @media (max-width: 480px) {
-                .top-header {
-                    padding: 10px 12px;
-                }
-                .logo-section {
-                    font-size: 1em;
-                }
-                .logo-section img {
-                    height: 50px;
-                    margin-bottom: -25px;
-                }
                 .welcome-section h1 {
                     font-size: 1.5em;
                 }
-                .section {
-                    padding: 1rem;
-                }
-                .section-title {
-                    font-size: 1.2em;
-                }
                 .task-card {
                     padding: 15px;
-                }
-                .btn, .task-btn, .video-btn {
-                    padding: 12px 16px;
-                    font-size: 0.95em;
-                    min-height: 44px;
                 }
             }
             :root {
@@ -4968,32 +4972,6 @@ def user_tasks():
             }
             
             @media (max-width: 768px) {
-                .top-header {
-                    padding: 12px 15px;
-                    flex-wrap: wrap;
-                }
-                .logo-section {
-                    font-size: 1.1em;
-                }
-                .logo-section img {
-                    height: 60px;
-                    margin-bottom: -30px;
-                }
-                .nav-links {
-                    display: none;
-                }
-                .mobile-menu-toggle {
-                    display: block;
-                }
-                .user-section {
-                    gap: 10px;
-                }
-                .user-dropdown span:not(.user-icon) {
-                    display: none;
-                }
-                .main-content {
-                    padding: 20px 15px;
-                }
                 .page-title {
                     font-size: 2em;
                 }
@@ -5019,23 +4997,9 @@ def user_tasks():
                     width: 100%;
                     text-align: center;
                 }
-                .btn {
-                    min-height: 44px;
-                    padding: 12px 20px;
-                }
             }
             
             @media (max-width: 480px) {
-                .top-header {
-                    padding: 10px 12px;
-                }
-                .logo-section {
-                    font-size: 1em;
-                }
-                .logo-section img {
-                    height: 50px;
-                    margin-bottom: -25px;
-                }
                 .page-title {
                     font-size: 1.5em;
                 }
@@ -5583,7 +5547,13 @@ def profile():
             user_name = f"{_fn} {_ln}".strip() or current_user.username
             if not user_email or user_email == 'Not set':
                 user_email = user_new_hire.email or 'Not set'
-            user_position = user_new_hire.position
+            user_position = None
+            if getattr(user_new_hire, 'role_id', None):
+                try:
+                    _role_obj = Role.query.get(user_new_hire.role_id)
+                    user_position = _role_obj.name if _role_obj else None
+                except Exception:
+                    user_position = None
             user_start_date = user_new_hire.start_date
         if not user_name:
             user_name = current_user.username
@@ -5864,32 +5834,6 @@ def profile():
             }
             
             @media (max-width: 768px) {
-                .top-header {
-                    padding: 12px 15px;
-                    flex-wrap: wrap;
-                }
-                .logo-section {
-                    font-size: 1.1em;
-                }
-                .logo-section img {
-                    height: 60px;
-                    margin-bottom: -30px;
-                }
-                .nav-links {
-                    display: none;
-                }
-                .mobile-menu-toggle {
-                    display: block;
-                }
-                .user-section {
-                    gap: 10px;
-                }
-                .user-dropdown span:not(.user-icon) {
-                    display: none;
-                }
-                .main-content {
-                    padding: 20px 15px;
-                }
                 .profile-header {
                     padding: 30px 20px;
                 }
@@ -5899,23 +5843,14 @@ def profile():
                 .info-section {
                     padding: 20px;
                 }
-                .btn {
-                    min-height: 44px;
-                    padding: 12px 20px;
+                .profile-header .btn,
+                .info-section .btn {
+                    width: 100%;
+                    text-align: center;
                 }
             }
             
             @media (max-width: 480px) {
-                .top-header {
-                    padding: 10px 12px;
-                }
-                .logo-section {
-                    font-size: 1em;
-                }
-                .logo-section img {
-                    height: 50px;
-                    margin-bottom: -25px;
-                }
                 .profile-header {
                     padding: 20px 15px;
                 }
@@ -6145,10 +6080,53 @@ def manage_signature():
                 padding: 10px;
             }
             .preview img { max-width: 100%; max-height: 100px; object-fit: contain; }
+            @media (max-width: 768px) {
+                body.signature-manage-page {
+                    overflow-x: hidden;
+                }
+                body.signature-manage-page .header {
+                    flex-direction: column;
+                    align-items: stretch;
+                    gap: 12px;
+                    padding: max(10px, env(safe-area-inset-top, 0px)) 14px 12px;
+                }
+                body.signature-manage-page .header h1 {
+                    font-size: 1.15em;
+                }
+                body.signature-manage-page .back-btn {
+                    text-align: center;
+                    min-height: 44px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                body.signature-manage-page .container {
+                    padding: 0 12px;
+                    margin: 16px auto;
+                    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+                }
+                body.signature-manage-page .grid {
+                    grid-template-columns: 1fr;
+                }
+                body.signature-manage-page .sig-pad {
+                    height: 180px;
+                }
+                body.signature-manage-page .row .btn,
+                body.signature-manage-page .row a.btn {
+                    flex: 1 1 100%;
+                    min-height: 44px;
+                    text-align: center;
+                    font-size: 16px;
+                }
+                body.signature-manage-page input#typedName {
+                    font-size: 16px;
+                    min-height: 44px;
+                }
+            }
         {{ global_theme_css|safe }}
         </style>
     </head>
-    <body>
+    <body class="signature-manage-page">
         <div class="header">
             <h1>✍️ Manage Signature</h1>
             <a href="{{ url_for('profile') }}" class="back-btn">← Back to Profile</a>
@@ -6361,6 +6339,10 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
             q = q.filter(NewHire.store_id == int(sp))
     all_new_hires = q.order_by(NewHire.created_at.desc()).all()
     new_hires_with_progress = []
+    try:
+        role_name_by_id = {r.id: r.name for r in Role.query.all()}
+    except Exception:
+        role_name_by_id = {}
     from datetime import date as _nh_list_date
     _nh_today = _nh_list_date.today()
     # Fresh reads for users.access_revoked_at (avoid stale identity map; matches login after cancel-access).
@@ -6733,7 +6715,7 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
                             <tr>
                                 <th class="col-name sortable" data-sort="name" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Name<span class="sort-ind" aria-hidden="true"></span></span></th>
                                 <th class="sortable" data-sort="username" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Username<span class="sort-ind" aria-hidden="true"></span></span></th>
-                                <th class="sortable" data-sort="position" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Position<span class="sort-ind" aria-hidden="true"></span></span></th>
+                                <th class="sortable" data-sort="position" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Position/Title<span class="sort-ind" aria-hidden="true"></span></span></th>
                                 <th class="sortable" data-sort="email" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Email<span class="sort-ind" aria-hidden="true"></span></span></th>
                                 <th class="sortable" data-sort="start" data-sort-type="date" tabindex="0" scope="col"><span class="th-inner">Start date<span class="sort-ind" aria-hidden="true"></span></span></th>
                                 <th class="sortable" data-sort="active" data-sort-type="number" tabindex="0" scope="col"><span class="th-inner">Active?<span class="sort-ind" aria-hidden="true"></span></span></th>
@@ -6745,7 +6727,7 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
                             <tr class="{% if not item.login_active %}row-inactive{% endif %}" data-login-active="{% if item.login_active %}1{% else %}0{% endif %}"
                                 data-sort-name="{{ ((item.new_hire.first_name or '') ~ ' ' ~ (item.new_hire.last_name or ''))|trim|lower|e }}"
                                 data-sort-username="{{ (item.new_hire.username or '')|lower|e }}"
-                                data-sort-position="{{ ((item.new_hire.position or '')|lower)|e }}"
+                                data-sort-position="{{ (role_name_by_id.get(item.new_hire.role_id, '') or '')|lower|e }}"
                                 data-sort-email="{{ ((item.new_hire.email or '')|lower)|e }}"
                                 data-sort-start="{{ item.new_hire.start_date.isoformat() if item.new_hire.start_date else '' }}"
                                 data-sort-active="{{ 1 if item.login_active else 0 }}"
@@ -6754,7 +6736,7 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
                                     <a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" title="Open details — onboarding progress {{ item.progress }}%{% if item.total > 0 %} ({{ item.completed }}/{{ item.total }} items){% endif %}">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a>
                                 </td>
                                 <td>{{ item.new_hire.username }}</td>
-                                <td>{{ item.new_hire.position or '—' }}</td>
+                                <td>{{ role_name_by_id.get(item.new_hire.role_id, '') or '—' }}</td>
                                 <td>{{ item.new_hire.email or '—' }}</td>
                                 <td>{% if item.new_hire.start_date %}{{ item.new_hire.start_date.strftime('%b %d, %Y') }}{% else %}—{% endif %}</td>
                                 <td>{% if item.login_active %}Yes{% else %}No{% endif %}</td>
@@ -6829,7 +6811,7 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
     </body>
     </html>
     ''', new_hires_with_progress=new_hires_with_progress, admin_name=admin_name,
-         new_hires_list_heading=new_hires_list_heading)
+         new_hires_list_heading=new_hires_list_heading, role_name_by_id=role_name_by_id)
     _nh_list_resp = make_response(_nh_list_html)
     _nh_list_resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     _nh_list_resp.headers['Pragma'] = 'no-cache'
@@ -7426,7 +7408,6 @@ def add_new_hire():
                             <div class="form-group">
                                 <label for="email">Email Address</label>
                                 <input type="email" name="email" id="email" placeholder="Will auto-generate if left blank">
-                                <small>If left blank, will be generated as username@ziebart.com</small>
                             </div>
                             
                             <div class="form-row">
@@ -7441,26 +7422,20 @@ def add_new_hire():
                                 </div>
                             </div>
                             
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label for="department">Department</label>
-                                    <input type="text" name="department" id="department" placeholder="e.g., Sales, IT, HR">
-                                </div>
-                                <div class="form-group">
-                                    <label for="position">Position/Title</label>
-                                    <input type="text" name="position" id="position" placeholder="e.g., Sales Associate, Developer">
-                                </div>
+                            <div class="form-group">
+                                <label for="department">Department (optional)</label>
+                                <input type="text" name="department" id="department" placeholder="e.g., Sales, IT, HR">
                             </div>
                             
                             <div class="form-group">
-                                <label for="role_id">Role</label>
+                                <label for="role_id">Position/Title</label>
                                 <select name="role_id" id="role_id" onchange="applyRoleDefaultsWhenEnteringStep3()">
-                                    <option value="">— No role —</option>
+                                    <option value="">— No Position/Title —</option>
                                     {% for role in roles %}
                                     <option value="{{ role.id }}">{{ role.name }}</option>
                                     {% endfor %}
                                 </select>
-                                <small>Optional. Choosing a role pre-selects default documents in Step 3.</small>
+                                <small>Optional. Choosing a Position/Title pre-selects default documents in Step 3.</small>
                             </div>
                             <div class="wizard-actions">
                                 <div></div>
@@ -7554,10 +7529,9 @@ def add_new_hire():
                                     <div class="review-item"><strong>Name:</strong> <span id="review-name">-</span></div>
                                     <div class="review-item"><strong>Email:</strong> <span id="review-email">-</span></div>
                                     <div class="review-item"><strong>Department:</strong> <span id="review-department">-</span></div>
-                                    <div class="review-item"><strong>Position:</strong> <span id="review-position">-</span></div>
                                     <div class="review-item"><strong>Start Date:</strong> <span id="review-start-date">-</span></div>
                                     <div class="review-item"><strong>Revoke access on:</strong> <span id="review-revoke-date">-</span></div>
-                                    <div class="review-item"><strong>Role:</strong> <span id="review-role">-</span></div>
+                                    <div class="review-item"><strong>Position/Title:</strong> <span id="review-role">-</span></div>
                                 </div>
                                 
                                 <div class="review-section">
@@ -7725,7 +7699,6 @@ def add_new_hire():
                 document.getElementById('review-name').textContent = (firstName + ' ' + lastName).trim() || '-';
                 document.getElementById('review-email').textContent = document.getElementById('email').value || 'Will be auto-generated';
                 document.getElementById('review-department').textContent = document.getElementById('department').value || '-';
-                document.getElementById('review-position').textContent = document.getElementById('position').value || '-';
                 const startDate = document.getElementById('start_date').value;
                 document.getElementById('review-start-date').textContent = startDate || '-';
                 const revokeDate = document.getElementById('access_revoked_at').value;
@@ -7784,7 +7757,6 @@ def create_new_hire():
     email = normalize_email(request.form.get('email'))
     password = request.form.get('password', '').strip()
     department = request.form.get('department', '').strip()
-    position = request.form.get('position', '').strip()
     start_date_str = request.form.get('start_date', '').strip()
     access_revoked_at_str = request.form.get('access_revoked_at', '').strip()
     required_videos = request.form.getlist('required_videos')
@@ -7897,7 +7869,6 @@ def create_new_hire():
             last_name=last_name,
             email=email,
             department=department if department else None,
-            position=position if position else None,
             start_date=start_date,
             access_revoked_at=access_revoked_at,
             created_by=current_user.username
@@ -9358,7 +9329,7 @@ def _admin_dashboard_impl():
                         {% endif %}
                         <a href="{{ url_for('manage_roles') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">🎭</span>
-                            <span class="quick-link-text">Manage Roles</span>
+                            <span class="quick-link-text">Manage Position/Title</span>
                             <span class="quick-link-count">→</span>
                         </a>
                         <a href="{{ url_for('admin_reports') }}" class="quick-link-item" style="text-decoration: none;">
@@ -10754,7 +10725,7 @@ def manage_roles():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Manage Roles - Onboarding App</title>
+        <title>Manage Position/Title - Onboarding App</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
@@ -10785,27 +10756,27 @@ def manage_roles():
     </head>
     <body>
         <div class="header">
-            <h1>🎭 Manage Roles</h1>
+            <h1>🎭 Manage Position/Title</h1>
             <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
         </div>
         <div class="container">
             <div class="panel">
-                <h2>Add role</h2>
+                <h2>Add Position/Title</h2>
                 <form method="POST" action="{{ url_for('add_role') }}" style="display: flex; gap: 15px; align-items: flex-end; flex-wrap: wrap;">
                     <div class="form-group" style="margin-bottom: 0;">
-                        <label for="role_name">Role name</label>
+                        <label for="role_name">Position/Title name</label>
                         <input type="text" name="name" id="role_name" placeholder="e.g., Sales Associate" required>
                     </div>
-                    <button type="submit" class="btn btn-success">Add role</button>
+                    <button type="submit" class="btn btn-success">Add Position/Title</button>
                 </form>
             </div>
             <div class="panel">
-                <h2>Job roles ({{ roles|length }})</h2>
-                <p style="color: #666; margin-bottom: 15px;">Set default documents per role. When a role is selected during onboarding, those documents are pre-selected for the new hire.</p>
+                <h2>Position/Titles ({{ roles|length }})</h2>
+                <p style="color: #666; margin-bottom: 15px;">Set default documents per Position/Title. When a Position/Title is selected during onboarding, those documents are pre-selected for the new hire.</p>
                 {% if roles %}
                 <table>
                     <thead>
-                        <tr><th>Role</th><th>Default documents</th><th>Actions</th></tr>
+                        <tr><th>Position/Title</th><th>Default documents</th><th>Actions</th></tr>
                     </thead>
                     <tbody>
                         {% for role in roles %}
@@ -10815,7 +10786,7 @@ def manage_roles():
                             <td>
                                 <div class="role-actions">
                                     <a href="{{ url_for('role_default_documents', role_id=role.id) }}" class="btn btn-secondary">Default documents</a>
-                                    <form method="POST" action="{{ url_for('delete_role', role_id=role.id) }}" style="display: inline;" onsubmit="return confirm('Delete role {{ role.name }}?');">
+                                    <form method="POST" action="{{ url_for('delete_role', role_id=role.id) }}" style="display: inline;" onsubmit="return confirm('Delete Position/Title {{ role.name }}?');">
                                         <button type="submit" class="btn" style="background: #dc3545;">Delete</button>
                                     </form>
                                 </div>
@@ -10825,7 +10796,7 @@ def manage_roles():
                     </tbody>
                 </table>
                 {% else %}
-                <p style="color: #666;">No roles yet. Add one above.</p>
+                <p style="color: #666;">No Position/Titles yet. Add one above.</p>
                 {% endif %}
             </div>
         </div>
@@ -10840,20 +10811,20 @@ def add_role():
     """Create a new role"""
     name = (request.form.get('name') or '').strip()
     if not name:
-        flash('Role name is required.', 'error')
+        flash('Position/Title name is required.', 'error')
         return redirect(url_for('manage_roles'))
     existing = Role.query.filter(db.func.lower(Role.name) == name.lower()).first()
     if existing:
-        flash(f'Role "{name}" already exists.', 'error')
+        flash(f'Position/Title "{name}" already exists.', 'error')
         return redirect(url_for('manage_roles'))
     try:
         role = Role(name=name)
         db.session.add(role)
         db.session.commit()
-        flash(f'Role "{name}" added.', 'success')
+        flash(f'Position/Title "{name}" added.', 'success')
     except Exception as e:
         db.session.rollback()
-        flash(f'Error adding role: {str(e)}', 'error')
+        flash(f'Error adding Position/Title: {str(e)}', 'error')
     return redirect(url_for('manage_roles'))
 
 
@@ -10863,17 +10834,17 @@ def delete_role(role_id):
     """Delete a role"""
     role = Role.query.get(role_id)
     if not role:
-        flash('Role not found.', 'error')
+        flash('Position/Title not found.', 'error')
         return redirect(url_for('manage_roles'))
     try:
         # Clear default_documents and new hires' role_id
         NewHire.query.filter_by(role_id=role_id).update({NewHire.role_id: None})
         db.session.delete(role)
         db.session.commit()
-        flash(f'Role "{role.name}" deleted.', 'success')
+        flash(f'Position/Title "{role.name}" deleted.', 'success')
     except Exception as e:
         db.session.rollback()
-        flash(f'Error deleting role: {str(e)}', 'error')
+        flash(f'Error deleting Position/Title: {str(e)}', 'error')
     return redirect(url_for('manage_roles'))
 
 
@@ -10883,7 +10854,7 @@ def role_default_documents(role_id):
     """Manage default documents for a role"""
     role = Role.query.get(role_id)
     if not role:
-        flash('Role not found.', 'error')
+        flash('Position/Title not found.', 'error')
         return redirect(url_for('manage_roles'))
     # Documents visible to this store (or all visible for admin) that have signature fields
     store_id = get_current_user_store_id() if current_user.is_manager() else None
@@ -10938,7 +10909,7 @@ def role_default_documents(role_id):
     <body>
         <div class="header">
             <h1>Default documents: {{ role.name }}</h1>
-            <a href="{{ url_for('manage_roles') }}" class="back-btn">← Back to Roles</a>
+            <a href="{{ url_for('manage_roles') }}" class="back-btn">← Back to Position/Titles</a>
         </div>
         <div class="container">
             <div class="panel">
@@ -15507,32 +15478,6 @@ def _view_documents_impl():
             }
             
             @media (max-width: 768px) {
-                .top-header {
-                    padding: 12px 15px;
-                    flex-wrap: wrap;
-                }
-                .logo-section {
-                    font-size: 1.1em;
-                }
-                .logo-section img {
-                    height: 60px;
-                    margin-bottom: -30px;
-                }
-                .nav-links {
-                    display: none;
-                }
-                .mobile-menu-toggle {
-                    display: block;
-                }
-                .user-section {
-                    gap: 10px;
-                }
-                .user-dropdown span:not(.user-icon) {
-                    display: none;
-                }
-                .main-content {
-                    padding: 20px 15px;
-                }
                 .documents-list {
                     padding: 1rem;
                 }
@@ -15559,23 +15504,9 @@ def _view_documents_impl():
                     width: 100%;
                     text-align: center;
                 }
-                .btn, .badge {
-                    min-height: 44px;
-                    padding: 12px 20px;
-                }
             }
             
             @media (max-width: 480px) {
-                .top-header {
-                    padding: 10px 12px;
-                }
-                .logo-section {
-                    font-size: 1em;
-                }
-                .logo-section img {
-                    height: 50px;
-                    margin-bottom: -25px;
-                }
                 .documents-list {
                     padding: 12px;
                 }
@@ -16388,7 +16319,7 @@ def _serve_sign_document_page(doc_id):
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             html.sign-document-html, body.sign-document-page { color-scheme: dark; }
-            body {
+            body.sign-document-page {
                 font-family: 'URW Form', Arial, sans-serif;
                 background: #0a0e14;
             }
@@ -16484,6 +16415,12 @@ def _serve_sign_document_page(doc_id):
                 height: auto;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.3);
                 background: white;
+                display: block;
+            }
+            .document-embed-frame {
+                width: 100%;
+                border: none;
+                height: 800px;
                 display: block;
             }
             .signature-overlay {
@@ -16586,39 +16523,70 @@ def _serve_sign_document_page(doc_id):
             
             /* Mobile Responsive Styles */
             @media (max-width: 768px) {
+                body.sign-document-page {
+                    overflow-x: hidden;
+                }
                 .header {
-                    padding: 12px 15px;
+                    padding: max(10px, env(safe-area-inset-top, 0px)) 12px 12px;
                     flex-wrap: wrap;
+                    gap: 10px;
+                    align-items: flex-start;
+                }
+                .header-content {
+                    min-width: 0;
+                    flex: 1 1 100%;
+                    order: 1;
                 }
                 .header-content h1 {
-                    font-size: 1.2em;
+                    font-size: 1.1em;
+                    line-height: 1.3;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    display: -webkit-box;
+                    -webkit-line-clamp: 2;
+                    -webkit-box-orient: vertical;
                 }
-                .back-btn {
-                    font-size: 0.85em;
-                    padding: 6px 12px;
+                .header .back-btn {
+                    order: 2;
+                    flex: 1 1 auto;
+                    text-align: center;
+                    min-height: 44px;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
                 }
                 .container {
-                    padding: 15px;
+                    padding: 12px;
+                    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
                 }
                 .main-content {
                     grid-template-columns: 1fr;
-                    gap: 20px;
+                    gap: 16px;
                 }
                 .document-viewer-container {
-                    padding: 15px;
-                }
-                .document-viewer {
-                    min-height: 500px;
-                    padding: 10px;
-                }
-                .document-viewer iframe {
-                    height: 500px !important;
+                    padding: 12px;
+                    order: 1;
                 }
                 .signature-panel {
-                    padding: 15px;
+                    padding: 12px;
+                    order: 2;
+                }
+                .document-viewer {
+                    min-height: 0;
+                    padding: 8px;
+                }
+                .document-embed-frame,
+                .document-viewer iframe {
+                    width: 100% !important;
+                    height: min(55vh, 520px) !important;
+                    min-height: 280px;
                 }
                 .signature-pad-container {
                     margin-bottom: 10px;
+                }
+                .signature-pad-container canvas {
+                    width: 100% !important;
+                    max-width: 100%;
                 }
                 #signaturePad {
                     height: 150px;
@@ -16645,7 +16613,7 @@ def _serve_sign_document_page(doc_id):
                 }
                 input[type="text"], input[type="date"], input[type="number"] {
                     min-height: 44px;
-                    font-size: 16px; /* Prevents zoom on iOS */
+                    font-size: 16px;
                 }
             }
             
@@ -16653,11 +16621,10 @@ def _serve_sign_document_page(doc_id):
                 .header-content h1 {
                     font-size: 1em;
                 }
-                .document-viewer {
-                    min-height: 400px;
-                }
+                .document-embed-frame,
                 .document-viewer iframe {
-                    height: 400px !important;
+                    height: min(45dvh, 420px) !important;
+                    min-height: 240px;
                 }
                 #signaturePad {
                     height: 120px;
@@ -16804,7 +16771,7 @@ def _serve_sign_document_page(doc_id):
                     <h3 style="margin-bottom: 15px;">Document Preview</h3>
                     <div class="document-viewer" id="documentViewer">
                         {% if is_pdf %}
-                        <iframe src="{{ url_for('view_document_embed', doc_id=document.id, username=current_user.username) }}" style="width: 100%; height: 800px; border: none;"></iframe>
+                        <iframe class="document-embed-frame" src="{{ url_for('view_document_embed', doc_id=document.id, username=current_user.username) }}" title="Document preview"></iframe>
                         {% else %}
                         <p style="padding: 20px; color: white;">Please download the document to view it.</p>
                         {% endif %}
@@ -19740,6 +19707,12 @@ def view_new_hire_details(username):
         except Exception:
             all_stores = []
         
+        all_roles = []
+        try:
+            all_roles = Role.query.order_by(Role.name).all()
+        except Exception:
+            all_roles = []
+        
         return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -20155,12 +20128,19 @@ def view_new_hire_details(username):
                             </td>
                         </tr>
                         <tr>
-                            <td>Department</td>
+                            <td>Department (optional)</td>
                             <td><input type="text" name="department" value="{{ new_hire.department or '' }}" placeholder="Not set"></td>
                         </tr>
                         <tr>
-                            <td>Position</td>
-                            <td><input type="text" name="position" value="{{ new_hire.position or '' }}" placeholder="Not set"></td>
+                            <td>Position/Title</td>
+                            <td>
+                                <select name="role_id" aria-label="Position/Title">
+                                    <option value="" {% if not new_hire.role_id %}selected{% endif %}>— None —</option>
+                                    {% for r in all_roles %}
+                                    <option value="{{ r.id }}" {% if new_hire.role_id == r.id %}selected{% endif %}>{{ r.name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </td>
                         </tr>
                         <tr>
                             <td>Store</td>
@@ -20332,7 +20312,7 @@ def view_new_hire_details(username):
     </html>
     ''', new_hire=new_hire, video_progress=video_progress, signed_documents=signed_documents, 
          user_tasks=user_tasks, username=username, user_record=user_record, user_is_revoked=user_is_revoked,
-         all_stores=all_stores)
+         all_stores=all_stores, all_roles=all_roles)
     except Exception as e:
         # Log the error for debugging
         import traceback
@@ -20806,12 +20786,18 @@ def update_new_hire_details(username):
         else:
             new_hire.department = None
         
-        # Update position
-        position = request.form.get('position', '').strip()
-        if position:
-            new_hire.position = position
-        else:
-            new_hire.position = None
+        # Update position/title (role_id dropdown)
+        role_id_raw = (request.form.get('role_id') or '').strip()
+        new_role_id = None
+        if role_id_raw.isdigit():
+            try:
+                cand = int(role_id_raw)
+                if Role.query.get(cand) is not None:
+                    new_role_id = cand
+            except (ValueError, TypeError):
+                pass
+        if hasattr(NewHire, 'role_id'):
+            new_hire.role_id = new_role_id
         
         # Update start date
         start_date_str = request.form.get('start_date', '').strip()
@@ -25252,7 +25238,7 @@ def manage_training():
     if not current_user.is_admin() and not manager_has_permission('manage_training'):
         abort(403)
     videos = TrainingVideo.query.order_by(TrainingVideo.created_at.desc()).all()
-    is_manager_view = current_user.is_manager()
+    is_manager_view = current_user.is_manager() and not current_user.is_admin()
     videos_with_progress = []  # used for manager view only
     if is_manager_view:
         store_id = get_current_user_store_id()
@@ -26148,10 +26134,56 @@ def view_training_video(video_id):
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             html.training-quiz-html, body.training-quiz-page { color-scheme: dark; }
-            body {
+            body.training-quiz-page {
                 font-family: 'URW Form', Arial, sans-serif;
                 background: #1a1a1a;
                 color: white;
+            }
+            .training-top-bar {
+                background: #000000;
+                padding: max(10px, env(safe-area-inset-top, 0px)) 14px 12px;
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+            }
+            .training-back-link {
+                flex-shrink: 0;
+                color: #f2f5fb;
+                text-decoration: none;
+                font-size: 0.9em;
+                font-weight: 600;
+                padding: 8px 12px;
+                border-radius: 0.5rem;
+                border: 1px solid rgba(255, 255, 255, 0.25);
+                background: rgba(255, 255, 255, 0.08);
+                min-height: 44px;
+                display: inline-flex;
+                align-items: center;
+            }
+            .training-back-link:hover {
+                color: #fe0100;
+                border-color: rgba(254, 1, 0, 0.45);
+            }
+            .training-top-title-wrap {
+                flex: 1;
+                min-width: 0;
+            }
+            .training-top-title-wrap h1 {
+                font-size: 1.05em;
+                font-weight: 800;
+                margin: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .training-top-title-wrap p {
+                font-size: 0.82em;
+                color: rgba(242, 245, 251, 0.75);
+                margin: 4px 0 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
             }
             .header {
                 background: #2a2a2a;
@@ -26286,20 +26318,36 @@ def view_training_video(video_id):
             
             /* Mobile Responsive Styles */
             @media (max-width: 768px) {
-                .header {
-                    padding: 12px 15px;
+                body.training-quiz-page {
+                    overflow-x: hidden;
                 }
-                .header h1 {
-                    font-size: 1.2em;
+                .training-top-bar {
+                    flex-wrap: wrap;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                }
+                .training-back-link {
+                    order: 1;
+                }
+                .training-top-title-wrap {
+                    order: 2;
+                    flex: 1 1 calc(100% - 120px);
+                }
+                .training-top-title-wrap h1 {
+                    white-space: normal;
+                    display: -webkit-box;
+                    -webkit-line-clamp: 2;
+                    -webkit-box-orient: vertical;
                 }
                 .container {
-                    padding: 15px;
+                    padding: 12px;
+                    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
                 }
                 .video-container {
                     margin-bottom: 15px;
                 }
                 video {
-                    max-height: 50vh;
+                    max-height: 45dvh;
                 }
                 .progress-info {
                     flex-direction: column;
@@ -26307,11 +26355,23 @@ def view_training_video(video_id):
                     gap: 10px;
                     padding: 12px;
                 }
+                .progress-info > div {
+                    width: 100%;
+                }
                 .quiz-overlay {
-                    padding: 20px;
+                    padding: 12px;
+                    align-items: flex-start;
+                    justify-content: flex-start;
+                }
+                .quiz-overlay.show {
+                    align-items: flex-start;
+                    justify-content: flex-start;
                 }
                 .quiz-content {
-                    padding: 20px;
+                    padding: 16px;
+                    max-height: 85dvh;
+                    overflow-y: auto;
+                    -webkit-overflow-scrolling: touch;
                 }
                 .quiz-content h2 {
                     font-size: 1.2em;
@@ -26321,7 +26381,7 @@ def view_training_video(video_id):
                 }
                 .answer-option {
                     padding: 12px;
-                    min-height: 44px; /* Touch-friendly */
+                    min-height: 44px;
                 }
                 .btn {
                     min-height: 44px;
@@ -26338,17 +26398,18 @@ def view_training_video(video_id):
             }
             
             @media (max-width: 480px) {
-                .header h1 {
-                    font-size: 1em;
+                .training-top-title-wrap h1 {
+                    font-size: 0.95em;
                 }
-                .header p {
-                    font-size: 0.9em;
+                .training-top-title-wrap p {
+                    font-size: 0.78em;
                 }
                 video {
-                    max-height: 40vh;
+                    max-height: 40dvh;
                 }
                 .quiz-content {
-                    padding: 15px;
+                    padding: 12px;
+                    max-height: 88dvh;
                 }
                 .quiz-content h2 {
                     font-size: 1em;
@@ -26418,11 +26479,14 @@ def view_training_video(video_id):
         </style>
     </head>
     <body class="training-quiz-page">
-        <div class="header">
-            <h1>{{ video.title }}</h1>
-            {% if video.description %}
-            <p>{{ video.description }}</p>
-            {% endif %}
+        <div class="training-top-bar">
+            <a href="{{ url_for('list_training_videos') }}" class="training-back-link">← Videos</a>
+            <div class="training-top-title-wrap">
+                <h1>{{ video.title }}</h1>
+                {% if video.description %}
+                <p>{{ video.description }}</p>
+                {% endif %}
+            </div>
         </div>
         
         <div class="container">
@@ -27467,55 +27531,16 @@ def list_training_videos():
             }
             
             @media (max-width: 768px) {
-                .top-header {
-                    padding: 12px 15px;
-                    flex-wrap: wrap;
-                }
-                .logo-section {
-                    font-size: 1.1em;
-                }
-                .logo-section img {
-                    height: 60px;
-                    margin-bottom: -30px;
-                }
-                .nav-links {
-                    display: none;
-                }
-                .mobile-menu-toggle {
-                    display: block;
-                }
-                .user-section {
-                    gap: 10px;
-                }
-                .user-dropdown span:not(.user-icon) {
-                    display: none;
-                }
-                .main-content {
-                    padding: 20px 15px;
-                }
                 .training-list {
                     grid-template-columns: 1fr;
                     gap: 15px;
                 }
-                .btn {
-                    min-height: 44px;
-                    padding: 12px 20px;
-                    font-size: 1em;
+                .training-card .btn {
                     width: 100%;
                 }
             }
             
             @media (max-width: 480px) {
-                .top-header {
-                    padding: 10px 12px;
-                }
-                .logo-section {
-                    font-size: 1em;
-                }
-                .logo-section img {
-                    height: 50px;
-                    margin-bottom: -25px;
-                }
                 .training-card {
                     padding: 1rem;
                 }
