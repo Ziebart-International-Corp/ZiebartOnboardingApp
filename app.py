@@ -25837,9 +25837,75 @@ def manage_video_quiz(video_id):
                 }
             }
         {{ global_theme_css|safe }}
+            /* Manage Quiz: keep question list and form readable on dark theme */
+            body.quiz-manage-page {
+                background: #0a0e14 !important;
+                color: #f2f5fb !important;
+            }
+            body.quiz-manage-page .admin-panel {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.14) !important;
+                color: #f2f5fb !important;
+            }
+            body.quiz-manage-page .admin-panel::before {
+                opacity: 0 !important;
+                display: none !important;
+            }
+            body.quiz-manage-page .admin-panel h2,
+            body.quiz-manage-page .admin-panel h3,
+            body.quiz-manage-page .admin-panel label,
+            body.quiz-manage-page .admin-panel strong,
+            body.quiz-manage-page .admin-panel p {
+                color: #f2f5fb !important;
+                -webkit-text-fill-color: #f2f5fb !important;
+            }
+            body.quiz-manage-page .admin-panel small {
+                color: #b7c1d3 !important;
+            }
+            body.quiz-manage-page .question-item {
+                background: rgba(255, 255, 255, 0.06) !important;
+                border-left: 4px solid rgba(110, 168, 254, 0.9) !important;
+                border-radius: 8px !important;
+            }
+            body.quiz-manage-page .question-item h3 {
+                color: #f2f5fb !important;
+                -webkit-text-fill-color: #f2f5fb !important;
+                font-weight: 700 !important;
+                margin-bottom: 8px !important;
+            }
+            body.quiz-manage-page .answer-item {
+                background: rgba(255, 255, 255, 0.08) !important;
+                border: 1px solid rgba(255, 255, 255, 0.12) !important;
+                color: #f2f5fb !important;
+                border-radius: 6px !important;
+            }
+            body.quiz-manage-page .answer-item.correct {
+                border-left: 3px solid #34c86a !important;
+                background: rgba(52, 200, 106, 0.12) !important;
+            }
+            body.quiz-manage-page .answer-item span {
+                color: #8ee4a8 !important;
+            }
+            body.quiz-manage-page .answer-input {
+                color: #f2f5fb !important;
+            }
+            body.quiz-manage-page .answer-input input[type="radio"] {
+                accent-color: #fe0100;
+            }
+            body.quiz-manage-page .form-group input,
+            body.quiz-manage-page .form-group textarea,
+            body.quiz-manage-page .form-group select {
+                background: rgba(255, 255, 255, 0.08) !important;
+                border: 1px solid rgba(255, 255, 255, 0.24) !important;
+                color: #f2f5fb !important;
+            }
+            body.quiz-manage-page .form-group input::placeholder,
+            body.quiz-manage-page .form-group textarea::placeholder {
+                color: #9aa5b8 !important;
+            }
         </style>
     </head>
-    <body>
+    <body class="quiz-manage-page">
         <div class="header">
             <div class="header-content">
                 <h1>📝 Manage Quiz: {{ video.title }}</h1>
