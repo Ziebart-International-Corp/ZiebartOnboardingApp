@@ -19,6 +19,18 @@ class Store(db.Model):
         return f'<Store {self.name}>'
 
 
+class Department(db.Model):
+    """Department lookup for new hire onboarding."""
+    __tablename__ = 'departments'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(150), nullable=False, unique=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<Department {self.name}>'
+
+
 class User(db.Model):
     """User model for storing user information. Login is by email + password."""
     __tablename__ = 'users'
@@ -59,8 +71,10 @@ class NewHire(db.Model):
     last_name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(200), nullable=False)
     department = db.Column(db.String(100))
+    department_id = db.Column(db.Integer, db.ForeignKey('departments.id'), nullable=True)
     position = db.Column(db.String(100))
     role_id = db.Column(db.Integer, db.ForeignKey('roles.id'), nullable=True)  # Job role (for default docs)
+    department_ref = db.relationship('Department', backref='new_hires', lazy='joined')
     start_date = db.Column(db.Date)
     access_revoked_at = db.Column(db.Date, nullable=True)  # After this date user cannot log in
     status = db.Column(db.String(50), default='pending')  # pending, active, completed
@@ -74,6 +88,7 @@ class NewHire(db.Model):
     finale_message_sent_at = db.Column(db.DateTime, nullable=True)
     finale_document_id = db.Column(db.Integer, db.ForeignKey('documents.id'), nullable=True)
     finale_message_dismissed_at = db.Column(db.DateTime, nullable=True)
+    all_tasks_completed_email_sent_at = db.Column(db.DateTime, nullable=True)
 
     # Relationship to required training videos
     required_training_videos = db.relationship('TrainingVideo', 
@@ -492,7 +507,8 @@ class DocumentTypedField(db.Model):
     width = db.Column(db.Float, nullable=False, default=200)  # Width in browser pixels
     height = db.Column(db.Float, nullable=False, default=30)  # Height in browser pixels
     field_label = db.Column(db.String(200))  # Label (e.g., "Name", "Date")
-    field_type = db.Column(db.String(20), default='text')  # 'text', 'date', 'name', etc.
+    field_type = db.Column(db.String(20), default='text')  # 'text', 'date', 'checkbox_choice', etc.
+    choice_group = db.Column(db.String(100), nullable=True)  # Links checkbox_choice fields (pick one)
     is_required = db.Column(db.Boolean, default=True)  # Whether field is required
     placeholder = db.Column(db.String(200))  # Placeholder text
     created_by = db.Column(db.String(100))  # Username of admin who created the field
@@ -516,6 +532,7 @@ class DocumentTypedField(db.Model):
             'height': self.height,
             'field_label': self.field_label,
             'field_type': self.field_type,
+            'choice_group': self.choice_group,
             'is_required': self.is_required,
             'placeholder': self.placeholder
         }

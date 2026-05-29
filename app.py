@@ -13,12 +13,31 @@ except ImportError:
     pass
 
 from flask import Flask, render_template_string, redirect, url_for, request, session, flash, jsonify, send_file, send_from_directory, make_response, abort
+from pdf_form_wizard import (
+    ACRO_PLACEHOLDER_PREFIX,
+    FITZ_AVAILABLE as PDF_WIZARD_FITZ_AVAILABLE,
+    TEST_FORM_SIG_PREFIX,
+    acro_value_for_widget,
+    analyze_pdf,
+    build_filled_pdf,
+    collect_acroform_import_specs,
+    count_pdf_acroform_widgets,
+    delete_wizard_state,
+    extract_fields_from_layout,
+    is_test_form_signature_value,
+    load_wizard_state,
+    new_session_id,
+    normalize_test_form_signature_value,
+    save_uploaded_pdf,
+    save_wizard_state,
+    test_form_signature_b64,
+)
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from sqlalchemy import exists, or_, and_, text, bindparam, func
+from sqlalchemy import exists, or_, and_, text, bindparam, func, select
 from auth import login_required, admin_required, manager_required, User, check_user_can_login_as_admin, authenticate_by_email_password
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, ManagerPermission, SignatureAuditLog, document_stores)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, Department, ManagerPermission, SignatureAuditLog, document_stores, role_documents)
 from membership import get_token_groups, get_local_groups
 from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR
 from datetime import datetime
@@ -28,6 +47,7 @@ from werkzeug.security import generate_password_hash
 from markupsafe import Markup
 from io import BytesIO
 import base64
+import re
 try:
     from graphql_schema import schema as graphql_schema
 except ImportError:
@@ -74,19 +94,51 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour
 
+# Production hostnames that must always use HTTPS
+_HTTPS_HOSTS = frozenset({'ziebartonboarding.com', 'www.ziebartonboarding.com'})
+
+
+def _request_is_https():
+    """True when the client connection is HTTPS (direct or via proxy header)."""
+    return (
+        request.headers.get('X-Forwarded-Proto', '').lower() == 'https'
+        or request.scheme == 'https'
+        or request.is_secure
+    )
+
+
 # Configure secure cookies based on request scheme
-# This will be set dynamically in a before_request handler
 @app.before_request
 def configure_secure_cookies():
     """Configure secure cookies based on request scheme"""
-    # Check if request is HTTPS (via IIS X-Forwarded-Proto header or direct HTTPS)
-    is_https = (
-        request.headers.get('X-Forwarded-Proto', '').lower() == 'https' or
-        request.scheme == 'https' or
-        request.is_secure
-    )
+    is_https = _request_is_https()
     app.config['SESSION_COOKIE_SECURE'] = is_https
     app.config['PREFERRED_URL_SCHEME'] = 'https' if is_https else 'http'
+
+
+@app.before_request
+def force_https_for_production_hosts():
+    """Redirect onboarding domains to HTTPS when accessed over plain HTTP."""
+    if (os.getenv('FORCE_HTTPS', 'true').lower() == 'false'
+            or request.path.startswith('/static')
+            or request.path.startswith('/.well-known/acme-challenge')):
+        return
+    host = (request.host or '').split(':')[0].lower()
+    if host not in _HTTPS_HOSTS or _request_is_https():
+        return
+    target = request.url.replace('http://', 'https://', 1)
+    return redirect(target, code=301)
+
+
+@app.after_request
+def add_hsts_for_production_hosts(response):
+    """Tell browsers to use HTTPS for onboarding domains."""
+    host = (request.host or '').split(':')[0].lower()
+    if host in _HTTPS_HOSTS and _request_is_https():
+        response.headers.setdefault(
+            'Strict-Transport-Security', 'max-age=31536000; includeSubDomains'
+        )
+    return response
 
 # Remember which staff console (admin vs manager) the user last opened so
 # "Back to Dashboard" on shared /admin/* tools returns to the right home.
@@ -173,6 +225,12 @@ def manager_new_hires_list_url():
     if sid is not None:
         return url_for('manager_new_hires', store_id=sid)
     return url_for('manager_new_hires')
+
+
+@app.template_global()
+def user_sign_document_url(doc_id):
+    """Sign page URL for users. Uses /documents?sign= so IIS/wfastcgi routes correctly."""
+    return url_for('view_documents', sign=doc_id)
 
 
 def onboarding_tasks_url():
@@ -1741,6 +1799,7 @@ def _ensure_new_hires_finale_columns():
         ('finale_message_sent_at', 'DATETIME NULL'),
         ('finale_document_id', 'INT NULL'),
         ('finale_message_dismissed_at', 'DATETIME NULL'),
+        ('all_tasks_completed_email_sent_at', 'DATETIME NULL'),
     ]:
         try:
             db.session.execute(text(f"SELECT TOP 1 {col} FROM new_hires"))
@@ -1849,6 +1908,85 @@ def _ensure_stores_and_store_id():
     _stores_migrated = True
 
 
+_departments_migrated = False
+
+
+def _ensure_departments_table():
+    """Create departments table and seed from existing new_hires.department strings."""
+    global _departments_migrated
+    if _departments_migrated:
+        return
+    try:
+        db.session.execute(text('SELECT TOP 1 id FROM departments'))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text(
+                'CREATE TABLE departments (id INT PRIMARY KEY IDENTITY(1,1), '
+                'name NVARCHAR(150) NOT NULL UNIQUE, created_at DATETIME NULL)'
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    try:
+        db.session.execute(text('SELECT TOP 1 department_id FROM new_hires'))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text('ALTER TABLE new_hires ADD department_id INT NULL'))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    try:
+        rows = db.session.execute(text(
+            "SELECT DISTINCT LTRIM(RTRIM(department)) AS dept_name FROM new_hires "
+            "WHERE department IS NOT NULL AND LTRIM(RTRIM(department)) <> ''"
+        )).fetchall()
+        for row in rows:
+            dept_name = (row[0] or '').strip()
+            if not dept_name:
+                continue
+            existing = Department.query.filter(
+                func.lower(Department.name) == dept_name.lower()
+            ).first()
+            if not existing:
+                db.session.add(Department(name=dept_name))
+        db.session.commit()
+        nh_rows = db.session.execute(text(
+            'SELECT id, department FROM new_hires WHERE department IS NOT NULL '
+            "AND LTRIM(RTRIM(department)) <> '' AND department_id IS NULL"
+        )).fetchall()
+        for nh_id, dept_str in nh_rows:
+            dept_name = (dept_str or '').strip()
+            if not dept_name:
+                continue
+            dept = Department.query.filter(func.lower(Department.name) == dept_name.lower()).first()
+            if dept:
+                db.session.execute(
+                    text('UPDATE new_hires SET department_id = :did WHERE id = :nid'),
+                    {'did': dept.id, 'nid': nh_id},
+                )
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning('departments seed/migrate failed: %s', e)
+    _departments_migrated = True
+
+
+def resolve_department_from_form(department_id_raw):
+    """Return (department_id, department_name) from wizard/edit form department_id field."""
+    raw = (department_id_raw or '').strip()
+    if not raw or raw == '__add__':
+        return None, None
+    try:
+        dept = Department.query.get(int(raw))
+    except (TypeError, ValueError):
+        return None, None
+    if not dept:
+        return None, None
+    return dept.id, dept.name
+
+
 @app.before_request
 def _run_users_migration_if_needed():
     """Run one-time schema checks/migrations before requests."""
@@ -1864,6 +2002,7 @@ def _run_users_migration_if_needed():
         _ensure_new_hires_finale_columns()
         _ensure_admin_settings_table()
         _ensure_stores_and_store_id()
+        _ensure_departments_table()
         _ensure_signature_audit_logs_table()
     except Exception:
         pass
@@ -1917,8 +2056,8 @@ def get_current_user_store_id():
 
 
 def documents_visible_to_store_query(store_id, base_filter=None):
-    """Return Document query filtered to is_visible and (all stores or store_id in document's stores).
-    If store_id is None, only is_visible is applied (admin view). base_filter is an optional extra filter (e.g. has signature fields)."""
+    """Return Document query for the optional user document library: is_visible and store scope.
+    If store_id is None, only is_visible is applied (admin view). base_filter is an optional extra filter."""
     q = Document.query.filter(Document.is_visible == True)
     if store_id is not None:
         # Document visible to this store if: no rows in document_stores (all stores) OR has row with this store_id
@@ -1930,16 +2069,91 @@ def documents_visible_to_store_query(store_id, base_filter=None):
     return q
 
 
+def _stores_for_document(document_id):
+    """Store rows linked to a document via document_stores (empty = all stores)."""
+    if not document_id:
+        return []
+    try:
+        store_ids = [
+            row[0] for row in db.session.execute(
+                select(document_stores.c.store_id).where(
+                    document_stores.c.document_id == document_id
+                )
+            ).fetchall()
+        ]
+    except Exception:
+        db.session.rollback()
+        return []
+    if not store_ids:
+        return []
+    return Store.query.filter(Store.id.in_(store_ids)).order_by(Store.name).all()
+
+
+def _attach_document_store_lists(documents):
+    """Set doc.store_ids for admin Manage Forms store dropdown."""
+    if not documents:
+        return
+    doc_ids = [d.id for d in documents if d.id]
+    by_doc = {doc_id: [] for doc_id in doc_ids}
+    if doc_ids:
+        try:
+            rows = db.session.execute(
+                select(document_stores.c.document_id, document_stores.c.store_id).where(
+                    document_stores.c.document_id.in_(doc_ids)
+                )
+            ).fetchall()
+            for doc_id, store_id in rows:
+                by_doc.setdefault(doc_id, []).append(store_id)
+        except Exception:
+            db.session.rollback()
+    all_store_ids = {sid for ids in by_doc.values() for sid in ids}
+    stores_by_id = {}
+    if all_store_ids:
+        stores_by_id = {s.id: s for s in Store.query.filter(Store.id.in_(all_store_ids)).all()}
+    for doc in documents:
+        doc.store_ids = [stores_by_id[sid] for sid in by_doc.get(doc.id, []) if sid in stores_by_id]
+
+
 def document_visible_to_store(document, store_id):
-    """True if document is visible to the given store: is_visible and (all stores or store_id in document's stores)."""
+    """True if document is in the user library for the given store (is_visible + store scope)."""
     if not document or not getattr(document, 'is_visible', False):
         return False
-    store_ids = getattr(document, 'store_ids', None) or []
+    store_ids = getattr(document, 'store_ids', None)
+    if store_ids is None:
+        store_ids = _stores_for_document(document.id)
     if not store_ids:
         return True  # all stores
     if store_id is None:
         return True  # no store filter
     return any(getattr(s, 'id', None) == store_id for s in store_ids)
+
+
+def documents_for_user_files(username):
+    """Documents for the user Files tab: explicitly assigned to user, scoped to user's store.
+
+    Assigned documents always appear here even when is_visible is False (Not in library in admin).
+    is_visible only controls whether a document appears in the general browse pool, not
+    direct assignments the user must sign.
+    """
+    assigned_documents = DocumentAssignment.query.filter_by(username=username).all()
+    assigned_doc_ids = [a.document_id for a in assigned_documents]
+    if not assigned_doc_ids:
+        return [], assigned_documents
+    store_id = None
+    try:
+        u = UserModel.query.filter_by(username=username).first()
+        store_id = getattr(u, 'store_id', None) if u else None
+    except Exception:
+        pass
+    q = Document.query.filter(Document.id.in_(assigned_doc_ids))
+    if store_id is not None:
+        no_stores = ~exists().where(document_stores.c.document_id == Document.id)
+        in_store = exists().where(
+            and_(document_stores.c.document_id == Document.id, document_stores.c.store_id == store_id)
+        )
+        q = q.filter(or_(no_stores, in_store))
+    documents = q.order_by(Document.created_at.desc()).all()
+    return documents, assigned_documents
 
 
 def get_visible_ordered_user_tasks(task_list):
@@ -1952,13 +2166,108 @@ def get_visible_ordered_user_tasks(task_list):
         return dep is None or dep in completed_ids
     visible_list = [t for t in task_list if visible(t)]
     def sort_key(t):
-        order = getattr(t, 'display_order', 0)
+        # display_order is nullable; mixed None/int breaks tuple sort (TypeError on dashboard)
+        order = getattr(t, 'display_order', None)
+        if order is None:
+            order = 999999
         prio = {'urgent': 3, 'high': 2, 'normal': 1, 'low': 0}.get((t.priority or 'normal').lower(), 1)
         due = t.due_date or date_type.max
         created = t.created_at or datetime.min
         return (order, -prio, due, created)
     visible_list.sort(key=sort_key)
     return visible_list
+
+
+def user_onboarding_is_fully_complete(username):
+    """True when required training and all visible user tasks are done (same rules as dashboard)."""
+    user_new_hire = NewHire.query.filter_by(username=username).first()
+    required_videos = []
+    if user_new_hire:
+        try:
+            required_videos = list(user_new_hire.required_training_videos)
+        except Exception:
+            required_videos = []
+    for video in required_videos:
+        progress = UserTrainingProgress.query.filter_by(
+            username=username,
+            video_id=video.id,
+            is_completed=True,
+            is_passed=True,
+        ).first()
+        if not progress:
+            return False
+    all_user_tasks = UserTask.query.filter_by(username=username).all()
+    if not required_videos and not all_user_tasks:
+        return False
+    visible_ordered = get_visible_ordered_user_tasks(all_user_tasks)
+    incomplete = [t for t in visible_ordered if t.status != 'completed']
+    return len(incomplete) == 0
+
+
+def maybe_send_all_tasks_completed_email(username):
+    """Send one congratulatory email when the user finishes all onboarding tasks (once per new hire)."""
+    if not MAIL_AVAILABLE:
+        return False
+    _ensure_new_hires_finale_columns()
+    new_hire = NewHire.query.filter_by(username=username).first()
+    if new_hire and getattr(new_hire, 'all_tasks_completed_email_sent_at', None):
+        return False
+    if not user_onboarding_is_fully_complete(username):
+        return False
+    to_email = get_email_for_username(username)
+    if not to_email:
+        return False
+    dashboard_link = onboarding_tasks_url().replace('/tasks', '/dashboard')
+    subject = 'Congratulations — you completed all onboarding tasks'
+    body_html = f"""
+    <p>Hello,</p>
+    <p>Congratulations! You have completed <strong>all</strong> of your assigned onboarding tasks, including any required training.</p>
+    <p>You can sign in anytime to review your work or any messages from your team:</p>
+    <p><a href="{dashboard_link}">Open your onboarding dashboard</a></p>
+    <p>Thank you,<br>Onboarding Team</p>
+    """
+    body_text = (
+        "Hello,\n\n"
+        "Congratulations! You have completed all of your assigned onboarding tasks, "
+        "including any required training.\n\n"
+        f"Open your dashboard: {dashboard_link}\n\n"
+        "Thank you,\n"
+        "Onboarding Team"
+    )
+    if not send_email(to_email, subject, body_html, body_text=body_text):
+        return False
+    if new_hire:
+        new_hire.all_tasks_completed_email_sent_at = datetime.utcnow()
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    return True
+
+
+def reset_onboarding_completion_state(username):
+    """Clear completion email + finale dismissal when new onboarding work is assigned."""
+    _ensure_new_hires_finale_columns()
+    new_hire = NewHire.query.filter_by(username=username).first()
+    if not new_hire:
+        return
+    changed = False
+    if getattr(new_hire, 'all_tasks_completed_email_sent_at', None):
+        new_hire.all_tasks_completed_email_sent_at = None
+        changed = True
+    if getattr(new_hire, 'finale_message_dismissed_at', None):
+        new_hire.finale_message_dismissed_at = None
+        changed = True
+    if changed:
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+
+def clear_all_tasks_completed_email_sent(username):
+    """Allow a new completion email after more onboarding work is assigned."""
+    reset_onboarding_completion_state(username)
 
 
 def manager_has_permission(permission_key):
@@ -2014,6 +2323,287 @@ def allowed_video_file(filename):
     """Check if video file extension is allowed"""
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_VIDEO_EXTENSIONS']
+
+
+# US-style phone: (555) 123-4567, 555-123-4567, 5551234567, +1 555-123-4567
+TYPED_FIELD_PHONE_REGEX = re.compile(
+    r'^(\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}$'
+)
+TYPED_FIELD_PHONE_PATTERN_HTML = (
+    r'(\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}'
+)
+TYPED_FIELD_PHONE_REGEX_JS = TYPED_FIELD_PHONE_REGEX.pattern
+
+# SSN last-4 only: stored/displayed as XXX-XX-#### (first 5 digits masked)
+TYPED_FIELD_LAST4_PREFIX = 'XXX-XX-'
+TYPED_FIELD_LAST4_REGEX = re.compile(r'^XXX-XX-[0-9]{4}$')
+TYPED_FIELD_LAST4_REGEX_JS = TYPED_FIELD_LAST4_REGEX.pattern
+
+
+def normalize_last4_typed_value(value):
+    """Normalize to XXX-XX-####; reject/incomplete unless exactly 4 trailing digits."""
+    val = (value or '').strip().upper()
+    if val.startswith(TYPED_FIELD_LAST4_PREFIX):
+        tail = val[len(TYPED_FIELD_LAST4_PREFIX):]
+        digits = re.sub(r'\D', '', tail)
+    else:
+        digits = re.sub(r'\D', '', val)
+    if len(digits) > 4:
+        digits = digits[-4:]
+    digits = digits[:4]
+    if len(digits) != 4:
+        return ''
+    return TYPED_FIELD_LAST4_PREFIX + digits
+
+
+def typed_field_is_phone_like(field):
+    """True for phone type or number fields whose label suggests a phone number."""
+    if not field:
+        return False
+    if getattr(field, 'field_type', None) == 'phone':
+        return True
+    label = (getattr(field, 'field_label', None) or '').lower()
+    return getattr(field, 'field_type', None) == 'number' and 'phone' in label
+
+
+_document_typed_field_cols_migrated = False
+
+
+def _ensure_document_typed_field_columns():
+    """Ensure document_typed_fields has choice_group for checkbox groups."""
+    global _document_typed_field_cols_migrated
+    if _document_typed_field_cols_migrated:
+        return
+    try:
+        db.session.execute(text('SELECT TOP 1 choice_group FROM document_typed_fields'))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text('ALTER TABLE document_typed_fields ADD choice_group NVARCHAR(100) NULL'))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    _document_typed_field_cols_migrated = True
+
+
+def _document_is_fillable_pdf(document) -> bool:
+    if not document:
+        return False
+    ft = (document.file_type or '').lower()
+    name = (document.original_filename or document.filename or '').lower()
+    return ft == 'application/pdf' or name.endswith('.pdf')
+
+
+def _document_pdf_path(document) -> str | None:
+    if not document or not document.file_path:
+        return None
+    path = document.file_path
+    if not os.path.isabs(path):
+        path = str(BASE_DIR / path)
+    return path if os.path.isfile(path) else None
+
+
+def _import_acroform_fields_for_document(document, created_by, replace_existing=False):
+    """
+    Import Adobe/PDF AcroForm widgets into DocumentSignatureField and DocumentTypedField rows.
+    Returns (success: bool, message: str).
+    """
+    if not PDF_WIZARD_FITZ_AVAILABLE:
+        return False, 'PyMuPDF is not installed on the server.'
+    pdf_path = _document_pdf_path(document)
+    if not pdf_path:
+        return False, 'PDF file not found on disk.'
+    if not _document_is_fillable_pdf(document):
+        return False, 'Document is not a PDF.'
+
+    sig_count = DocumentSignatureField.query.filter_by(document_id=document.id).count()
+    typed_count = DocumentTypedField.query.filter_by(document_id=document.id).count()
+    if (sig_count or typed_count) and not replace_existing:
+        return False, 'This document already has fields. Use “Import from PDF” with replace to overwrite.'
+
+    specs = collect_acroform_import_specs(pdf_path)
+    if not specs.get('ok'):
+        return False, specs.get('error', 'Could not read PDF form fields.')
+    if specs.get('widget_count', 0) == 0:
+        return False, 'No fillable form fields found in this PDF. Create fields in Acrobat or place them manually.'
+
+    try:
+        if replace_existing:
+            DocumentTypedFieldValue.query.filter_by(document_id=document.id).delete(synchronize_session=False)
+            DocumentTypedField.query.filter_by(document_id=document.id).delete(synchronize_session=False)
+            DocumentSignatureField.query.filter_by(document_id=document.id).delete(synchronize_session=False)
+
+        for spec in specs.get('signature_fields') or []:
+            db.session.add(DocumentSignatureField(
+                document_id=document.id,
+                page_number=spec['page_number'],
+                x_position=spec['x_position'],
+                y_position=spec['y_position'],
+                width=spec['width'],
+                height=spec['height'],
+                field_label=spec['field_label'],
+                is_required=True,
+                signature_type='image',
+                created_by=created_by,
+            ))
+        for spec in specs.get('typed_fields') or []:
+            db.session.add(DocumentTypedField(
+                document_id=document.id,
+                page_number=spec['page_number'],
+                x_position=spec['x_position'],
+                y_position=spec['y_position'],
+                width=spec['width'],
+                height=spec['height'],
+                field_label=spec['field_label'],
+                field_type=spec['field_type'],
+                choice_group=spec.get('choice_group'),
+                placeholder=spec.get('placeholder'),
+                is_required=False if spec['field_type'] == 'checkbox_choice' else True,
+                created_by=created_by,
+            ))
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception('acroform import failed for document %s', document.id)
+        return False, f'Import failed: {e}'
+
+    n_sig = len(specs.get('signature_fields') or [])
+    n_typed = len(specs.get('typed_fields') or [])
+    return True, (
+        f'Imported {n_sig + n_typed} field(s) from the PDF '
+        f'({n_sig} signature, {n_typed} typed). Review positions on Set Signature Fields if needed.'
+    )
+
+
+def _try_auto_import_acroform_fields(document, created_by):
+    """Import AcroForm widgets when the document has none configured yet."""
+    if not _document_is_fillable_pdf(document):
+        return False, ''
+    sig_count = DocumentSignatureField.query.filter_by(document_id=document.id).count()
+    typed_count = DocumentTypedField.query.filter_by(document_id=document.id).count()
+    if sig_count or typed_count:
+        return False, ''
+    pdf_path = _document_pdf_path(document)
+    if not pdf_path or count_pdf_acroform_widgets(pdf_path) == 0:
+        return False, ''
+    return _import_acroform_fields_for_document(document, created_by, replace_existing=False)
+
+
+def clear_choice_group_selections_except(doc_id, username, choice_group, keep_field_id):
+    """Clear X marks on other checkbox_choice fields in the same group for this user."""
+    if not choice_group or not str(choice_group).strip():
+        return []
+    group_key = str(choice_group).strip()
+    siblings = DocumentTypedField.query.filter_by(
+        document_id=doc_id,
+        field_type='checkbox_choice',
+    ).filter(DocumentTypedField.choice_group == group_key).all()
+    cleared_ids = []
+    for sib in siblings:
+        if sib.id == keep_field_id:
+            continue
+        row = DocumentTypedFieldValue.query.filter_by(
+            document_id=doc_id,
+            typed_field_id=sib.id,
+            username=username,
+        ).first()
+        if row:
+            db.session.delete(row)
+            cleared_ids.append(sib.id)
+    return cleared_ids
+
+
+ALLOWED_TYPED_FIELD_TYPES = frozenset({
+    'text', 'name', 'typed_name', 'typed_initials', 'date', 'number', 'phone', 'last4', 'checkbox_choice',
+})
+
+TYPED_FIELD_TYPE_CHOICES = (
+    ('text', 'Text'),
+    ('name', 'Name'),
+    ('typed_name', 'Typed Name'),
+    ('typed_initials', 'Typed Initials'),
+    ('date', 'Date'),
+    ('number', 'Number'),
+    ('phone', 'Phone Number'),
+    ('last4', 'Last 4 (SSN)'),
+    ('checkbox_choice', 'Checkbox (pick one)'),
+)
+
+FIELD_EDITOR_TYPE_CHOICES = (
+    ('signature', 'Signature'),
+) + TYPED_FIELD_TYPE_CHOICES
+
+
+def normalize_typed_field_type(field_type):
+    ft = (field_type or 'text').strip().lower()
+    return ft if ft in ALLOWED_TYPED_FIELD_TYPES else 'text'
+
+
+def validate_typed_field_value(field_type, value, field_label=None):
+    """Return (ok, error_message) for a typed-field value before save."""
+    val = (value or '').strip()
+    if field_type == 'checkbox_choice':
+        if not val:
+            return True, None
+        if val.upper() == 'X':
+            return True, None
+        return False, 'Invalid checkbox value.'
+    if not val:
+        return False, 'Field value is required'
+    phone_like = field_type == 'phone' or (
+        field_type == 'number' and field_label and 'phone' in field_label.lower()
+    )
+    if phone_like:
+        if not TYPED_FIELD_PHONE_REGEX.match(val):
+            return (
+                False,
+                'Please enter a valid phone number (e.g. (555) 123-4567 or 555-123-4567).',
+            )
+    elif field_type == 'number':
+        try:
+            float(val)
+        except ValueError:
+            return False, 'Please enter a valid number.'
+    elif field_type == 'last4':
+        normalized = normalize_last4_typed_value(val)
+        if not normalized or not TYPED_FIELD_LAST4_REGEX.match(normalized):
+            return (
+                False,
+                'Please enter only the last 4 digits of your SSN (shown as XXX-XX-####).',
+            )
+    return True, None
+
+
+def resolve_document_file_path(document, repair_db=True):
+    """Return an existing filesystem path for a document file, or None if missing.
+
+    Tries stored file_path (absolute or relative to BASE_DIR) and uploads/<filename>.
+    When a file is found at a different path than stored, optionally updates the DB row.
+    """
+    if not document:
+        return None
+    candidates = []
+    if document.file_path:
+        candidates.append(document.file_path)
+        p = Path(document.file_path)
+        if not p.is_absolute():
+            candidates.append(str(BASE_DIR / document.file_path))
+    if document.filename:
+        candidates.append(str(app.config['UPLOAD_FOLDER'] / document.filename))
+    seen = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if os.path.isfile(path):
+            if repair_db and getattr(document, 'file_path', None) != path:
+                try:
+                    document.file_path = path
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+            return path
+    return None
 
 
 # Routes
@@ -2407,6 +2997,88 @@ def is_signature_field_signed(document_id, field, username):
     return False
 
 
+def is_typed_field_filled(document_id, field, username):
+    """True if the user has a saved value for this typed field."""
+    if not field or not field.id:
+        return False
+    try:
+        row = DocumentTypedFieldValue.query.filter_by(
+            document_id=document_id,
+            typed_field_id=field.id,
+            username=username,
+        ).first()
+    except Exception:
+        return False
+    if not row:
+        return False
+    val = (row.field_value or '').strip()
+    if field.field_type == 'checkbox_choice':
+        return val.upper() == 'X'
+    return bool(val)
+
+
+def document_fully_completed_for_user(document_id, username):
+    """All required signature fields, typed fields, and checkbox/radio groups are satisfied."""
+    sig_fields = DocumentSignatureField.query.filter_by(document_id=document_id).all()
+    typed_fields = DocumentTypedField.query.filter_by(document_id=document_id).all()
+    if not sig_fields and not typed_fields:
+        return False
+
+    required_sig = sig_fields
+    if required_sig and not all(
+        is_signature_field_signed(document_id, f, username) for f in required_sig
+    ):
+        return False
+
+    required_typed = [
+        f for f in typed_fields
+        if f.field_type != 'checkbox_choice'
+    ]
+    if not all(is_typed_field_filled(document_id, f, username) for f in required_typed):
+        return False
+
+    choice_groups = {}
+    for f in typed_fields:
+        if f.field_type == 'checkbox_choice':
+            gkey = (f.choice_group or '').strip() or f'_field_{f.id}'
+            choice_groups.setdefault(gkey, []).append(f)
+    for fields in choice_groups.values():
+        if not any(is_typed_field_filled(document_id, f, username) for f in fields):
+            return False
+
+    return True
+
+
+def _mark_document_assignment_complete_if_ready(document_id, username):
+    """Mark assignment and document task complete when all fields are filled."""
+    if not document_fully_completed_for_user(document_id, username):
+        return False
+    assignment = DocumentAssignment.query.filter_by(
+        document_id=document_id,
+        username=username,
+    ).first()
+    if assignment and not assignment.is_completed:
+        assignment.is_completed = True
+        assignment.completed_at = datetime.utcnow()
+    task = UserTask.query.filter_by(
+        document_id=document_id,
+        username=username,
+        task_type='document',
+    ).first()
+    if task and task.status != 'completed':
+        task.status = 'completed'
+        task.completed_at = datetime.utcnow()
+    return True
+
+
+def _pdf_field_name_from_placeholder(placeholder):
+    """Extract AcroForm widget name from placeholder acro:FieldName."""
+    ph = (placeholder or '').strip()
+    if ph.startswith(ACRO_PLACEHOLDER_PREFIX):
+        return ph[len(ACRO_PLACEHOLDER_PREFIX):]
+    return ''
+
+
 @app.route('/dashboard/dismiss-finale', methods=['POST'])
 @login_required
 def dismiss_finale_message():
@@ -2664,39 +3336,27 @@ def dashboard():
                 if task.task_type == 'document' and task.document_id:
                     document = Document.query.get(task.document_id)
                     if document:
-                        # Check if all required signature fields are signed
+                        # Check if all document fields are complete: every non-checkbox field and one per checkbox group.
                         try:
-                            required_fields = DocumentSignatureField.query.filter_by(
+                            all_complete = document_fully_completed_for_user(task.document_id, current_user.username)
+                            if all_complete and task.status != 'completed':
+                                # Auto-complete the task
+                                task.status = 'completed'
+                                task.completed_at = datetime.utcnow()
+                                db.session.commit()
+
+                            # Update assignment completion status
+                            assignment = DocumentAssignment.query.filter_by(
                                 document_id=task.document_id,
-                                is_required=True
-                            ).all()
-                            
-                            if required_fields:
-                                # Check if all required fields are signed (using helper to handle deleted fields)
-                                try:
-                                    all_signed = all(is_signature_field_signed(task.document_id, f, current_user.username) for f in required_fields)
-                                    
-                                    if all_signed and task.status != 'completed':
-                                        # Auto-complete the task
-                                        task.status = 'completed'
-                                        task.completed_at = datetime.utcnow()
-                                        db.session.commit()
-                                    
-                                    # Update assignment completion status
-                                    assignment = DocumentAssignment.query.filter_by(
-                                        document_id=task.document_id,
-                                        username=current_user.username
-                                    ).first()
-                                    if assignment:
-                                        assignment.is_completed = all_signed
-                                        if all_signed and not assignment.completed_at:
-                                            assignment.completed_at = datetime.utcnow()
-                                        db.session.commit()
-                                except Exception as e:
-                                    # If checking signatures fails, skip this task
-                                    continue
+                                username=current_user.username
+                            ).first()
+                            if assignment:
+                                assignment.is_completed = all_complete
+                                if all_complete and not assignment.completed_at:
+                                    assignment.completed_at = datetime.utcnow()
+                                db.session.commit()
                         except Exception as e:
-                            # If getting required fields fails, skip this task
+                            # If checking document completion fails, skip this task
                             continue
             except Exception as e:
                 # If processing this task fails, skip it
@@ -2763,7 +3423,7 @@ def dashboard():
                 ).first()
                 
                 if not notification or not notification.is_read:
-                    task_url = url_for('sign_document', doc_id=task.document_id) if (task.task_type == 'document' and task.document_id) else url_for('user_tasks')
+                    task_url = user_sign_document_url(task.document_id) if (task.task_type == 'document' and task.document_id) else url_for('user_tasks')
                     notifications.append({
                         'type': 'task',
                         'id': task.id,
@@ -2786,20 +3446,11 @@ def dashboard():
         except Exception as e:
             all_videos = []
         
-        # Get visible documents
-        # Only show assigned documents to users (not just visible ones)
-        assigned_doc_ids = set()
+        # Dashboard document preview: assigned + visible + store-scoped (same rules as Files tab)
         try:
-            if not is_admin:
-                assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
-                assigned_doc_ids = set(a.document_id for a in assigned_documents)
-                if assigned_doc_ids:
-                    visible_documents = Document.query.filter(Document.id.in_(assigned_doc_ids)).order_by(Document.created_at.desc()).limit(3).all()
-                else:
-                    visible_documents = []
-            else:
-                visible_documents = Document.query.filter_by(is_visible=True).order_by(Document.created_at.desc()).limit(3).all()
-        except Exception as e:
+            visible_documents, _ = documents_for_user_files(current_user.username)
+            visible_documents = visible_documents[:3]
+        except Exception:
             visible_documents = []
         
         # Get active external links for the dashboard
@@ -2824,16 +3475,16 @@ def dashboard():
         except Exception:
             pass
 
-        # Finale message from admin (show in center of page when set and not dismissed)
+        # Finale message from admin (only when all work is done; tasks panel otherwise)
         show_finale = False
         finale_message = ''
         finale_document = None
+        has_new_assigned_work = False
         if user_new_hire:
             msg = getattr(user_new_hire, 'finale_message', None)
             sent_at = getattr(user_new_hire, 'finale_message_sent_at', None)
             dismissed_at = getattr(user_new_hire, 'finale_message_dismissed_at', None)
-            if msg and sent_at and not dismissed_at:
-                show_finale = True
+            if msg and sent_at:
                 finale_message = msg
                 doc_id = getattr(user_new_hire, 'finale_document_id', None)
                 if doc_id:
@@ -2841,6 +3492,12 @@ def dashboard():
                         finale_document = Document.query.get(int(doc_id))
                     except Exception:
                         finale_document = None
+            show_finale = bool(
+                all_tasks_completed and msg and sent_at and not dismissed_at
+            )
+            has_new_assigned_work = bool(
+                sent_at and (incomplete_training or user_tasks)
+            )
 
         return render_template_string('''
     <!DOCTYPE html>
@@ -3997,6 +4654,9 @@ def dashboard():
                             <h2 class="section-title-dash">Tasks</h2>
                             <a href="{{ url_for('user_tasks') }}" class="dashboard-cta-link">Complete items &gt;</a>
                         </div>
+                        {% if has_new_assigned_work %}
+                        <p class="dashboard-new-work-hint" style="margin: 0 0 12px; color: #b7c1d3; font-size: 0.95em;">You have new assigned items to complete.</p>
+                        {% endif %}
                         <div style="display: flex; align-items: center; gap: 12px;">
                             <div class="progress-bar-container" style="flex: 1; min-width: 0;">
                                 <div class="progress-bar-fill" style="width: {{ progress_percentage }}%;"></div>
@@ -4033,7 +4693,7 @@ def dashboard():
                                 <p>{{ task.task_description or 'Complete this task' }}</p>
                             </div>
                             {% if task.task_type == 'document' and task.document_id %}
-                            <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" class="task-btn">Sign Document ></a>
+                            <a href="{{ user_sign_document_url(task.document_id) }}" class="task-btn">Sign Document ></a>
                             {% else %}
                             <a href="{{ url_for('user_tasks') }}" class="task-btn">View Task ></a>
                             {% endif %}
@@ -4261,7 +4921,8 @@ def dashboard():
          user_tasks=user_tasks, total_tasks=total_tasks, completed_tasks=completed_tasks,
          pending_count=pending_count, notifications=notifications, external_links=external_links,
          hero_media_url=hero_media_url, hero_media_type=hero_media_type,
-         show_finale=show_finale, finale_message=finale_message, finale_document=finale_document)
+         show_finale=show_finale, finale_message=finale_message, finale_document=finale_document,
+         has_new_assigned_work=has_new_assigned_work)
     except Exception as e:
         # Log the error for debugging
         import traceback
@@ -4438,39 +5099,27 @@ def user_tasks():
                     try:
                         document = Document.query.get(task.document_id)
                         if document:
-                            # Check if all required signature fields are signed
+                            # Check if all document fields are complete: every non-checkbox field and one per checkbox group.
                             try:
-                                required_fields = DocumentSignatureField.query.filter_by(
+                                all_complete = document_fully_completed_for_user(task.document_id, current_user.username)
+                                if all_complete and task.status != 'completed':
+                                    # Auto-complete the task
+                                    task.status = 'completed'
+                                    task.completed_at = datetime.utcnow()
+                                    db.session.commit()
+
+                                # Update assignment completion status
+                                assignment = DocumentAssignment.query.filter_by(
                                     document_id=task.document_id,
-                                    is_required=True
-                                ).all()
-                                
-                                if required_fields:
-                                    # Check if all required fields are signed (using helper to handle deleted fields)
-                                    try:
-                                        all_signed = all(is_signature_field_signed(task.document_id, f, current_user.username) for f in required_fields)
-                                        
-                                        if all_signed and task.status != 'completed':
-                                            # Auto-complete the task
-                                            task.status = 'completed'
-                                            task.completed_at = datetime.utcnow()
-                                            db.session.commit()
-                                        
-                                        # Update assignment completion status
-                                        assignment = DocumentAssignment.query.filter_by(
-                                            document_id=task.document_id,
-                                            username=current_user.username
-                                        ).first()
-                                        if assignment:
-                                            assignment.is_completed = all_signed
-                                            if all_signed and not assignment.completed_at:
-                                                assignment.completed_at = datetime.utcnow()
-                                            db.session.commit()
-                                    except Exception as e:
-                                        # If checking signatures fails, skip this task
-                                        continue
+                                    username=current_user.username
+                                ).first()
+                                if assignment:
+                                    assignment.is_completed = all_complete
+                                    if all_complete and not assignment.completed_at:
+                                        assignment.completed_at = datetime.utcnow()
+                                    db.session.commit()
                             except Exception as e:
-                                # If getting required fields fails, skip this task
+                                # If checking document completion fails, skip this task
                                 continue
                     except Exception as e:
                         # If getting document fails, skip this task
@@ -5115,7 +5764,7 @@ def user_tasks():
                             <div class="task-title" style="flex: 1;">
                                 {% if task.status != 'completed' and task.task_type == 'document' %}
                                 {% if task.document_id %}
-                                <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" style="color: inherit; text-decoration: none;">{{ task.task_title }}</a>
+                                <a href="{{ user_sign_document_url(task.document_id) }}" style="color: inherit; text-decoration: none;">{{ task.task_title }}</a>
                                 {% else %}
                                 <a href="{{ url_for('view_documents') }}" style="color: inherit; text-decoration: none;">{{ task.task_title }}</a>
                                 {% endif %}
@@ -5152,7 +5801,7 @@ def user_tasks():
                                 {% if task.status != 'completed' %}
                                     {% if task.task_type == 'document' %}
                                         {% if task.document_id %}
-                                        <a href="{{ url_for('sign_document', doc_id=task.document_id) }}" class="btn btn-success" style="flex-shrink: 0;">✍️ Sign Document</a>
+                                        <a href="{{ user_sign_document_url(task.document_id) }}" class="btn btn-success" style="flex-shrink: 0;">✍️ Sign Document</a>
                                         {% else %}
                                         <a href="{{ url_for('view_documents') }}" class="btn btn-success" style="flex-shrink: 0;">✍️ Sign Document</a>
                                         {% endif %}
@@ -6845,6 +7494,12 @@ def add_new_hire():
     if default_store_id:
         store = Store.query.get(default_store_id)
         default_store_code = (store.code or '').strip().lower() if store else ''
+    try:
+        departments = Department.query.order_by(Department.name).all()
+    except Exception:
+        db.session.rollback()
+        _ensure_departments_table()
+        departments = Department.query.order_by(Department.name).all()
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -7423,8 +8078,28 @@ def add_new_hire():
                             </div>
                             
                             <div class="form-group">
-                                <label for="department">Department (optional)</label>
-                                <input type="text" name="department" id="department" placeholder="e.g., Sales, IT, HR">
+                                <label for="department_id">Department (optional)</label>
+                                <select name="department_id" id="department_id" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem;">
+                                    <option value="">— No department —</option>
+                                    {% for dept in departments %}
+                                    <option value="{{ dept.id }}">{{ dept.name }}</option>
+                                    {% endfor %}
+                                    {% if current_user.is_admin() %}
+                                    <option value="__add__">+ Add Department…</option>
+                                    {% endif %}
+                                </select>
+                                {% if current_user.is_admin() %}
+                                <div id="add-department-panel" style="display: none; margin-top: 10px; padding: 12px; background: #f8f9fa; border-radius: 6px; border: 1px solid #ddd;">
+                                    <label for="new_department_name" style="font-size: 0.9em;">New department name</label>
+                                    <div style="display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap;">
+                                        <input type="text" id="new_department_name" placeholder="e.g., Sales, Detailing" style="flex: 1; min-width: 180px; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px;">
+                                        <button type="button" class="btn btn-success" id="add-department-btn" style="padding: 8px 14px;">Add</button>
+                                        <button type="button" class="btn" id="cancel-add-department-btn" style="padding: 8px 14px; background: #6c757d;">Cancel</button>
+                                    </div>
+                                    <p id="add-department-error" style="color: #dc3545; font-size: 0.85em; margin-top: 6px; display: none;"></p>
+                                </div>
+                                {% endif %}
+                                <small style="color: #666; display: block; margin-top: 6px;">{% if current_user.is_admin() %}Choose a department or add a new one. {% endif %}Managers: pick from the list configured under Manage Departments.</small>
                             </div>
                             
                             <div class="form-group">
@@ -7679,6 +8354,11 @@ def add_new_hire():
                         alert('Password and Confirm Password do not match.');
                         return false;
                     }
+                    var deptSel = document.getElementById('department_id');
+                    if (deptSel && deptSel.value === '__add__') {
+                        alert('Finish adding the department or click Cancel before continuing.');
+                        return false;
+                    }
                 } else if (currentStep === 2) {
                     const videos = document.querySelectorAll('input[name="required_videos"]:checked');
                     if (videos.length === 0) {
@@ -7698,7 +8378,12 @@ def add_new_hire():
                 const lastName = document.getElementById('last_name').value || '';
                 document.getElementById('review-name').textContent = (firstName + ' ' + lastName).trim() || '-';
                 document.getElementById('review-email').textContent = document.getElementById('email').value || 'Will be auto-generated';
-                document.getElementById('review-department').textContent = document.getElementById('department').value || '-';
+                var deptSelect = document.getElementById('department_id');
+                var deptText = '-';
+                if (deptSelect && deptSelect.value && deptSelect.value !== '__add__') {
+                    deptText = deptSelect.options[deptSelect.selectedIndex].text;
+                }
+                document.getElementById('review-department').textContent = deptText;
                 const startDate = document.getElementById('start_date').value;
                 document.getElementById('review-start-date').textContent = startDate || '-';
                 const revokeDate = document.getElementById('access_revoked_at').value;
@@ -7739,10 +8424,74 @@ def add_new_hire():
                     }
                 });
             });
+
+            (function() {
+                var deptSelect = document.getElementById('department_id');
+                var addPanel = document.getElementById('add-department-panel');
+                if (!deptSelect) return;
+                var lastDeptValue = '';
+                deptSelect.addEventListener('change', function() {
+                    if (deptSelect.value === '__add__' && addPanel) {
+                        lastDeptValue = deptSelect.dataset.prevValue || '';
+                        addPanel.style.display = 'block';
+                        var err = document.getElementById('add-department-error');
+                        if (err) { err.style.display = 'none'; err.textContent = ''; }
+                        var nameInp = document.getElementById('new_department_name');
+                        if (nameInp) nameInp.focus();
+                    } else if (addPanel) {
+                        addPanel.style.display = 'none';
+                        deptSelect.dataset.prevValue = deptSelect.value;
+                    }
+                });
+                var addBtn = document.getElementById('add-department-btn');
+                if (addBtn) {
+                    addBtn.addEventListener('click', function() {
+                        var nameInp = document.getElementById('new_department_name');
+                        var err = document.getElementById('add-department-error');
+                        var name = nameInp ? nameInp.value.trim() : '';
+                        if (!name) {
+                            if (err) { err.textContent = 'Enter a department name.'; err.style.display = 'block'; }
+                            return;
+                        }
+                        var fd = new FormData();
+                        fd.append('name', name);
+                        fetch('{{ url_for("add_department") }}', {
+                            method: 'POST',
+                            body: fd,
+                            credentials: 'same-origin',
+                            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                        }).then(function(r) { return r.json(); }).then(function(data) {
+                            if (!data.success) {
+                                if (err) { err.textContent = data.error || 'Could not add department.'; err.style.display = 'block'; }
+                                return;
+                            }
+                            var opt = document.createElement('option');
+                            opt.value = String(data.id);
+                            opt.textContent = data.name;
+                            var addOpt = deptSelect.querySelector('option[value="__add__"]');
+                            if (addOpt) deptSelect.insertBefore(opt, addOpt);
+                            else deptSelect.appendChild(opt);
+                            deptSelect.value = String(data.id);
+                            if (addPanel) addPanel.style.display = 'none';
+                            if (nameInp) nameInp.value = '';
+                            if (err) err.style.display = 'none';
+                        }).catch(function() {
+                            if (err) { err.textContent = 'Could not add department. Try Manage Departments.'; err.style.display = 'block'; }
+                        });
+                    });
+                }
+                var cancelBtn = document.getElementById('cancel-add-department-btn');
+                if (cancelBtn) {
+                    cancelBtn.addEventListener('click', function() {
+                        if (addPanel) addPanel.style.display = 'none';
+                        deptSelect.value = lastDeptValue || '';
+                    });
+                }
+            })();
         </script>
     </body>
     </html>
-    ''', videos=videos, documents=documents, checklist_items=checklist_items, roles=roles, role_default_documents=role_default_documents, stores=stores, default_store_id=default_store_id, default_store_code=default_store_code)
+    ''', videos=videos, documents=documents, checklist_items=checklist_items, roles=roles, role_default_documents=role_default_documents, stores=stores, departments=departments, default_store_id=default_store_id, default_store_code=default_store_code)
 
 
 @app.route('/admin/new-hire/create', methods=['POST'])
@@ -7756,7 +8505,8 @@ def create_new_hire():
     last_name = request.form.get('last_name', '').strip()
     email = normalize_email(request.form.get('email'))
     password = request.form.get('password', '').strip()
-    department = request.form.get('department', '').strip()
+    department_id_raw = request.form.get('department_id', '').strip()
+    dept_id, dept_name = resolve_department_from_form(department_id_raw)
     start_date_str = request.form.get('start_date', '').strip()
     access_revoked_at_str = request.form.get('access_revoked_at', '').strip()
     required_videos = request.form.getlist('required_videos')
@@ -7868,13 +8618,15 @@ def create_new_hire():
             first_name=first_name,
             last_name=last_name,
             email=email,
-            department=department if department else None,
+            department=dept_name,
             start_date=start_date,
             access_revoked_at=access_revoked_at,
             created_by=current_user.username
         )
         if role_id is not None and hasattr(NewHire, 'role_id'):
             new_hire.role_id = role_id
+        if hasattr(NewHire, 'department_id'):
+            new_hire.department_id = dept_id
         if hasattr(NewHire, 'store_id'):
             new_hire.store_id = store_id
         db.session.add(new_hire)
@@ -9321,6 +10073,16 @@ def _admin_dashboard_impl():
                             <span class="quick-link-text">Manage Stores</span>
                             <span class="quick-link-count">→</span>
                         </a>
+                        <a href="{{ url_for('manage_departments') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">🏢</span>
+                            <span class="quick-link-text">Manage Departments</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
+                        <a href="{{ url_for('admin_test_form') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">🧪</span>
+                            <span class="quick-link-text">Test Form Wizard</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
                         <a href="{{ url_for('settings_page') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">⚙️</span>
                             <span class="quick-link-text">Settings</span>
@@ -9770,7 +10532,7 @@ def manager_dashboard():
                 <a href="{{ url_for('manage_documents', staff_console='manager') }}" class="card">
                     <h3>Forms / documents</h3>
                     <div class="number">{{ documents_count }}</div>
-                    <p class="hint">Forms visible to this store. Upload and manage visibility.</p>
+                    <p class="hint">Forms for this store. Manage library access and assignments.</p>
                 </a>
                 {% endif %}
                 {% if can_training %}
@@ -10300,6 +11062,8 @@ def manage_users():
             except (TypeError, ValueError):
                 u.is_revoked = False
         users = [u for u in users if not getattr(u, 'is_revoked', False)]
+        _admin_un = (current_user.username if current_user else '') or ''
+        admin_name = staff_header_display_name(_admin_un) if _admin_un else 'Admin'
         return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -10308,68 +11072,283 @@ def manage_users():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
-            body { background: #f5f5f5; }
-            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
-            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
-            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            body.manage-users-page {
+                background: #0a0e14;
+                color: #f2f5fb;
+                min-height: 100vh;
+            }
+            .top-header {
+                background: #000;
+                padding: 12px 30px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
+                flex-wrap: wrap;
+                gap: 12px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                position: relative;
+                z-index: 100;
+                overflow: visible;
+            }
+            .logo-section {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                font-size: 1.4em;
+                font-weight: 800;
+                color: #fff;
+            }
+            .logo-section img {
+                height: 80px;
+                width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
+            }
+            .back-btn {
+                background: rgba(255,255,255,0.2);
+                color: #fff;
+                padding: 8px 16px;
+                border-radius: 0.5rem;
+                text-decoration: none;
+                font-size: 0.95em;
+                font-weight: 500;
+                border: 1px solid rgba(255,255,255,0.3);
+                white-space: nowrap;
+            }
             .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
-            .header-right { display: flex; align-items: center; gap: 16px; }
-            .user-dropdown { cursor: pointer; position: relative; }
-            .user-icon { width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em; }
+            .header-right { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+            .user-dropdown { cursor: pointer; position: relative; display: flex; align-items: center; }
+            .user-icon {
+                width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff;
+                display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em;
+            }
             .user-dropdown:hover .user-icon { background: #d90000; }
-            .dropdown-menu { display: none; position: absolute; top: 100%; right: 0; margin-top: 8px; background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); z-index: 1000; padding: 8px 0; border: 1px solid #eee; }
+            .dropdown-menu {
+                display: none;
+                position: absolute;
+                top: 100%;
+                right: 0;
+                margin-top: 8px;
+                min-width: 200px;
+                border-radius: 8px;
+                z-index: 1000;
+                padding: 8px 0;
+            }
             .dropdown-menu.show { display: block; }
-            .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
-            .dropdown-item:hover { background: #f5f5f5; }
-            .container { max-width: 1200px; margin: 24px auto; padding: 0 20px; }
-            .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
-            .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
-            .form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
-            .form-group { flex: 1; min-width: 140px; }
-            .form-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 4px; }
-            .form-group input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem; font-size: 16px; min-height: 44px; }
-            .btn { padding: 10px 20px; border: none; border-radius: 0.5rem; cursor: pointer; font-size: 1em; font-weight: 600; text-decoration: none; display: inline-block; min-height: 44px; }
-            .btn-primary { background: #FE0100; color: white; }
-            .btn-primary:hover { background: #cc0000; color: white; }
-            .btn-secondary { background: #6c757d; color: white; }
-            .btn-secondary:hover { background: #5a6268; color: white; }
-            .btn-success { background: #28a745; color: white; }
-            .btn-danger { background: #dc3545; color: white; }
-            .btn-warning { background: #ffc107; color: #000; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #eee; }
-            th { background: #f8f9fa; font-weight: 600; font-size: 0.9em; }
-            .actions-cell { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; }
-            .actions-cell .btn { white-space: nowrap; flex-shrink: 0; }
-            .actions-cell form { display: inline-flex; margin: 0; flex-shrink: 0; }
-            .badge { padding: 4px 10px; border-radius: 12px; font-size: 0.8em; font-weight: 600; }
-            .badge-admin { background: #FE0100; color: white; }
-            .badge-user { background: #6c757d; color: white; }
-            .badge-active { background: #d4edda; color: #155724; }
-            .badge-revoked { background: #f8d7da; color: #721c24; }
-            .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; }
+            .dropdown-item {
+                display: block;
+                padding: 10px 16px;
+                text-decoration: none;
+                font-size: 0.95em;
+            }
+            .page-title-bar {
+                max-width: min(100%, 1600px);
+                margin: 20px auto 0;
+                padding: 0 20px;
+            }
+            .page-title-bar h1 {
+                font-size: 1.5em;
+                font-weight: 800;
+                color: #f2f5fb;
+            }
+            .container {
+                max-width: min(100%, 1600px);
+                width: 100%;
+                margin: 24px auto;
+                padding: 0 20px;
+            }
+            .card {
+                border-radius: 0.5rem;
+                padding: 24px;
+                margin-bottom: 24px;
+                width: 100%;
+            }
+            .card h2 {
+                font-size: 1.2em;
+                margin-bottom: 16px;
+                padding-bottom: 10px;
+                border-bottom: 2px solid rgba(255, 255, 255, 0.14);
+                color: #f2f5fb;
+            }
+            .users-table-wrap {
+                width: 100%;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                border-radius: 8px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            .users-table {
+                width: 100%;
+                min-width: 1100px;
+                border-collapse: collapse;
+                table-layout: auto;
+            }
+            .users-table th,
+            .users-table td {
+                padding: 12px 14px;
+                text-align: left;
+                vertical-align: middle;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            .users-table th {
+                font-weight: 600;
+                font-size: 0.85em;
+                white-space: nowrap;
+            }
+            .users-table td.col-email,
+            .users-table td.col-username {
+                max-width: 200px;
+                word-break: break-word;
+            }
+            .users-table td.col-store {
+                max-width: 180px;
+                word-break: break-word;
+            }
+            .users-table td.col-actions {
+                min-width: 280px;
+            }
+            .actions-cell {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 6px;
+            }
+            .actions-cell .btn {
+                padding: 6px 12px;
+                font-size: 0.82em;
+                min-height: 34px;
+                white-space: nowrap;
+            }
+            .actions-cell form { display: inline-flex; margin: 0; }
+            .badge-role {
+                display: inline-block;
+                padding: 4px 10px;
+                border-radius: 12px;
+                font-size: 0.8em;
+                font-weight: 600;
+                text-transform: capitalize;
+            }
+            .badge-role-manager {
+                background: rgba(58, 142, 239, 0.25);
+                color: #b8d4ff;
+                border: 1px solid rgba(58, 142, 239, 0.4);
+            }
+            .badge-role-user {
+                background: rgba(255, 255, 255, 0.1);
+                color: #d0d8e8;
+            }
+            .empty-hint { color: #b7c1d3; }
+            .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.65); align-items: center; justify-content: center; padding: 16px; }
             .modal.show { display: flex; }
-            .modal-content { background: white; border-radius: 0.5rem; padding: 24px; max-width: 420px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
-            .modal-content h3 { margin-bottom: 16px; }
+            .modal-content {
+                border-radius: 0.5rem;
+                padding: 24px;
+                max-width: 480px;
+                width: 100%;
+                max-height: 90vh;
+                overflow-y: auto;
+            }
+            .modal-content h3 { margin-bottom: 16px; color: #f2f5fb; }
             .modal-content .form-group { margin-bottom: 16px; }
-            #managerPermsGroup > label { color: #333; font-weight: 600; font-size: 1em; }
-            #managerPerms label { display: flex; align-items: center; margin: 6px 0; color: #333; font-weight: 500; font-size: 0.95em; cursor: pointer; gap: 8px; }
-            #managerPerms input[type="checkbox"] { width: 16px; height: 16px; min-width: 16px; min-height: 0; margin: 0; padding: 0; flex-shrink: 0; cursor: pointer; }
-            .modal-actions { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
-            .flash { padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; }
-            .flash.success { background: #d4edda; color: #155724; }
-            .flash.error { background: #f8d7da; color: #721c24; }
-            @media (max-width: 768px) { .form-row { flex-direction: column; } .form-group { min-width: 100%; } th, td { padding: 10px; font-size: 0.9em; } .actions-cell { flex-direction: column; } }
+            .modal-content .form-group label { display: block; margin-bottom: 6px; color: #b7c1d3; font-size: 0.9em; }
+            .modal-content .form-group input,
+            .modal-content .form-group select {
+                width: 100%;
+                padding: 10px 12px;
+                border-radius: 0.5rem;
+                font-size: 16px;
+                min-height: 44px;
+            }
+            .modal-content small { color: #9aa5b8; }
+            #managerPermsGroup > label { font-weight: 600; font-size: 1em; color: #f2f5fb; }
+            #managerPerms label {
+                display: flex;
+                align-items: flex-start;
+                margin: 8px 0;
+                color: #d0d8e8;
+                font-size: 0.92em;
+                cursor: pointer;
+                gap: 8px;
+                line-height: 1.35;
+            }
+            #managerPerms input[type="checkbox"] {
+                width: 18px; height: 18px; min-width: 18px; margin-top: 2px;
+                flex-shrink: 0; cursor: pointer; accent-color: #fe0100;
+            }
+            .modal-actions { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+            @media (max-width: 768px) {
+                .top-header { padding: 12px 15px; }
+                .logo-section { font-size: 1.1em; }
+                .logo-section img { height: 60px; margin-bottom: -30px; }
+                .container { padding: 0 12px; }
+                .card { padding: 16px; }
+                .actions-cell { flex-direction: column; align-items: stretch; }
+                .actions-cell .btn { width: 100%; }
+            }
         {{ global_theme_css|safe }}
+            body.manage-users-page .top-header {
+                background: linear-gradient(160deg, #121821 0%, #090d14 100%) !important;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.17);
+            }
+            body.manage-users-page .logo-section,
+            body.manage-users-page .logo-section .logo-text {
+                color: #f2f5fb !important;
+            }
+            body.manage-users-page .dropdown-menu {
+                background: #151b28 !important;
+                border: 1px solid rgba(255, 255, 255, 0.17) !important;
+                box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36) !important;
+            }
+            body.manage-users-page .dropdown-item {
+                color: #f2f5fb !important;
+            }
+            body.manage-users-page .dropdown-item:hover {
+                background: rgba(255, 255, 255, 0.06) !important;
+            }
+            body.manage-users-page .card {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.14) !important;
+            }
+            body.manage-users-page .users-table-wrap,
+            body.manage-users-page .users-table {
+                background: transparent !important;
+            }
+            body.manage-users-page .users-table th,
+            body.manage-users-page .users-table td {
+                color: #f2f5fb !important;
+            }
+            body.manage-users-page .users-table th {
+                background: rgba(255, 255, 255, 0.06) !important;
+            }
+            body.manage-users-page table {
+                border: none !important;
+                box-shadow: none !important;
+            }
+            body.manage-users-page .modal-content {
+                background: linear-gradient(160deg, #1a202c 0%, #101622 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            }
+            body.manage-users-page .modal-content input[readonly] {
+                background: rgba(255, 255, 255, 0.05) !important;
+                color: #9aa5b8 !important;
+            }
+            body.manage-users-page .you-label {
+                color: #9aa5b8;
+                font-size: 0.9em;
+            }
         </style>
     </head>
-    <body>
-        <div class="header">
-            <h1>👥 Manage Users</h1>
+    <body class="manage-users-page">
+        <div class="top-header">
+            <div class="logo-section">
+                <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+                <span class="logo-text">Ziebart Onboarding</span>
+            </div>
             <div class="header-right">
                 <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('manageUsersUserDropdown').classList.toggle('show');">
-                    <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
+                    <div class="user-icon">{{ (admin_name or 'A')[0].upper() }}</div>
                     <div class="dropdown-menu" id="manageUsersUserDropdown">
                         {{ staff_console_dropdown_links }}
                     </div>
@@ -10377,6 +11356,9 @@ def manage_users():
             </div>
         </div>
         <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('manageUsersUserDropdown').classList.remove('show'); });</script>
+        <div class="page-title-bar">
+            <h1>Manage Users</h1>
+        </div>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -10389,7 +11371,8 @@ def manage_users():
             <div class="card">
                 <h2>Users</h2>
                 {% if users %}
-                <table>
+                <div class="users-table-wrap">
+                <table class="users-table">
                     <thead>
                         <tr>
                             <th>Username</th>
@@ -10405,11 +11388,13 @@ def manage_users():
                     <tbody>
                         {% for user in users %}
                         <tr>
-                            <td>{{ user.username }}</td>
-                            <td>{{ user.email or '-' }}</td>
+                            <td class="col-username">{{ user.username }}</td>
+                            <td class="col-email">{{ user.email or '-' }}</td>
                             <td>{{ user.full_name or '-' }}</td>
-                            <td>{{ user.role or 'user' }}</td>
-                            <td>{{ user_store_name.get(user.id, '-') }}</td>
+                            <td>
+                                <span class="badge-role badge-role-{{ user.role or 'user' }}">{{ user.role or 'user' }}</span>
+                            </td>
+                            <td class="col-store">{{ user_store_name.get(user.id, '-') }}</td>
                             <td>
                                 {% if user.is_revoked %}
                                 <span class="badge badge-revoked">Revoked</span>
@@ -10418,23 +11403,26 @@ def manage_users():
                                 {% endif %}
                             </td>
                             <td>{{ user.last_login.strftime('%Y-%m-%d %H:%M') if user.last_login else 'Never' }}</td>
-                            <td class="actions-cell">
+                            <td class="col-actions">
+                                <div class="actions-cell">
                                 <button type="button" class="btn btn-secondary btn-edit-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}" data-email="{{ (user.email or '')|e }}" data-full-name="{{ (user.full_name or '')|e }}" data-store-id="{{ user.store_id or '' }}" data-role="{{ user.role or 'user' }}" data-permissions="{{ user_manager_permissions.get(user.id, [])|join(',') }}">Edit</button>
                                 <button type="button" class="btn btn-secondary btn-password-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}">Reset Password</button>
                                 {% if user.username != current_user.username and not user.is_revoked %}
-                                    <form method="POST" action="{{ url_for('users_revoke', user_id=user.id) }}" style="display: inline;" onsubmit="return confirm('Remove {{ user.username }}? This will delete their account and they will no longer be able to log in.');">
-                                        <button type="submit" class="btn btn-danger">Revoke Access</button>
+                                    <form method="POST" action="{{ url_for('users_revoke', user_id=user.id) }}" onsubmit="return confirm('Remove {{ user.username }}? This will delete their account and they will no longer be able to log in.');">
+                                        <button type="submit" class="btn btn-danger">Revoke</button>
                                     </form>
                                 {% elif user.username == current_user.username %}
-                                <span style="color: #999; font-size: 0.9em;">(you)</span>
+                                <span class="you-label">(you)</span>
                                 {% endif %}
+                                </div>
                             </td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
+                </div>
                 {% else %}
-                <p style="color: #666;">No users yet. Users are created when you add a new hire and they start onboarding.</p>
+                <p class="empty-hint">No users yet. Users are created when you add a new hire and they start onboarding.</p>
                 {% endif %}
             </div>
         </div>
@@ -10446,12 +11434,12 @@ def manage_users():
                     <input type="hidden" name="user_id" id="editUserId">
                     <div class="form-group">
                         <label>Username</label>
-                        <input type="text" id="editUsername" readonly style="background: #f0f0f0;">
+                        <input type="text" id="editUsername" readonly>
                     </div>
                     <div class="form-group">
                         <label>Email</label>
-                        <input type="email" name="email" id="editUserEmail" readonly style="background: #f0f0f0;" placeholder="Email is locked after creation">
-                        <small style="color: #666;">Login email is locked after account creation.</small>
+                        <input type="email" name="email" id="editUserEmail" readonly placeholder="Email is locked after creation">
+                        <small>Login email is locked after account creation.</small>
                     </div>
                     <div class="form-group">
                         <label>Full name</label>
@@ -10846,6 +11834,962 @@ def delete_role(role_id):
         db.session.rollback()
         flash(f'Error deleting Position/Title: {str(e)}', 'error')
     return redirect(url_for('manage_roles'))
+
+
+@app.route('/admin/departments')
+@admin_required
+def manage_departments():
+    """List departments for new hire onboarding."""
+    try:
+        departments = Department.query.order_by(Department.name).all()
+        dept_rows = []
+        for dept in departments:
+            nh_count = NewHire.query.filter_by(department_id=dept.id).count()
+            dept_rows.append({'department': dept, 'new_hire_count': nh_count})
+    except Exception:
+        db.session.rollback()
+        _ensure_departments_table()
+        departments = Department.query.order_by(Department.name).all()
+        dept_rows = [{'department': d, 'new_hire_count': NewHire.query.filter_by(department_id=d.id).count()} for d in departments]
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Manage Departments - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+            .header h1 { font-weight: 800; margin: 0; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+            .container { max-width: 900px; margin: 30px auto; padding: 0 20px; }
+            .panel { background: white; padding: 25px; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+            .panel h2 { margin-bottom: 20px; color: #000; font-size: 1.3em; }
+            .btn { display: inline-block; padding: 10px 20px; background: #FE0100; color: white; text-decoration: none; border-radius: 5px; border: none; cursor: pointer; font-size: 1em; }
+            .btn:hover { background: #c00; color: white; }
+            .btn-success { background: #28a745; }
+            .btn-success:hover { background: #218838; color: white; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { padding: 14px 16px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background: #f8f9fa; font-weight: 600; }
+            tr:hover { background: #f8f9fa; }
+            .form-group { margin-bottom: 15px; }
+            .form-group label { display: block; margin-bottom: 6px; font-weight: 600; }
+            .form-group input[type="text"] { width: 100%; max-width: 300px; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem; }
+            .dept-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        {{ global_theme_css|safe }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>Manage Departments</h1>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+        </div>
+        <div class="container">
+            <div class="panel">
+                <h2>Add Department</h2>
+                <form method="POST" action="{{ url_for('add_department') }}" style="display: flex; gap: 15px; align-items: flex-end; flex-wrap: wrap;">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label for="department_name">Department name</label>
+                        <input type="text" name="name" id="department_name" placeholder="e.g., Sales, Detailing" required>
+                    </div>
+                    <button type="submit" class="btn btn-success">Add Department</button>
+                </form>
+            </div>
+            <div class="panel">
+                <h2>Departments ({{ dept_rows|length }})</h2>
+                <p style="color: #666; margin-bottom: 15px;">Used in the department dropdown when starting onboarding. Managers can only pick from this list.</p>
+                {% if dept_rows %}
+                <table>
+                    <thead>
+                        <tr><th>Department</th><th>New hires</th><th>Actions</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for row in dept_rows %}
+                        <tr>
+                            <td><strong>{{ row.department.name }}</strong></td>
+                            <td>{{ row.new_hire_count }}</td>
+                            <td>
+                                <div class="dept-actions">
+                                    <form method="POST" action="{{ url_for('delete_department', department_id=row.department.id) }}" style="display: inline;" onsubmit="return confirm('Delete department {{ row.department.name }}?');">
+                                        <button type="submit" class="btn" style="background: #dc3545;">Delete</button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p style="color: #666;">No departments yet. Add one above.</p>
+                {% endif %}
+            </div>
+        </div>
+    </body>
+    </html>
+    ''', dept_rows=dept_rows)
+
+
+def _test_form_wizard_state():
+    sid = session.get('test_form_wizard_id')
+    if not sid:
+        return None
+    return load_wizard_state(app.config['UPLOAD_FOLDER'], sid)
+
+
+def _test_form_wizard_save(state):
+    save_wizard_state(app.config['UPLOAD_FOLDER'], state)
+    session['test_form_wizard_id'] = state['session_id']
+
+
+def _test_form_field_is_last4(field):
+    if not field:
+        return False
+    if field.get('type') == 'last4':
+        return True
+    label = (field.get('label') or '').lower()
+    return (
+        'social security' in label
+        or 'ssn' in label
+        or ('tax id' in label and 'number' in label)
+    )
+
+
+def _test_form_last4_digits(value):
+    val = (value or '').strip().upper()
+    if val.startswith('XXX-XX-'):
+        return re.sub(r'\D', '', val[7:])[:4]
+    digits = re.sub(r'\D', '', val)
+    return digits[-4:] if len(digits) > 4 else digits[:4]
+
+
+def _refresh_test_form_field_positions(state):
+    """Re-map field rectangles from the PDF (fixes placement after layout engine updates)."""
+    path = state.get('pdf_path')
+    if not path or not PDF_WIZARD_FITZ_AVAILABLE:
+        return state
+    try:
+        fresh = extract_fields_from_layout(path)
+    except Exception:
+        return state
+    lookup = {}
+    for f in fresh:
+        lookup[(f['label'].lower().strip(), f['page'], f.get('type'))] = f
+    for f in state.get('fields') or []:
+        key = (f['label'].lower().strip(), f['page'], f.get('type'))
+        hit = lookup.get(key)
+        if hit and hit.get('rect'):
+            f['rect'] = hit['rect']
+    return state
+
+
+@app.route('/admin/test-form')
+@admin_required
+def admin_test_form():
+    """Upload a PDF to convert into a step-by-step digital form (admin test tool)."""
+    state = _test_form_wizard_state()
+    resume_url = None
+    if state and state.get('fields'):
+        if state.get('completed'):
+            resume_url = url_for('admin_test_form_review')
+        else:
+            resume_url = url_for('admin_test_form_fill')
+    ai_configured = bool((os.getenv('OPENAI_API_KEY') or '').strip())
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Test Form Wizard - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+            .header h1 { font-weight: 800; margin: 0; font-size: 1.25em; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            .container { max-width: 720px; margin: 30px auto; padding: 0 20px; }
+            .panel { background: white; padding: 28px; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+            .panel h2 { margin-bottom: 12px; color: #000; font-size: 1.3em; }
+            .panel p { color: #555; line-height: 1.5; margin-bottom: 12px; }
+            .btn { display: inline-block; padding: 10px 20px; background: #FE0100; color: white; text-decoration: none; border-radius: 5px; border: none; cursor: pointer; font-size: 1em; }
+            .btn:hover { background: #c00; color: white; }
+            .btn-secondary { background: #444; }
+            .btn-secondary:hover { background: #333; color: white; }
+            .upload-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 40px 20px; text-align: center; margin: 20px 0; background: #fafafa; }
+            .upload-zone input[type=file] { margin-top: 12px; }
+            .status-note { background: #f0f4ff; border: 1px solid #c5d4f7; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 0.95em; }
+            .status-warn { background: #fff8e6; border-color: #f0d78c; }
+            #analyzeStatus { display: none; margin-top: 16px; }
+            .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid #ddd; border-top-color: #FE0100; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px; }
+            @keyframes spin { to { transform: rotate(360deg); } }
+        {{ global_theme_css|safe }}
+            /* Overrides: global theme forces light text on our light sub-boxes */
+            body.test-form-wizard-page .panel h2,
+            body.test-form-wizard-page .panel p,
+            body.test-form-wizard-page .panel strong,
+            body.test-form-wizard-page .panel label,
+            body.test-form-wizard-page #analyzeStatus {
+                color: #e8ecf4 !important;
+                -webkit-text-fill-color: #e8ecf4 !important;
+            }
+            body.test-form-wizard-page .status-note {
+                background: rgba(13, 110, 253, 0.18) !important;
+                border: 1px solid rgba(100, 149, 237, 0.45) !important;
+                color: #dce9ff !important;
+                -webkit-text-fill-color: #dce9ff !important;
+            }
+            body.test-form-wizard-page .status-note strong {
+                color: #ffffff !important;
+                -webkit-text-fill-color: #ffffff !important;
+            }
+            body.test-form-wizard-page .status-note a {
+                color: #7eb8ff !important;
+            }
+            body.test-form-wizard-page .status-warn {
+                background: rgba(255, 193, 7, 0.14) !important;
+                border-color: rgba(255, 193, 7, 0.5) !important;
+                color: #ffe8a3 !important;
+                -webkit-text-fill-color: #ffe8a3 !important;
+            }
+            body.test-form-wizard-page .upload-zone {
+                background: rgba(255, 255, 255, 0.06) !important;
+                border: 2px dashed rgba(255, 255, 255, 0.28) !important;
+            }
+            body.test-form-wizard-page .upload-zone,
+            body.test-form-wizard-page .upload-zone strong {
+                color: #f2f5fb !important;
+                -webkit-text-fill-color: #f2f5fb !important;
+            }
+            body.test-form-wizard-page .upload-zone input[type=file] {
+                color: #f2f5fb !important;
+                background: rgba(0, 0, 0, 0.25) !important;
+            }
+            body.test-form-wizard-page .btn-secondary {
+                background: #444 !important;
+            }
+        </style>
+    </head>
+    <body class="test-form-wizard-page">
+        <div class="header">
+            <h1>Test Form Wizard</h1>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+        </div>
+        <div class="container">
+            <div class="panel">
+                <h2>Turn a PDF into an easy step-by-step form</h2>
+                <p>Upload a PDF form. The system reads fillable fields when present, or uses AI to detect blanks on scanned forms. You then fill each field one at a time and review a completed summary and PDF.</p>
+                {% if not pdf_wizard_available %}
+                <div class="status-note status-warn">PyMuPDF is required for this feature. Install with: pip install PyMuPDF</div>
+                {% elif not ai_configured %}
+                <div class="status-note status-warn">Tip: Set <strong>OPENAI_API_KEY</strong> in .env for best results on scanned (non-fillable) PDFs.</div>
+                {% else %}
+                <div class="status-note">AI field detection is enabled for scanned PDFs.</div>
+                {% endif %}
+                {% if resume_url %}
+                <div class="status-note">
+                    You have a form in progress.
+                    <a href="{{ resume_url }}">Continue</a>
+                    ·
+                    <form method="POST" action="{{ url_for('admin_test_form_reset') }}" style="display:inline;" onsubmit="return confirm('Start over? Current progress will be deleted.');">
+                        <button type="submit" class="btn btn-secondary" style="padding:4px 10px;font-size:0.85em;">Start over</button>
+                    </form>
+                </div>
+                {% endif %}
+                <form id="uploadForm" method="POST" action="{{ url_for('admin_test_form_analyze') }}" enctype="multipart/form-data">
+                    <div class="upload-zone">
+                        <strong>Choose a PDF form</strong>
+                        <br>
+                        <input type="file" name="pdf_file" accept="application/pdf,.pdf" required {% if not pdf_wizard_available %}disabled{% endif %}>
+                    </div>
+                    <button type="submit" class="btn" id="analyzeBtn" {% if not pdf_wizard_available %}disabled{% endif %}>Analyze form with AI</button>
+                    <div id="analyzeStatus"><span class="spinner"></span> Reading the PDF and detecting fields… This may take a minute.</div>
+                </form>
+            </div>
+        </div>
+        <script>
+            document.getElementById('uploadForm').addEventListener('submit', function() {
+                document.getElementById('analyzeStatus').style.display = 'block';
+                document.getElementById('analyzeBtn').disabled = true;
+            });
+        </script>
+    </body>
+    </html>
+    ''', resume_url=resume_url, ai_configured=ai_configured, pdf_wizard_available=PDF_WIZARD_FITZ_AVAILABLE)
+
+
+@app.route('/admin/test-form/analyze', methods=['POST'])
+@admin_required
+def admin_test_form_analyze():
+    if not PDF_WIZARD_FITZ_AVAILABLE:
+        flash('PyMuPDF is not installed on the server.', 'error')
+        return redirect(url_for('admin_test_form'))
+    f = request.files.get('pdf_file')
+    if not f or not f.filename:
+        flash('Please choose a PDF file.', 'error')
+        return redirect(url_for('admin_test_form'))
+    if not allowed_file(f.filename) or not f.filename.lower().endswith('.pdf'):
+        flash('Only PDF files are supported.', 'error')
+        return redirect(url_for('admin_test_form'))
+
+    old_sid = session.get('test_form_wizard_id')
+    if old_sid:
+        delete_wizard_state(app.config['UPLOAD_FOLDER'], old_sid)
+
+    sid = new_session_id()
+    try:
+        pdf_path, original_name = save_uploaded_pdf(app.config['UPLOAD_FOLDER'], f, sid)
+        result = analyze_pdf(pdf_path)
+        fields = result.get('fields') or []
+        if not fields:
+            delete_wizard_state(app.config['UPLOAD_FOLDER'], sid)
+            flash(result.get('message') or 'No fields detected.', 'error')
+            return redirect(url_for('admin_test_form'))
+
+        state = {
+            'session_id': sid,
+            'original_name': original_name,
+            'pdf_path': pdf_path,
+            'source': result.get('source', ''),
+            'message': result.get('message', ''),
+            'ai_used': bool(result.get('ai_used')),
+            'fields': fields,
+            'values': {},
+            'index': 0,
+            'completed': False,
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+        }
+        _test_form_wizard_save(state)
+        flash(result.get('message', f'Found {len(fields)} fields.'), 'success')
+        return redirect(url_for('admin_test_form_fill'))
+    except Exception as e:
+        app.logger.exception('admin_test_form_analyze failed')
+        delete_wizard_state(app.config['UPLOAD_FOLDER'], sid)
+        flash(f'Could not analyze PDF: {e}', 'error')
+        return redirect(url_for('admin_test_form'))
+
+
+@app.route('/admin/test-form/reset', methods=['POST'])
+@admin_required
+def admin_test_form_reset():
+    sid = session.pop('test_form_wizard_id', None)
+    if sid:
+        delete_wizard_state(app.config['UPLOAD_FOLDER'], sid)
+    flash('Test form cleared.', 'success')
+    return redirect(url_for('admin_test_form'))
+
+
+@app.route('/admin/test-form/fill')
+@admin_required
+def admin_test_form_fill():
+    state = _test_form_wizard_state()
+    if not state or not state.get('fields'):
+        flash('Upload a PDF first.', 'error')
+        return redirect(url_for('admin_test_form'))
+    if request.args.get('edit') == '1':
+        state['completed'] = False
+        state['index'] = 0
+        _test_form_wizard_save(state)
+    elif state.get('completed'):
+        return redirect(url_for('admin_test_form_review'))
+
+    fields = state['fields']
+    idx = int(state.get('index') or 0)
+    if idx >= len(fields):
+        idx = len(fields) - 1
+    field = fields[idx]
+    values = state.get('values') or {}
+    current_val = values.get(field['id'], '')
+    is_last4 = _test_form_field_is_last4(field)
+    last4_digits = _test_form_last4_digits(current_val) if is_last4 else ''
+    is_signature = field.get('type') == 'signature'
+    sig_b64_existing = test_form_signature_b64(current_val) if is_signature and is_test_form_signature_value(current_val) else ''
+
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Fill form — {{ field.label }}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; }
+            .header { background: #000; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+            .header a { color: #fff; text-decoration: none; opacity: 0.85; }
+            .wrap { max-width: 640px; margin: 0 auto; padding: 32px 20px 80px; }
+            .progress { height: 6px; background: #1a2332; border-radius: 3px; margin-bottom: 28px; overflow: hidden; }
+            .progress-bar { height: 100%; background: #FE0100; transition: width 0.25s; }
+            .step-label { font-size: 0.85em; color: #8892a8; margin-bottom: 8px; }
+            h1 { font-size: 1.6em; margin-bottom: 8px; line-height: 1.3; }
+            .hint { color: #8892a8; margin-bottom: 24px; line-height: 1.5; }
+            .field-input { width: 100%; padding: 14px 16px; font-size: 1.1em; border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; background: #121a26; color: #f2f5fb; }
+            .field-input:focus { outline: none; border-color: #FE0100; }
+            textarea.field-input { min-height: 100px; resize: vertical; }
+            .choice-list { display: flex; flex-direction: column; gap: 10px; }
+            .choice-option { display: block; cursor: pointer; }
+            .choice-option input[type="radio"] {
+                position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;
+            }
+            .choice-option .choice-label {
+                display: block; text-align: left; padding: 14px 16px;
+                border: 2px solid rgba(255,255,255,0.25); border-radius: 8px;
+                background: #121a26; color: #f2f5fb; font-size: 1.05em;
+                transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+            }
+            .choice-option input[type="radio"]:checked + .choice-label {
+                border-color: #FE0100; background: #2a1520;
+                box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.35);
+            }
+            .choice-option:hover .choice-label { border-color: #FE0100; background: #1a2332; }
+            .last4-row { display: flex; align-items: stretch; width: 100%; margin-top: 8px; }
+            .last4-prefix {
+                display: flex; align-items: center; padding: 14px 12px;
+                background: #2a3753; color: #aab4c8; border: 1px solid rgba(255,255,255,0.24);
+                border-right: none; border-radius: 8px 0 0 8px; font-family: monospace; letter-spacing: 0.06em;
+            }
+            .last4-input {
+                flex: 1; padding: 14px 16px; font-size: 1.1em; font-family: monospace; letter-spacing: 0.15em;
+                border: 1px solid rgba(255,255,255,0.24); border-radius: 0 8px 8px 0;
+                background: #121a26; color: #f2f5fb; min-width: 5em;
+            }
+            .last4-input:focus { outline: none; border-color: #FE0100; }
+            .nav { display: flex; gap: 12px; margin-top: 32px; flex-wrap: wrap; }
+            .btn-nav { padding: 12px 24px; border-radius: 6px; border: none; cursor: pointer; font-size: 1em; }
+            .btn-primary { background: #FE0100; color: #fff; flex: 1; min-width: 140px; }
+            .btn-ghost { background: transparent; color: #8892a8; border: 1px solid rgba(255,255,255,0.2); }
+            .page-tag { display: inline-block; background: #1a2332; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; margin-bottom: 16px; }
+            .flash { background: #1a3a1a; border: 1px solid #28a745; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; }
+            .flash-error { background: #3a1a1a; border-color: #dc3545; }
+        {{ global_theme_css|safe }}
+            body.test-form-fill-page .btn-nav.btn-primary {
+                background: #FE0100 !important; color: #fff !important;
+            }
+            body.test-form-fill-page .btn-nav.btn-ghost {
+                background: transparent !important; color: #8892a8 !important;
+                border: 1px solid rgba(255,255,255,0.2) !important;
+                box-shadow: none !important;
+            }
+            body.test-form-fill-page .choice-option .choice-label {
+                background: #121a26 !important; color: #f2f5fb !important;
+                border: 2px solid rgba(255,255,255,0.25) !important;
+                box-shadow: none !important;
+            }
+            body.test-form-fill-page .choice-option input[type="radio"]:checked + .choice-label {
+                background: #2a1520 !important; border-color: #FE0100 !important;
+                box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.35) !important;
+            }
+            body.test-form-fill-page button.choice-label,
+            body.test-form-fill-page .choice-option button {
+                display: none !important;
+            }
+            body.test-form-fill-page .last4-prefix {
+                background: #2a3753 !important; color: #c8d0e0 !important;
+                -webkit-text-fill-color: #c8d0e0 !important;
+                border: 1px solid rgba(255,255,255,0.28) !important;
+            }
+            body.test-form-fill-page .last4-input {
+                background: #121a26 !important; color: #f2f5fb !important;
+                -webkit-text-fill-color: #f2f5fb !important;
+                border: 1px solid rgba(255,255,255,0.28) !important;
+            }
+            .sig-pad-wrap {
+                border: 2px solid rgba(255,255,255,0.28); border-radius: 8px;
+                background: #fff; overflow: hidden; margin-top: 8px;
+            }
+            #sigCanvas {
+                display: block; width: 100%; height: 160px; touch-action: none;
+                cursor: crosshair; background: #fff;
+            }
+            .sig-actions { margin-top: 10px; display: flex; gap: 10px; }
+            body.test-form-fill-page .sig-pad-wrap {
+                background: #ffffff !important; border-color: rgba(255,255,255,0.35) !important;
+            }
+            body.test-form-fill-page #sigCanvas {
+                background: #ffffff !important;
+            }
+        </style>
+    </head>
+    <body class="test-form-fill-page">
+        <div class="header">
+            <span>{{ doc_name }}</span>
+            <a href="{{ url_for('admin_test_form') }}">Exit</a>
+        </div>
+        <div class="wrap">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}{% for category, message in messages %}<div class="flash{% if category == 'error' %} flash-error{% endif %}">{{ message }}</div>{% endfor %}{% endif %}
+            {% endwith %}
+            <div class="progress"><div class="progress-bar" style="width: {{ progress_pct }}%;"></div></div>
+            <div class="step-label">Field {{ idx + 1 }} of {{ total }}</div>
+            <span class="page-tag">Page {{ field.page }} · {% if is_last4 %}Last 4{% else %}{{ field.type|replace('_',' ') }}{% endif %}</span>
+            <h1>{{ field.label }}</h1>
+            {% if field.hint %}<p class="hint">{{ field.hint }}</p>{% endif %}
+            <form id="fieldForm" method="POST" action="{{ url_for('admin_test_form_save_field') }}">
+                <input type="hidden" name="field_id" value="{{ field.id }}">
+                <input type="hidden" name="direction" id="direction" value="next">
+                {% if field.type == 'textarea' %}
+                <textarea name="value" class="field-input" id="mainInput" {% if field.required %}required{% endif %}>{{ current_val }}</textarea>
+                {% elif field.type == 'date' %}
+                <input type="date" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+                {% elif is_last4 %}
+                <p class="hint" style="margin-top:0;">Enter only the last 4 digits. The first part of your SSN stays masked.</p>
+                <div class="last4-row">
+                    <span class="last4-prefix" aria-hidden="true">XXX-XX-</span>
+                    <input type="text" class="last4-input" id="last4Input" inputmode="numeric" autocomplete="off"
+                           maxlength="4" pattern="[0-9]{4}" placeholder="1234"
+                           value="{{ last4_digits }}" {% if field.required %}required{% endif %}>
+                </div>
+                <input type="hidden" name="value" id="mainInput" value="{{ current_val }}">
+                {% elif field.type == 'number' %}
+                <input type="number" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+                {% elif field.type == 'email' %}
+                <input type="email" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+                {% elif field.type == 'phone' %}
+                <input type="tel" name="value" class="field-input" id="mainInput" value="{{ current_val }}" placeholder="(555) 123-4567" {% if field.required %}required{% endif %}>
+                {% elif field.type == 'checkbox' %}
+                <label style="display:flex;align-items:center;gap:12px;margin-top:8px;font-size:1.1em;">
+                    <input type="checkbox" name="value" value="yes" id="mainInput" {% if current_val %}checked{% endif %} style="width:22px;height:22px;">
+                    Yes / checked
+                </label>
+                {% elif field.type == 'signature' %}
+                <p class="hint" style="margin-top:0;">Draw your signature in the box using your mouse or finger.</p>
+                <div class="sig-pad-wrap">
+                    <canvas id="sigCanvas" width="560" height="160"></canvas>
+                </div>
+                <div class="sig-actions">
+                    <button type="button" class="btn-nav btn-ghost" onclick="clearSigPad()">Clear signature</button>
+                </div>
+                <input type="hidden" name="value" id="mainInput" value="{{ current_val }}">
+                {% elif field.type == 'choice' and field.options %}
+                <div class="choice-list" id="choiceList" role="radiogroup" aria-label="{{ field.label }}">
+                    {% for opt in field.options %}
+                    <label class="choice-option">
+                        <input type="radio" name="value" value="{{ opt }}" {% if current_val == opt %}checked{% endif %}{% if field.required %} required{% endif %}>
+                        <span class="choice-label">{{ opt }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <input type="text" name="value" class="field-input" id="mainInput" value="{{ current_val }}" placeholder="Enter {{ field.label|lower }}" {% if field.required %}required{% endif %}>
+                {% endif %}
+                <div class="nav">
+                    {% if idx > 0 %}
+                    <button type="button" class="btn-nav btn-ghost" onclick="goBack()">Back</button>
+                    {% endif %}
+                    {% if not field.required %}
+                    <button type="button" class="btn-nav btn-ghost" onclick="skipField()">Skip</button>
+                    {% endif %}
+                    <button type="submit" class="btn-nav btn-primary" id="nextBtn">{{ 'Finish' if idx + 1 >= total else 'Next' }}</button>
+                </div>
+            </form>
+        </div>
+        <script>
+            (function() {
+                var SIG_PREFIX = {{ TEST_FORM_SIG_PREFIX|tojson }};
+                var sigCanvas = document.getElementById('sigCanvas');
+                var sigDrawing = false;
+                var sigLastX = 0, sigLastY = 0;
+                if (sigCanvas) {
+                    var sigCtx = sigCanvas.getContext('2d');
+                    sigCtx.strokeStyle = '#000000';
+                    sigCtx.lineWidth = 2.2;
+                    sigCtx.lineCap = 'round';
+                    sigCtx.lineJoin = 'round';
+                    function sigPos(e) {
+                        var rect = sigCanvas.getBoundingClientRect();
+                        var scaleX = sigCanvas.width / rect.width;
+                        var scaleY = sigCanvas.height / rect.height;
+                        var cx = (e.clientX !== undefined ? e.clientX : e.touches[0].clientX) - rect.left;
+                        var cy = (e.clientY !== undefined ? e.clientY : e.touches[0].clientY) - rect.top;
+                        return { x: cx * scaleX, y: cy * scaleY };
+                    }
+                    function sigStart(e) {
+                        e.preventDefault();
+                        sigDrawing = true;
+                        var p = sigPos(e);
+                        sigLastX = p.x; sigLastY = p.y;
+                    }
+                    function sigMove(e) {
+                        if (!sigDrawing) return;
+                        e.preventDefault();
+                        var p = sigPos(e);
+                        sigCtx.beginPath();
+                        sigCtx.moveTo(sigLastX, sigLastY);
+                        sigCtx.lineTo(p.x, p.y);
+                        sigCtx.stroke();
+                        sigLastX = p.x; sigLastY = p.y;
+                    }
+                    function sigEnd() { sigDrawing = false; }
+                    sigCanvas.addEventListener('mousedown', sigStart);
+                    sigCanvas.addEventListener('mousemove', sigMove);
+                    sigCanvas.addEventListener('mouseup', sigEnd);
+                    sigCanvas.addEventListener('mouseleave', sigEnd);
+                    sigCanvas.addEventListener('touchstart', sigStart, { passive: false });
+                    sigCanvas.addEventListener('touchmove', sigMove, { passive: false });
+                    sigCanvas.addEventListener('touchend', sigEnd);
+                    window.clearSigPad = function() {
+                        sigCtx.clearRect(0, 0, sigCanvas.width, sigCanvas.height);
+                        var hid = document.getElementById('mainInput');
+                        if (hid) hid.value = '';
+                    };
+                    var existingB64 = {{ sig_b64_existing|tojson }};
+                    if (existingB64) {
+                        var img = new Image();
+                        img.onload = function() {
+                            sigCtx.drawImage(img, 0, 0, sigCanvas.width, sigCanvas.height);
+                        };
+                        img.src = 'data:image/png;base64,' + existingB64;
+                    }
+                }
+                function sigCanvasHasInk() {
+                    if (!sigCanvas) return false;
+                    var ctx = sigCanvas.getContext('2d');
+                    var data = ctx.getImageData(0, 0, sigCanvas.width, sigCanvas.height).data;
+                    for (var i = 3; i < data.length; i += 4) {
+                        if (data[i] > 0) return true;
+                    }
+                    return false;
+                }
+                function syncSigToHidden() {
+                    if (!sigCanvas) return false;
+                    var hid = document.getElementById('mainInput');
+                    if (!hid) return false;
+                    if (!sigCanvasHasInk()) {
+                        hid.value = '';
+                        return false;
+                    }
+                    var dataUrl = sigCanvas.toDataURL('image/png');
+                    hid.value = SIG_PREFIX + dataUrl.split(',')[1];
+                    return true;
+                }
+                var last4 = document.getElementById('last4Input');
+                var hidden = document.getElementById('mainInput');
+                if (last4 && hidden) {
+                    function syncLast4() {
+                        var d = (last4.value || '').replace(/\\D/g, '').slice(0, 4);
+                        last4.value = d;
+                        hidden.value = d.length === 4 ? ('XXX-XX-' + d) : '';
+                    }
+                    last4.addEventListener('input', syncLast4);
+                    syncLast4();
+                }
+                var form = document.getElementById('fieldForm');
+                if (form) {
+                    form.addEventListener('submit', function(e) {
+                        if (sigCanvas) {
+                            if (!syncSigToHidden()) {
+                                e.preventDefault();
+                                alert('Please draw your signature in the box before continuing.');
+                                return;
+                            }
+                        }
+                        if (last4 && hidden && last4.hasAttribute('required')) {
+                            syncLast4();
+                            if (!hidden.value) {
+                                e.preventDefault();
+                                alert('Please enter exactly 4 digits for the last part of your SSN.');
+                                last4.focus();
+                                return;
+                            }
+                        }
+                        var radios = form.querySelectorAll('input[type="radio"][name="value"]');
+                        if (radios.length && radios[0].hasAttribute('required')) {
+                            var picked = form.querySelector('input[type="radio"][name="value"]:checked');
+                            if (!picked) {
+                                e.preventDefault();
+                                alert('Please select one option before continuing.');
+                            }
+                        }
+                    });
+                }
+            })();
+            function goBack() {
+                document.getElementById('direction').value = 'back';
+                document.getElementById('fieldForm').submit();
+            }
+            function skipField() {
+                document.getElementById('direction').value = 'skip';
+                document.querySelectorAll('#fieldForm input, #fieldForm textarea').forEach(function(inp) {
+                    inp.removeAttribute('required');
+                });
+                document.getElementById('fieldForm').submit();
+            }
+        </script>
+    </body>
+    </html>
+    ''',
+        field=field,
+        idx=idx,
+        total=len(fields),
+        progress_pct=int(100 * (idx + 1) / max(len(fields), 1)),
+        current_val=current_val,
+        doc_name=state.get('original_name', 'Form'),
+        is_last4=is_last4,
+        last4_digits=last4_digits,
+        is_signature=is_signature,
+        sig_b64_existing=sig_b64_existing,
+        TEST_FORM_SIG_PREFIX=TEST_FORM_SIG_PREFIX,
+    )
+
+
+@app.route('/admin/test-form/save-field', methods=['POST'])
+@admin_required
+def admin_test_form_save_field():
+    state = _test_form_wizard_state()
+    if not state:
+        return redirect(url_for('admin_test_form'))
+    field_id = (request.form.get('field_id') or '').strip()
+    direction = (request.form.get('direction') or 'next').strip()
+    value = (request.form.get('value') or '').strip()
+    fields = state.get('fields') or []
+    field_map = {f['id']: f for f in fields}
+    if field_id not in field_map:
+        flash('Invalid field.', 'error')
+        return redirect(url_for('admin_test_form_fill'))
+
+    fdef = field_map[field_id]
+    if direction != 'back':
+        if fdef.get('type') == 'checkbox':
+            value = 'yes' if request.form.get('value') == 'yes' else ''
+        elif _test_form_field_is_last4(fdef):
+            value = normalize_last4_typed_value(value)
+        elif fdef.get('type') == 'signature':
+            value = normalize_test_form_signature_value(value)
+        if direction != 'skip' and fdef.get('required') and not value:
+            if fdef.get('type') == 'signature':
+                flash('Please draw your signature before continuing.', 'error')
+            elif fdef.get('type') == 'choice':
+                flash('Please select one option.', 'error')
+            elif _test_form_field_is_last4(fdef):
+                flash('Please enter the last 4 digits of your SSN (XXX-XX-####).', 'error')
+            else:
+                flash('This field is required.', 'error')
+            state['index'] = next(i for i, x in enumerate(fields) if x['id'] == field_id)
+            _test_form_wizard_save(state)
+            return redirect(url_for('admin_test_form_fill'))
+        if direction != 'skip':
+            state.setdefault('values', {})[field_id] = value
+        elif field_id in state.get('values', {}):
+            del state['values'][field_id]
+
+    idx = next((i for i, x in enumerate(fields) if x['id'] == field_id), 0)
+    if direction == 'back':
+        state['index'] = max(0, idx - 1)
+    elif direction == 'skip' or direction == 'next':
+        if idx + 1 >= len(fields):
+            state['completed'] = True
+            state['index'] = idx
+            _test_form_wizard_save(state)
+            return redirect(url_for('admin_test_form_review'))
+        state['index'] = idx + 1
+    _test_form_wizard_save(state)
+    return redirect(url_for('admin_test_form_fill'))
+
+
+@app.route('/admin/test-form/review')
+@admin_required
+def admin_test_form_review():
+    state = _test_form_wizard_state()
+    if not state or not state.get('fields'):
+        return redirect(url_for('admin_test_form'))
+    if not state.get('completed') and not (state.get('values')):
+        return redirect(url_for('admin_test_form_fill'))
+
+    fields = state['fields']
+    values = state.get('values') or {}
+    rows = []
+    for f in fields:
+        val = values.get(f['id'], '')
+        sig_b64 = ''
+        if f.get('type') == 'checkbox':
+            val = 'Yes' if val else 'No'
+        elif f.get('type') == 'signature' and is_test_form_signature_value(val):
+            sig_b64 = test_form_signature_b64(val)
+            val = 'Signed'
+        rows.append({
+            'label': f['label'],
+            'value': val or '—',
+            'page': f.get('page', 1),
+            'sig_b64': sig_b64,
+        })
+
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Review — Test Form Wizard</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; }
+            .container { max-width: 900px; margin: 30px auto; padding: 0 20px; }
+            .panel { background: white; padding: 28px; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }
+            .panel h2 { margin-bottom: 16px; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background: #f8f9fa; }
+            .btn { display: inline-block; padding: 10px 20px; background: #FE0100; color: white; text-decoration: none; border-radius: 5px; border: none; cursor: pointer; margin-right: 10px; margin-top: 8px; }
+            .btn-secondary { background: #444; }
+            .meta { margin-bottom: 20px; }
+            iframe { width: 100%; height: 520px; border: 1px solid #ddd; border-radius: 6px; margin-top: 16px; }
+        {{ global_theme_css|safe }}
+            body.test-form-wizard-page .panel h2,
+            body.test-form-wizard-page .panel p,
+            body.test-form-wizard-page .panel .meta,
+            body.test-form-wizard-page table th,
+            body.test-form-wizard-page table td,
+            body.test-form-wizard-page table td strong {
+                color: #e8ecf4 !important;
+                -webkit-text-fill-color: #e8ecf4 !important;
+            }
+            body.test-form-wizard-page table th {
+                background: rgba(255, 255, 255, 0.08) !important;
+            }
+            body.test-form-wizard-page table tr:hover {
+                background: rgba(255, 255, 255, 0.05) !important;
+            }
+            body.test-form-wizard-page iframe {
+                border-color: rgba(255, 255, 255, 0.2) !important;
+            }
+            body.test-form-wizard-page .btn-secondary {
+                background: #444 !important;
+            }
+        </style>
+    </head>
+    <body class="test-form-wizard-page">
+        <div class="header">
+            <h1>Completed form review</h1>
+            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Dashboard</a>
+        </div>
+        <div class="container">
+            <div class="panel">
+                <h2>{{ doc_name }}</h2>
+                <p class="meta">{{ detect_message }} · {{ rows|length }} field(s) filled</p>
+                <a href="{{ url_for('admin_test_form_download') }}" class="btn" target="_blank">Download filled PDF</a>
+                <a href="{{ url_for('admin_test_form_fill', edit=1) }}" class="btn btn-secondary">Edit answers</a>
+                <form method="POST" action="{{ url_for('admin_test_form_reset') }}" style="display:inline;" onsubmit="return confirm('Start a new form?');">
+                    <button type="submit" class="btn btn-secondary">New form</button>
+                </form>
+            </div>
+            <div class="panel">
+                <h2>Your answers (easy read)</h2>
+                <table>
+                    <thead><tr><th>Field</th><th>Page</th><th>Your answer</th></tr></thead>
+                    <tbody>
+                        {% for row in rows %}
+                        <tr>
+                            <td><strong>{{ row.label }}</strong></td>
+                            <td>{{ row.page }}</td>
+                            <td>
+                                {% if row.sig_b64 %}
+                                <img src="data:image/png;base64,{{ row.sig_b64 }}" alt="Signature" style="max-height: 56px; max-width: 220px; background: #fff; border: 1px solid #ddd; padding: 4px;">
+                                {% else %}
+                                {{ row.value }}
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="panel">
+                <h2>Filled PDF preview</h2>
+                <p class="meta" style="margin-bottom: 12px;">Answers are written on the form where possible. The last page(s) include a full summary of every field you filled.</p>
+                <iframe src="{{ url_for('admin_test_form_download') }}#toolbar=1"></iframe>
+            </div>
+        </div>
+    </body>
+    </html>
+    ''',
+        rows=rows,
+        doc_name=state.get('original_name', 'Form'),
+        detect_message=state.get('message', ''),
+    )
+
+
+@app.route('/admin/test-form/download')
+@admin_required
+def admin_test_form_download():
+    state = _test_form_wizard_state()
+    if not state or not state.get('pdf_path'):
+        abort(404)
+    state = _refresh_test_form_field_positions(state)
+    try:
+        pdf_bytes = build_filled_pdf(
+            state['pdf_path'],
+            state.get('fields') or [],
+            state.get('values') or {},
+        )
+        name = (state.get('original_name') or 'form').rsplit('.', 1)[0] + '_filled.pdf'
+        return send_file(
+            BytesIO(pdf_bytes),
+            mimetype='application/pdf',
+            as_attachment=False,
+            download_name=name,
+        )
+    except Exception as e:
+        app.logger.exception('admin_test_form_download failed')
+        flash(f'Could not build PDF: {e}', 'error')
+        return redirect(url_for('admin_test_form_review'))
+
+
+@app.route('/admin/departments/add', methods=['POST'])
+@admin_required
+def add_department():
+    """Create a new department. Supports JSON for wizard inline add."""
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        name = (data.get('name') or '').strip()
+    else:
+        name = (request.form.get('name') or '').strip()
+    if not name:
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
+            return jsonify({'success': False, 'error': 'Department name is required.'}), 400
+        flash('Department name is required.', 'error')
+        return redirect(url_for('manage_departments'))
+    existing = Department.query.filter(func.lower(Department.name) == name.lower()).first()
+    if existing:
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
+            return jsonify({'success': False, 'error': f'Department "{name}" already exists.'}), 400
+        flash(f'Department "{name}" already exists.', 'error')
+        return redirect(url_for('manage_departments'))
+    try:
+        dept = Department(name=name)
+        db.session.add(dept)
+        db.session.commit()
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
+            return jsonify({'success': True, 'id': dept.id, 'name': dept.name})
+        flash(f'Department "{name}" added.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
+            return jsonify({'success': False, 'error': str(e)}), 500
+        flash(f'Error adding department: {str(e)}', 'error')
+    return redirect(url_for('manage_departments'))
+
+
+@app.route('/admin/departments/<int:department_id>/delete', methods=['POST'])
+@admin_required
+def delete_department(department_id):
+    """Delete a department if no new hires reference it."""
+    dept = Department.query.get(department_id)
+    if not dept:
+        flash('Department not found.', 'error')
+        return redirect(url_for('manage_departments'))
+    nh_count = NewHire.query.filter_by(department_id=department_id).count()
+    if nh_count > 0:
+        flash(f'Cannot delete "{dept.name}": {nh_count} new hire(s) still use it. Change their department first.', 'error')
+        return redirect(url_for('manage_departments'))
+    try:
+        db.session.delete(dept)
+        db.session.commit()
+        flash(f'Department "{dept.name}" deleted.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error deleting department: {str(e)}', 'error')
+    return redirect(url_for('manage_departments'))
 
 
 @app.route('/admin/roles/<int:role_id>/documents', methods=['GET', 'POST'])
@@ -11460,6 +13404,19 @@ def manage_documents():
         for doc in documents:
             signature_fields = DocumentSignatureField.query.filter_by(document_id=doc.id).all()
             doc.signature_fields_count = len(signature_fields)
+            try:
+                doc.typed_fields_count = DocumentTypedField.query.filter_by(document_id=doc.id).count()
+            except Exception:
+                doc.typed_fields_count = 0
+            doc.configured_fields_count = doc.signature_fields_count + doc.typed_fields_count
+            doc.acro_widget_count = 0
+            if _document_is_fillable_pdf(doc) and PDF_WIZARD_FITZ_AVAILABLE:
+                pdf_path = _document_pdf_path(doc)
+                if pdf_path:
+                    try:
+                        doc.acro_widget_count = count_pdf_acroform_widgets(pdf_path)
+                    except Exception:
+                        doc.acro_widget_count = 0
             # Count how many users have signed (for managers: only users at their store)
             try:
                 signatures = DocumentSignature.query.filter_by(document_id=doc.id).all()
@@ -11482,10 +13439,19 @@ def manage_documents():
             documents = Document.query.order_by(Document.created_at.desc()).all()
         for doc in documents:
             doc.signature_fields_count = 0
+            doc.typed_fields_count = 0
+            doc.configured_fields_count = 0
+            doc.acro_widget_count = 0
             doc.signatures_count = 0
             doc.signed_users_count = 0
+            doc.store_ids = []
+    _ensure_stores_and_store_id()
+    _attach_document_store_lists(documents)
     stores = Store.query.order_by(Store.name).all()
     store_by_id = {s.id: s.name for s in stores}
+    orphaned_document_task_count = 0
+    if not is_manager_view:
+        orphaned_document_task_count = count_orphaned_document_user_tasks()
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -12083,6 +14049,15 @@ def manage_documents():
                 {% endfor %}
             {% endif %}
             {% endwith %}
+            {% if not is_manager_view and orphaned_document_task_count > 0 %}
+            <div class="admin-panel" style="margin-bottom: 16px; padding: 14px 18px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 0.5rem; color: #664d03;">
+                <strong>{{ orphaned_document_task_count }}</strong> leftover &ldquo;Sign Document&rdquo; task(s) are still on users&rsquo; Tasks pages from forms deleted before a recent fix.
+                <form method="POST" action="{{ url_for('cleanup_orphaned_document_tasks_route') }}" style="display: inline-block; margin-left: 12px;"
+                      onsubmit="return confirm('Remove {{ orphaned_document_task_count }} orphaned task(s)? Users will no longer see these on their Tasks page.');">
+                    <button type="submit" class="btn" style="background: #856404; color: #fff; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer;">Clean up orphaned tasks</button>
+                </form>
+            </div>
+            {% endif %}
             {% if not is_manager_view %}
             <div class="admin-panel collapsible-upload-panel">
                 <button type="button" class="collapsible-header" id="upload-section-toggle" aria-expanded="true" aria-controls="upload-form-body">
@@ -12108,18 +14083,19 @@ def manage_documents():
                     <div class="form-group">
                         <div class="checkbox-group">
                             <input type="checkbox" name="is_visible" id="is_visible" value="1">
-                            <label for="is_visible">Make visible to regular users</label>
+                            <label for="is_visible">Show in document library for users</label>
                         </div>
+                        <small style="color: #666; display: block; margin-top: 6px;">Optional browse list on Files for users who are <strong>not</strong> assigned. Use <strong>Assign to Users</strong> when someone must sign. Assigned users always see the document on Files and Tasks.</small>
                     </div>
                     <div class="form-group">
-                        <label for="store_id">Visible to</label>
+                        <label for="store_id">Library available at</label>
                         <select name="store_id" id="store_id" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem;">
                             <option value="">All stores</option>
                             {% for store in stores %}
                             <option value="{{ store.id }}">{{ store.name }} ({{ store.code }})</option>
                             {% endfor %}
                         </select>
-                        <small style="color: #666;">Leave "All stores" so every location can see this document; or choose one store.</small>
+                        <small style="color: #666;">Only applies when &ldquo;Show in document library&rdquo; is checked. Assigned users are not limited by this setting.</small>
                     </div>
                     <button type="submit" class="btn btn-success">Upload Document</button>
                 </form>
@@ -12128,6 +14104,9 @@ def manage_documents():
             {% endif %}
             <div class="admin-panel">
                 <h2>{% if is_manager_view %}Forms for your location (view only){% else %}Uploaded Documents{% endif %}</h2>
+                {% if not is_manager_view %}
+                <p style="color: #b7c1d3; font-size: 0.9em; margin-bottom: 12px; max-width: 720px;"><strong>Assign to Users</strong> = required signing (Files + Tasks). <strong>Library</strong> = optional extra listing on Files for users who were not assigned.</p>
+                {% endif %}
                 {% if documents %}
                 <table>
                     <thead>
@@ -12136,8 +14115,8 @@ def manage_documents():
                             <th>Description</th>
                             <th>Size</th>
                             {% if not is_manager_view %}
-                            <th>Visibility</th>
-                            <th>Store</th>
+                            <th>Library</th>
+                            <th>Stores (library)</th>
                             {% endif %}
                             <th>Signature Status</th>
                             {% if not is_manager_view %}
@@ -12169,14 +14148,14 @@ def manage_documents():
                             <td>
                                 <form method="POST" action="{{ url_for('toggle_document_visibility') }}" class="visibility-toggle-form" data-doc-id="{{ doc.id }}" style="display: inline;">
                                     <input type="hidden" name="doc_id" value="{{ doc.id }}">
-                                    <button type="submit" class="badge badge-{{ 'visible' if doc.is_visible else 'hidden' }}" style="border: none; cursor: pointer; font-size: inherit; padding: 5px 10px; border-radius: 0.35rem; font-weight: 500;" title="{{ 'Click to hide from all stores' if doc.is_visible else 'Click to show for stores in Store column' }}">
-                                        {{ 'Visible' if doc.is_visible else 'Hidden' }}
+                                    <button type="submit" class="badge badge-{{ 'visible' if doc.is_visible else 'hidden' }}" style="border: none; cursor: pointer; font-size: inherit; padding: 5px 10px; border-radius: 0.35rem; font-weight: 500;" title="{{ 'Click to remove from the optional document library (assigned users are not affected)' if doc.is_visible else 'Click to show in the optional document library for stores listed in Stores (library)' }}">
+                                        {{ 'In library' if doc.is_visible else 'Not in library' }}
                                     </button>
                                 </form>
                             </td>
                             <td class="store-cell">
                                 <div class="store-dropdown">
-                                    <button type="button" class="store-dropdown-btn" onclick="toggleStoreDropdown({{ doc.id }})" title="Change which stores can see this form">
+                                    <button type="button" class="store-dropdown-btn" onclick="toggleStoreDropdown({{ doc.id }})" title="Which stores see this form in the optional library (does not affect assigned users)">
                                         <span class="store-dropdown-label" id="store-label-{{ doc.id }}">{% if not doc.store_ids %}All stores{% else %}{{ doc.store_ids|length }} store(s){% endif %}</span> ▾
                                     </button>
                                     <div class="store-dropdown-panel" id="store-panel-{{ doc.id }}" style="display: none;">
@@ -12192,13 +14171,24 @@ def manage_documents():
                             </td>
                             {% endif %}
                             <td class="signature-status">
-                                {% if doc.signature_fields_count > 0 %}
+                                {% if doc.configured_fields_count > 0 %}
                                     <div class="signature-status-badge">
-                                        ✍️ {{ doc.signature_fields_count }} field(s)
+                                        {{ doc.configured_fields_count }} field(s)
+                                        {% if doc.typed_fields_count %}({{ doc.typed_fields_count }} typed{% if doc.signature_fields_count %}, {{ doc.signature_fields_count }} sig{% endif %}){% elif doc.signature_fields_count %}({{ doc.signature_fields_count }} sig){% endif %}
                                     </div>
+                                    {% if doc.acro_widget_count > 0 and doc.acro_widget_count != doc.configured_fields_count %}
+                                    <div style="font-size: 0.8em; color: #ffc107; margin-top: 4px;" title="PDF has more built-in fields than configured — open Set Signature Fields and Re-import from PDF">
+                                        PDF has {{ doc.acro_widget_count }} AcroForm field(s)
+                                    </div>
+                                    {% endif %}
                                     <div class="signature-status-signed">
                                         {{ doc.signed_users_count }} user(s) signed
                                     </div>
+                                {% elif doc.acro_widget_count > 0 %}
+                                    <div class="signature-status-badge" style="background: #ffc107; color: #000;">
+                                        {{ doc.acro_widget_count }} PDF field(s) not imported
+                                    </div>
+                                    <div style="font-size: 0.8em; margin-top: 4px;">→ Set Signature Fields → Import</div>
                                 {% else %}
                                     <span style="color: #999;">-</span>
                                 {% endif %}
@@ -12378,19 +14368,19 @@ def manage_documents():
                         .then(function(res) {
                             if (res.redirected || res.ok) {
                                 if (btn.classList.contains('badge-visible')) {
-                                    btn.textContent = 'Hidden';
+                                    btn.textContent = 'Not in library';
                                     btn.classList.remove('badge-visible');
                                     btn.classList.add('badge-hidden');
-                                    btn.title = 'Click to show for stores in Store column';
+                                    btn.title = 'Click to show in the optional document library for stores listed in Stores (library)';
                                 } else {
-                                    btn.textContent = 'Visible';
+                                    btn.textContent = 'In library';
                                     btn.classList.remove('badge-hidden');
                                     btn.classList.add('badge-visible');
-                                    btn.title = 'Click to hide from all stores';
+                                    btn.title = 'Click to remove from the optional document library (assigned users are not affected)';
                                 }
                                 var menuBtn = document.querySelector('#menu-' + docId + ' .visibility-dropdown-btn');
                                 if (menuBtn) {
-                                    menuBtn.textContent = btn.textContent === 'Visible' ? '🙈 Make Hidden' : '👁️ Make Visible';
+                                    menuBtn.textContent = btn.textContent === 'In library' ? '📚 Remove from library' : '📚 Show in library';
                                 }
                             }
                         })
@@ -12495,7 +14485,29 @@ def manage_documents():
         </script>
     </body>
     </html>
-    ''', documents=documents, stores=stores, store_by_id=store_by_id, is_manager_view=is_manager_view)
+    ''', documents=documents, stores=stores, store_by_id=store_by_id, is_manager_view=is_manager_view,
+         orphaned_document_task_count=orphaned_document_task_count)
+
+
+@app.route('/admin/documents/cleanup-orphaned-tasks', methods=['POST'])
+@admin_required
+def cleanup_orphaned_document_tasks_route():
+    """One-time style cleanup for document tasks left when forms were deleted under the old logic."""
+    try:
+        removed = cleanup_orphaned_document_user_tasks()
+        db.session.commit()
+        if removed:
+            flash(
+                f'Removed {removed} orphaned document task(s) from users\' Tasks lists.',
+                'success',
+            )
+        else:
+            flash('No orphaned document tasks found.', 'info')
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception('cleanup_orphaned_document_tasks failed')
+        flash(f'Cleanup failed: {e}', 'error')
+    return redirect(url_for('manage_documents'))
 
 
 @app.route('/admin/upload-document', methods=['POST'])
@@ -12564,8 +14576,14 @@ def upload_document():
             document.store_id = store_id
         db.session.add(document)
         db.session.commit()
-        
-        flash(f'Document "{original_filename}" uploaded successfully.', 'success')
+
+        import_note = ''
+        if filename.lower().endswith('.pdf'):
+            ok, msg = _try_auto_import_acroform_fields(document, current_user.username)
+            if ok:
+                import_note = f' {msg}'
+
+        flash(f'Document "{original_filename}" uploaded successfully.{import_note}', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error uploading file: {str(e)}', 'error')
@@ -12631,9 +14649,17 @@ def replace_document_file(doc_id):
         document.file_type = file.content_type or document.file_type or 'application/pdf'
 
         db.session.commit()
+        import_note = ''
+        if new_filename.lower().endswith('.pdf'):
+            sig_count = DocumentSignatureField.query.filter_by(document_id=document.id).count()
+            typed_count = DocumentTypedField.query.filter_by(document_id=document.id).count()
+            if not sig_count and not typed_count:
+                ok, msg = _try_auto_import_acroform_fields(document, current_user.username)
+                if ok:
+                    import_note = f' {msg}'
         flash(
             f'Document file replaced. The original file was kept as a .bak next to it. '
-            f'Existing signature fields, assignments, and DB signatures are preserved.',
+            f'Existing signature fields, assignments, and DB signatures are preserved.{import_note}',
             'success'
         )
     except Exception as e:
@@ -12642,6 +14668,22 @@ def replace_document_file(doc_id):
         flash(f'Error replacing file: {str(e)}', 'error')
 
     return redirect(url_for('manage_documents'))
+
+
+@app.route('/admin/documents/<int:doc_id>/import-acroform-fields', methods=['POST'])
+@admin_required
+def import_acroform_fields_route(doc_id):
+    """Import fillable PDF (AcroForm) field positions from Adobe/Acrobat into signature/typed field records."""
+    document = Document.query.get(doc_id)
+    if not document:
+        flash('Document not found.', 'error')
+        return redirect(url_for('manage_documents'))
+    replace = request.form.get('replace') == '1'
+    ok, msg = _import_acroform_fields_for_document(
+        document, current_user.username, replace_existing=replace,
+    )
+    flash(msg, 'success' if ok else 'error')
+    return redirect(url_for('set_signature_fields', doc_id=doc_id))
 
 
 @app.route('/admin/documents/<int:doc_id>/update-stores', methods=['POST'])
@@ -12658,26 +14700,33 @@ def document_update_stores(doc_id):
     if is_manager_only:
         my_sid = get_current_user_store_id()
         if my_sid is None:
-            flash('You must be assigned to a store to change document visibility.', 'error')
+            flash('You must be assigned to a store to change document library settings.', 'error')
             return redirect(url_for('manage_documents'))
     try:
-        if request.form.get('all') == '1':
-            document.store_ids = []
-        else:
+        _ensure_stores_and_store_id()
+        db.session.execute(
+            document_stores.delete().where(document_stores.c.document_id == doc_id)
+        )
+        if request.form.get('all') != '1':
             ids_raw = request.form.getlist('store_ids')
-            store_ids = []
+            seen = set()
             for sid in ids_raw:
                 try:
                     sid = int(sid)
-                    if Store.query.get(sid):
-                        if is_manager_only and sid != my_sid:
-                            continue
-                        store_ids.append(Store.query.get(sid))
                 except (ValueError, TypeError):
-                    pass
-            document.store_ids = store_ids
+                    continue
+                if sid in seen:
+                    continue
+                if is_manager_only and sid != my_sid:
+                    continue
+                if Store.query.get(sid):
+                    seen.add(sid)
+                    db.session.execute(
+                        document_stores.insert().values(document_id=doc_id, store_id=sid)
+                    )
+        document.store_id = None
         db.session.commit()
-        flash('Document store visibility updated.', 'success')
+        flash('Document library store scope updated.', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error updating: {str(e)}', 'error')
@@ -12687,7 +14736,7 @@ def document_update_stores(doc_id):
 @app.route('/admin/toggle-document-visibility', methods=['POST'])
 @login_required
 def toggle_document_visibility():
-    """Toggle document visibility. Hidden = not visible to any store. Visible = visible only to stores selected in the Store dropdown."""
+    """Toggle whether document appears in the optional user document library (is_visible). Does not affect assignments."""
     if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         abort(403)
     doc_id = request.form.get('doc_id')
@@ -12703,12 +14752,77 @@ def toggle_document_visibility():
     
     document.is_visible = not document.is_visible
     document.updated_at = datetime.utcnow()
-    # Hidden = not visible to any store (is_visible=False). Visible = only stores in Store dropdown see it (is_visible=True + store_ids).
     db.session.commit()
     
-    status = 'visible' if document.is_visible else 'hidden'
-    flash(f'Document visibility set to {status}.', 'success')
+    if document.is_visible:
+        flash('Document will appear in the optional document library (for selected stores). Assigned users are unchanged.', 'success')
+    else:
+        flash('Document removed from the optional document library. Assigned users can still sign via Files and Tasks.', 'success')
     return redirect(url_for('manage_documents'))
+
+
+def _delete_user_tasks_for_document(document) -> int:
+    """Delete UserTask rows tied to a document so they disappear from users' Tasks pages."""
+    if not document or not document.id:
+        return 0
+    doc_id = document.id
+    sign_title = f"Sign Document: {document.name_for_users}"
+    task_ids = [
+        row[0] for row in
+        UserTask.query.filter(
+            or_(
+                UserTask.document_id == doc_id,
+                and_(
+                    UserTask.task_type == 'document',
+                    UserTask.task_title == sign_title,
+                ),
+            )
+        ).with_entities(UserTask.id).all()
+    ]
+    if task_ids:
+        UserTask.query.filter(UserTask.depends_on_task_id.in_(task_ids)).update(
+            {UserTask.depends_on_task_id: None},
+            synchronize_session=False,
+        )
+        return UserTask.query.filter(UserTask.id.in_(task_ids)).delete(synchronize_session=False)
+    return 0
+
+
+def _orphaned_document_user_tasks_query():
+    """Document tasks whose form was deleted (old code nulled document_id) or document row is gone."""
+    existing_doc_ids = db.session.query(Document.id)
+    return UserTask.query.filter(
+        UserTask.task_type == 'document',
+        or_(
+            UserTask.document_id.is_(None),
+            ~UserTask.document_id.in_(existing_doc_ids),
+        ),
+    )
+
+
+def count_orphaned_document_user_tasks() -> int:
+    try:
+        return _orphaned_document_user_tasks_query().count()
+    except Exception:
+        return 0
+
+
+def cleanup_orphaned_document_user_tasks() -> int:
+    """Remove stale Sign Document tasks left after forms were deleted before the fix."""
+    try:
+        task_ids = [
+            row[0] for row in
+            _orphaned_document_user_tasks_query().with_entities(UserTask.id).all()
+        ]
+    except Exception:
+        return 0
+    if not task_ids:
+        return 0
+    UserTask.query.filter(UserTask.depends_on_task_id.in_(task_ids)).update(
+        {UserTask.depends_on_task_id: None},
+        synchronize_session=False,
+    )
+    return UserTask.query.filter(UserTask.id.in_(task_ids)).delete(synchronize_session=False)
 
 
 @app.route('/admin/delete-document', methods=['POST'])
@@ -12742,9 +14856,30 @@ def delete_document():
         DocumentSignatureField.query.filter_by(document_id=doc_id).delete()
         DocumentTypedField.query.filter_by(document_id=doc_id).delete()
         DocumentAssignment.query.filter_by(document_id=doc_id).delete()
-        # Unlink user tasks that referenced this document (column is nullable)
-        for task in UserTask.query.filter_by(document_id=doc_id).all():
-            task.document_id = None
+        tasks_removed = _delete_user_tasks_for_document(document)
+        try:
+            SignatureAuditLog.query.filter_by(document_id=doc_id).delete(synchronize_session=False)
+        except Exception:
+            pass
+        try:
+            db.session.execute(
+                document_stores.delete().where(document_stores.c.document_id == doc_id)
+            )
+        except Exception:
+            pass
+        try:
+            db.session.execute(
+                role_documents.delete().where(role_documents.c.document_id == doc_id)
+            )
+        except Exception:
+            pass
+        try:
+            NewHire.query.filter_by(finale_document_id=doc_id).update(
+                {NewHire.finale_document_id: None},
+                synchronize_session=False,
+            )
+        except Exception:
+            pass
         
         # Delete file from filesystem
         if file_path and os.path.exists(file_path):
@@ -12757,7 +14892,10 @@ def delete_document():
         db.session.delete(document)
         db.session.commit()
         
-        flash(f'Document "{original_filename}" deleted successfully.', 'success')
+        msg = f'Document "{original_filename}" deleted successfully.'
+        if tasks_removed:
+            msg += f' Removed {tasks_removed} task(s) from users\' Tasks lists.'
+        flash(msg, 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error deleting document: {str(e)}', 'error')
@@ -12893,14 +15031,14 @@ def rename_document(doc_id):
                         <small>This is the title users see. Leave blank (or match the file name) to use the file name.</small>
                     </div>
                     <div class="form-group">
-                        <label for="store_id">Visible to</label>
+                        <label for="store_id">Library available at</label>
                         <select name="store_id" id="store_id" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem;">
                             <option value="" {% if not document.store_id %}selected{% endif %}>All stores</option>
                             {% for store in stores %}
                             <option value="{{ store.id }}" {% if document.store_id == store.id %}selected{% endif %}>{{ store.name }} ({{ store.code }})</option>
                             {% endfor %}
                         </select>
-                        <small>All stores = every location can see this document.</small>
+                        <small>Store scope for the optional library only. Use Assign to Users for required signing.</small>
                     </div>
                     <button type="submit" class="btn">Save</button>
                     <a href="{{ url_for('manage_documents') }}" class="btn btn-secondary" style="margin-left: 10px; text-decoration: none;">Cancel</a>
@@ -12916,6 +15054,7 @@ def rename_document(doc_id):
 @admin_required
 def set_signature_fields(doc_id):
     """Admin interface to set signature field locations on a document"""
+    _ensure_document_typed_field_columns()
     document = Document.query.get(doc_id)
     if not document:
         flash('Document not found.', 'error')
@@ -12933,6 +15072,39 @@ def set_signature_fields(doc_id):
     
     # Check if document is a PDF (for now, we'll support PDFs primarily)
     is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
+    try:
+        initial_page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        initial_page = 1
+
+    configured_field_count = len(existing_fields) + len(existing_typed_fields)
+    acro_widget_count = 0
+    pdf_path = _document_pdf_path(document)
+    if is_pdf and pdf_path and PDF_WIZARD_FITZ_AVAILABLE:
+        acro_widget_count = count_pdf_acroform_widgets(pdf_path)
+
+    field_inventory = []
+    for f in existing_fields:
+        field_inventory.append({
+            'kind': 'signature',
+            'id': f.id,
+            'pdf_name': '',
+            'label': f.field_label or 'Signature',
+            'field_type': 'signature',
+            'page': f.page_number,
+        })
+    for f in existing_typed_fields:
+        field_inventory.append({
+            'kind': 'typed',
+            'id': f.id,
+            'pdf_name': _pdf_field_name_from_placeholder(f.placeholder),
+            'label': f.field_label or 'Typed Field',
+            'field_type': f.field_type or 'text',
+            'choice_group': f.choice_group,
+            'is_required': f.is_required,
+            'page': f.page_number,
+        })
+    field_inventory.sort(key=lambda x: (x['page'], x['kind'], x['label'].lower()))
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -12940,6 +15112,8 @@ def set_signature_fields(doc_id):
     <head>
         <title>Set Signature Fields - {{ document.name_for_users }}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="icon" type="image/svg+xml" href="{{ url_for('serve_ziebart_logo') }}">
+        <link rel="shortcut icon" href="{{ url_for('serve_favicon') }}">
         <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -13026,6 +15200,110 @@ def set_signature_fields(doc_id):
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 padding: 20px;
                 position: relative;
+            }
+            .document-viewer-layout {
+                display: flex;
+                gap: 12px;
+                align-items: stretch;
+            }
+            .document-viewer-wrap {
+                flex: 1;
+                min-width: 0;
+            }
+            .pdf-page-toolbar {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 10px;
+                padding: 8px 12px;
+                background: rgba(0, 0, 0, 0.25);
+                border-radius: 6px;
+                font-size: 0.9em;
+                color: #f2f5fb;
+            }
+            .pdf-page-toolbar button {
+                padding: 4px 12px;
+                background: rgba(255, 255, 255, 0.12);
+                color: #f2f5fb;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.85em;
+            }
+            .pdf-page-toolbar button:hover:not(:disabled) {
+                background: rgba(255, 255, 255, 0.2);
+            }
+            .pdf-page-toolbar button:disabled {
+                opacity: 0.4;
+                cursor: not-allowed;
+            }
+            .pdf-page-scroller {
+                display: none;
+                flex-direction: column;
+                width: 56px;
+                flex-shrink: 0;
+                background: rgba(0, 0, 0, 0.35);
+                border-radius: 8px;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                padding: 8px 6px;
+                max-height: min(860px, calc(100vh - 180px));
+            }
+            .pdf-page-scroller-title {
+                font-size: 0.65em;
+                font-weight: 700;
+                text-align: center;
+                color: #b7c1d3;
+                margin-bottom: 8px;
+                line-height: 1.2;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .pdf-page-scroller-list {
+                flex: 1;
+                overflow-y: auto;
+                overflow-x: hidden;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                align-items: center;
+                padding-right: 2px;
+                scrollbar-width: thin;
+                scrollbar-color: rgba(254, 1, 0, 0.6) rgba(255, 255, 255, 0.1);
+            }
+            .pdf-page-scroller-list::-webkit-scrollbar {
+                width: 8px;
+            }
+            .pdf-page-scroller-list::-webkit-scrollbar-thumb {
+                background: rgba(254, 1, 0, 0.55);
+                border-radius: 4px;
+            }
+            .pdf-page-scroller-list::-webkit-scrollbar-track {
+                background: rgba(255, 255, 255, 0.08);
+                border-radius: 4px;
+            }
+            .pdf-page-scroller-item {
+                width: 38px;
+                min-height: 38px;
+                padding: 4px;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 6px;
+                background: rgba(255, 255, 255, 0.08);
+                color: #f2f5fb;
+                font-size: 0.85em;
+                font-weight: 600;
+                cursor: pointer;
+                flex-shrink: 0;
+            }
+            .pdf-page-scroller-item:hover {
+                background: rgba(255, 255, 255, 0.16);
+            }
+            .pdf-page-scroller-item.active {
+                background: #fe0100;
+                border-color: rgba(255, 255, 255, 0.4);
+                color: #fff;
+            }
+            .pdf-page-scroller-item.has-fields {
+                box-shadow: inset 0 0 0 2px rgba(110, 168, 254, 0.7);
             }
             .document-viewer {
                 position: relative;
@@ -13119,6 +15397,23 @@ def set_signature_fields(doc_id):
                 background: rgba(255, 193, 7, 0.1);
                 pointer-events: none;
                 z-index: 5;
+            }
+            body.signature-fields-page.select-field-mode .existing-field-marker,
+            body.signature-fields-page.select-field-mode .existing-typed-field-marker {
+                pointer-events: auto;
+                cursor: pointer;
+            }
+            body.signature-fields-page.select-field-mode .existing-field-marker:hover,
+            body.signature-fields-page.select-field-mode .existing-typed-field-marker:hover,
+            body.signature-fields-page .existing-field-marker.selected-field-marker,
+            body.signature-fields-page .existing-typed-field-marker.selected-field-marker {
+                border-color: #fe0100;
+                background: rgba(254, 1, 0, 0.18);
+                box-shadow: 0 0 0 3px rgba(254, 1, 0, 0.25);
+            }
+            body.signature-fields-page.hide-field-boxes .existing-field-marker,
+            body.signature-fields-page.hide-field-boxes .existing-typed-field-marker {
+                display: none !important;
             }
             .existing-typed-field-marker::before {
                 content: attr(data-label);
@@ -13230,6 +15525,96 @@ def set_signature_fields(doc_id):
                 background: rgba(255, 255, 255, 0.06) !important;
                 border-left-color: rgba(110, 168, 254, 0.9) !important;
             }
+            body.signature-fields-page .instructions p {
+                color: #d6deec !important;
+            }
+            body.signature-fields-page .instructions table {
+                background: rgba(10, 15, 24, 0.92) !important;
+                color: #f2f5fb !important;
+            }
+            body.signature-fields-page .instructions table thead tr,
+            body.signature-fields-page .instructions table th {
+                background: #111827 !important;
+                color: #f8fafc !important;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.22) !important;
+            }
+            body.signature-fields-page .instructions table tr {
+                border-top-color: rgba(255, 255, 255, 0.14) !important;
+            }
+            body.signature-fields-page .instructions table td {
+                color: #edf2f7 !important;
+            }
+            body.signature-fields-page .instructions table td[style*="monospace"] {
+                color: #cbd5e1 !important;
+            }
+            body.signature-fields-page .inventory-field-type,
+            body.signature-fields-page .inventory-choice-wrap input,
+            body.signature-fields-page .inventory-label-input,
+            body.signature-fields-page .configured-fields-search {
+                background: #0f172a !important;
+                border: 1px solid rgba(255, 255, 255, 0.28) !important;
+                color: #f8fafc !important;
+                border-radius: 6px !important;
+            }
+            body.signature-fields-page .inventory-field-type option,
+            body.signature-fields-page .sidebar-field-type option,
+            body.signature-fields-page .form-group select option {
+                background: #0f172a !important;
+                color: #f8fafc !important;
+            }
+            body.signature-fields-page .inventory-field-type:focus,
+            body.signature-fields-page .inventory-choice-wrap input:focus,
+            body.signature-fields-page .inventory-label-input:focus,
+            body.signature-fields-page .configured-fields-search:focus {
+                border-color: rgba(254, 1, 0, 0.8) !important;
+                box-shadow: 0 0 0 3px rgba(254, 1, 0, 0.18) !important;
+                outline: none !important;
+            }
+            body.signature-fields-page .inventory-label-input {
+                width: min(260px, 100%);
+                padding: 4px 7px;
+                font-size: 0.9em;
+            }
+            body.signature-fields-page .configured-fields-toolbar {
+                display: flex;
+                gap: 10px;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 10px;
+                flex-wrap: wrap;
+            }
+            body.signature-fields-page .configured-fields-search {
+                width: min(360px, 100%);
+                padding: 8px 10px;
+                font-size: 0.95em;
+            }
+            body.signature-fields-page .configured-fields-empty {
+                color: #cbd5e1;
+                font-size: 0.9em;
+                display: none;
+                margin: 8px 0 0;
+            }
+            body.signature-fields-page .clear-configured-selection {
+                display: none;
+                padding: 7px 12px;
+                border: 1px solid rgba(255, 255, 255, 0.22);
+                border-radius: 6px;
+                background: #2f3a4f;
+                color: #f2f5fb;
+                cursor: pointer;
+                font-size: 0.9em;
+            }
+            body.signature-fields-page .clear-configured-selection:hover {
+                background: #3b4860;
+            }
+            body.signature-fields-page .configured-field-row.selected-configured-field {
+                background: rgba(254, 1, 0, 0.18) !important;
+                outline: 2px solid rgba(254, 1, 0, 0.8);
+                outline-offset: -2px;
+            }
+            body.signature-fields-page .configured-field-row.selected-configured-field td {
+                color: #fff !important;
+            }
         </style>
     </head>
     <body class="signature-fields-page">
@@ -13241,15 +15626,134 @@ def set_signature_fields(doc_id):
         </div>
         
         <div class="container">
+            {% if is_pdf and acro_widget_count > 0 %}
+            <div class="instructions" style="margin-bottom: 16px;">
+                <h3>Fillable PDF (Adobe AcroForm)</h3>
+                <p style="font-size: 0.9em; margin-bottom: 10px;">
+                    This PDF has <strong>{{ acro_widget_count }}</strong> built-in form field(s).
+                    {% if configured_field_count == 0 %}
+                    Users cannot sign until fields are imported or placed manually.
+                    {% elif acro_widget_count != configured_field_count %}
+                    <strong style="color: #856404;">{{ configured_field_count }}</strong> configured in the app — counts differ; use <strong>Re-import from PDF</strong> if fields are missing (common after upgrading field detection).
+                    {% else %}
+                    {{ configured_field_count }} field(s) are configured in the app (matches PDF).
+                    {% endif %}
+                </p>
+                <p style="font-size: 0.85em; margin-bottom: 10px; color: #555;">
+                    Forms uploaded before the AcroForm text-field fix may only show checkboxes. Re-import replaces all field positions and clears saved user values for this document.
+                </p>
+                <form method="POST" action="{{ url_for('import_acroform_fields_route', doc_id=document.id) }}" style="display: inline-block; margin-right: 8px;"
+                      onsubmit="return confirm('{% if configured_field_count > 0 %}Replace existing fields with positions from the PDF? Saved user field values for this document will be cleared.{% else %}Import field positions from the PDF?{% endif %}');">
+                    {% if configured_field_count > 0 %}
+                    <input type="hidden" name="replace" value="1">
+                    {% endif %}
+                    <button type="submit" class="btn btn-success">
+                        {% if configured_field_count > 0 %}Re-import from PDF{% else %}Import fields from PDF{% endif %}
+                    </button>
+                </form>
+            </div>
+            {% endif %}
+            {% if field_inventory %}
+            <div class="instructions" style="margin-bottom: 16px;">
+                <h3>Configured fields ({{ field_inventory|length }})</h3>
+                <p style="font-size: 0.9em; color: #555; margin-bottom: 8px;">Change <strong>Input type</strong> for imported fields (e.g. Text -> Phone Number or Last 4 SSN), then click <strong>Save</strong>. Checkbox fields need a group name.</p>
+                <div class="configured-fields-toolbar">
+                    <input type="search" id="configuredFieldsSearch" class="configured-fields-search" placeholder="Search fields by PDF name, label, type, or page...">
+                    <button type="button" id="clearConfiguredSelection" class="clear-configured-selection">Show All Fields</button>
+                    <span style="font-size: 0.85em; color: #cbd5e1;">Tip: Select/Edit mode scrolls clicked PDF fields here.</span>
+                </div>
+                <div id="configuredFieldsScroller" style="max-height: 220px; overflow: auto; border: 1px solid #ddd; border-radius: 4px;">
+                    <table style="width: 100%; font-size: 0.85em; border-collapse: collapse;">
+                        <thead>
+                            <tr style="background: #f0f0f0; position: sticky; top: 0;">
+                                <th style="text-align: left; padding: 6px 8px;">PDF field name</th>
+                                <th style="text-align: left; padding: 6px 8px;">Label</th>
+                                <th style="text-align: left; padding: 6px 8px;">Type</th>
+                                <th style="text-align: left; padding: 6px 8px;">Required</th>
+                                <th style="text-align: left; padding: 6px 8px;">Pg</th>
+                                <th style="text-align: left; padding: 6px 8px;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in field_inventory %}
+                            <tr id="configured-field-{{ row.kind }}-{{ row.id }}" class="configured-field-row" data-field-kind="{{ row.kind }}" data-field-id="{{ row.id }}" data-search="{{ (row.pdf_name or '')|lower }} {{ row.label|lower }} {{ row.field_type|lower }} page {{ row.page }}" style="border-top: 1px solid #eee;">
+                                <td style="padding: 5px 8px; font-family: monospace; color: #333;">{{ row.pdf_name or '—' }}</td>
+                                <td style="padding: 5px 8px;">
+                                    {% if row.kind == 'typed' %}
+                                    <form id="typed-field-update-{{ row.id }}" method="POST" action="{{ url_for('update_typed_field', field_id=row.id) }}"></form>
+                                    <input form="typed-field-update-{{ row.id }}" type="hidden" name="return_page" value="{{ initial_page }}" class="return-page-input">
+                                    <input form="typed-field-update-{{ row.id }}" type="text" name="field_label" value="{{ row.label }}" class="inventory-label-input">
+                                    {% else %}
+                                    {{ row.label }}
+                                    {% endif %}
+                                </td>
+                                <td style="padding: 5px 8px;">
+                                    {% if row.kind == 'typed' %}
+                                    <div class="inventory-type-form" style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+                                        <select form="typed-field-update-{{ row.id }}" name="field_type" class="inventory-field-type" style="font-size: 0.9em; padding: 3px 6px; max-width: 180px;">
+                                            {% for value, label in field_editor_type_choices %}
+                                            <option value="{{ value }}" {% if row.field_type == value %}selected{% endif %}>{{ label }}</option>
+                                            {% endfor %}
+                                        </select>
+                                        <span class="inventory-choice-wrap" style="{% if row.field_type != 'checkbox_choice' %}display:none;{% endif %}">
+                                            <input form="typed-field-update-{{ row.id }}" type="text" name="choice_group" value="{{ row.choice_group or '' }}" placeholder="Group name" style="font-size: 0.85em; padding: 3px 6px; width: 110px;">
+                                        </span>
+                                    </div>
+                                    {% else %}
+                                    {{ row.field_type|replace('_', ' ') }}
+                                    {% endif %}
+                                </td>
+                                <td style="padding: 5px 8px;">
+                                    {% if row.kind == 'typed' and row.field_type == 'checkbox_choice' %}
+                                    One per group
+                                    {% else %}
+                                    Required
+                                    {% endif %}
+                                </td>
+                                <td style="padding: 5px 8px;">{{ row.page }}</td>
+                                <td style="padding: 5px 8px; white-space: nowrap;">
+                                    {% if row.kind == 'typed' %}
+                                    <button form="typed-field-update-{{ row.id }}" type="submit" class="btn btn-success" style="padding: 3px 10px; font-size: 0.8em;">Save</button>
+                                    <form method="POST" action="{{ url_for('delete_typed_field', field_id=row.id) }}" style="display: inline;">
+                                        <input type="hidden" name="return_page" value="{{ initial_page }}" class="return-page-input">
+                                        <button type="submit" class="btn btn-danger" style="padding: 3px 10px; font-size: 0.8em;" onclick="return confirm('Delete this typed field?')">Delete</button>
+                                    </form>
+                                    {% else %}
+                                    <form method="POST" action="{{ url_for('delete_signature_field', field_id=row.id) }}" style="display: inline;">
+                                        <input type="hidden" name="return_page" value="{{ initial_page }}" class="return-page-input">
+                                        <button type="submit" class="btn btn-danger" style="padding: 3px 10px; font-size: 0.8em;" onclick="return confirm('Delete this signature field?')">Delete</button>
+                                    </form>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <p id="configuredFieldsEmpty" class="configured-fields-empty">No configured fields match your search.</p>
+            </div>
+            {% endif %}
             
             <div class="main-content">
                 <div class="document-viewer-container">
                     <h3 style="margin-bottom: 15px;">Document Preview</h3>
-                    <div class="document-viewer" id="documentViewer">
+                    <div class="document-viewer-layout">
+                        <div class="document-viewer-wrap">
+                            <div class="pdf-page-toolbar" id="pdfPageToolbar" style="display: none;">
+                                <span id="pdfPageStatus">Page 1</span>
+                                <button type="button" id="pdfPrevPage" title="Previous page">Prev</button>
+                                <button type="button" id="pdfNextPage" title="Next page">Next</button>
+                            </div>
+                            <div class="document-viewer" id="documentViewer">
+                                {% if is_pdf %}
+                                <canvas id="pdfCanvas"></canvas>
+                                {% else %}
+                                <p style="padding: 20px; color: white;">Signature fields can only be set on PDF documents. Please convert this document to PDF first.</p>
+                                {% endif %}
+                            </div>
+                        </div>
                         {% if is_pdf %}
-                        <canvas id="pdfCanvas"></canvas>
-                        {% else %}
-                        <p style="padding: 20px; color: white;">Signature fields can only be set on PDF documents. Please convert this document to PDF first.</p>
+                        <aside class="pdf-page-scroller" id="pdfPageScroller" aria-label="Document pages"></aside>
                         {% endif %}
                     </div>
                 </div>
@@ -13270,23 +15774,14 @@ def set_signature_fields(doc_id):
                         </div>
                         <div class="form-group">
                             <label for="page_number">Page Number:</label>
-                            <input type="number" name="page_number" id="page_number" value="1" min="1" required>
-                            <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Change this to navigate to different pages</p>
+                            <input type="number" name="page_number" id="page_number" value="{{ initial_page }}" min="1" required>
+                            <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Use the page list beside the document or Prev/Next to switch pages</p>
                         </div>
                         
                         <!-- Signature Field Options -->
                         <div id="signatureFieldOptions" class="field-type-options">
-                            <div class="form-group">
-                                <label for="signature_type">Signature Type:</label>
-                                <select name="signature_type" id="signature_type">
-                                    <option value="image">Image Signature (Simple)</option>
-                                    <option value="cryptographic">Cryptographic Signature (Legally Compliant)</option>
-                                </select>
-                                <p style="font-size: 0.85em; color: #666; margin-top: 5px;">
-                                    <strong>Image:</strong> Visual signature overlay<br>
-                                    <strong>Cryptographic:</strong> Legally binding, tamper-evident signature
-                                </p>
-                            </div>
+                            <input type="hidden" name="signature_type" id="signature_type" value="image">
+                            <p style="font-size: 0.85em; color: #666; margin-top: 0;">Users draw or apply a saved signature image on this field.</p>
                         </div>
                         
                         <!-- Typed Field Options -->
@@ -13300,17 +15795,22 @@ def set_signature_fields(doc_id):
                                     <option value="typed_initials">Typed Initials (auto-fills initials, click to sign)</option>
                                     <option value="date">Date</option>
                                     <option value="number">Number</option>
+                                    <option value="phone">Phone Number</option>
+                                    <option value="last4">Last 4 (SSN — masked XXX-XX-####)</option>
+                                    <option value="checkbox_choice">Checkbox (pick one in a group)</option>
                                 </select>
+                            </div>
+                            <div class="form-group" id="typedChoiceGroupWrap" style="display: none;">
+                                <label for="choice_group">Choice group name:</label>
+                                <input type="text" name="choice_group" id="choice_group" placeholder="e.g. marital_status" maxlength="100">
+                                <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Use the <strong>same</strong> group name on every box in the set (Single, Married, etc.). The user can mark only one with an X.</p>
                             </div>
                             <div class="form-group">
                                 <label for="typed_placeholder">Placeholder (optional):</label>
                                 <input type="text" name="placeholder" id="typed_placeholder" placeholder="e.g., Enter your name">
                             </div>
                             <div class="form-group">
-                                <div class="checkbox-group">
-                                    <input type="checkbox" name="is_required" id="typed_is_required" checked>
-                                    <label for="typed_is_required">Required field</label>
-                                </div>
+                                <p style="font-size: 0.85em; color: #cbd5e1; margin-top: 5px;">All typed fields are required. Checkbox fields require one selection per group.</p>
                             </div>
                         </div>
                         
@@ -13342,6 +15842,7 @@ def set_signature_fields(doc_id):
                                 <p>Page: {{ field.page_number }}</p>
                                 <p>Position: ({{ "%.0f"|format(field.x_position) }}, {{ "%.0f"|format(field.y_position) }})</p>
                                 <form method="POST" action="{{ url_for('delete_signature_field', field_id=field.id) }}" style="display: inline;">
+                                    <input type="hidden" name="return_page" value="{{ initial_page }}" class="return-page-input">
                                     <button type="submit" class="btn btn-danger" style="padding: 5px 10px; font-size: 0.8em;" onclick="return confirm('Delete this signature field?')">Delete</button>
                                 </form>
                             </div>
@@ -13350,31 +15851,13 @@ def set_signature_fields(doc_id):
                             <p style="color: #666; font-size: 0.9em;">No signature fields yet.</p>
                         {% endif %}
                     </div>
-                    
-                    <h3 style="margin-top: 30px; margin-bottom: 15px;">Existing Typed Fields</h3>
-                    <div id="existingTypedFields">
-                        {% if existing_typed_fields %}
-                            {% for field in existing_typed_fields %}
-                            <div class="signature-field-item" style="border-left-color: #ffc107;">
-                                <h4>{{ field.field_label or 'Typed Field' }}</h4>
-                                <p>Type: {{ field.field_type|title }} • Page: {{ field.page_number }}</p>
-                                <p>Position: ({{ "%.0f"|format(field.x_position) }}, {{ "%.0f"|format(field.y_position) }})</p>
-                                <form method="POST" action="{{ url_for('delete_typed_field', field_id=field.id) }}" style="display: inline;">
-                                    <button type="submit" class="btn btn-danger" style="padding: 5px 10px; font-size: 0.8em;" onclick="return confirm('Delete this typed field?')">Delete</button>
-                                </form>
-                            </div>
-                            {% endfor %}
-                        {% else %}
-                            <p style="color: #666; font-size: 0.9em;">No typed fields yet.</p>
-                        {% endif %}
-                    </div>
                 </div>
             </div>
         </div>
         
         <script>
             var pdfDoc = null;
-            var currentPage = 1;
+            var currentPage = {{ initial_page }};
             var pdfScale = 1.0;
             var canvasOffsetX = 0;
             var canvasOffsetY = 0;
@@ -13385,11 +15868,159 @@ def set_signature_fields(doc_id):
             var resizeStartWidth = 0;
             var resizeStartHeight = 0;
             var resizeHandle = null;
-            
+            var SIG_FIELDS_PAGE_KEY = 'sigFieldsPage_{{ document.id }}';
+            var SIG_FIELDS_STATE_KEY = 'sigFieldsState_{{ document.id }}';
+            var pagesWithFields = {};
+            var selectedConfiguredKey = null;
+            var restoredSignatureFieldsState = null;
+
+            function getInitialPage() {
+                var params = new URLSearchParams(window.location.search);
+                var fromUrl = parseInt(params.get('page'), 10);
+                if (!isNaN(fromUrl) && fromUrl >= 1) return fromUrl;
+                try {
+                    var stored = parseInt(sessionStorage.getItem(SIG_FIELDS_PAGE_KEY), 10);
+                    if (!isNaN(stored) && stored >= 1) return stored;
+                } catch (e) {}
+                return currentPage || 1;
+            }
+
+            function syncReturnPageInputs() {
+                document.querySelectorAll('.return-page-input').forEach(function(inp) {
+                    inp.value = currentPage;
+                });
+            }
+
+            function persistPage(pageNum) {
+                currentPage = pageNum;
+                try { sessionStorage.setItem(SIG_FIELDS_PAGE_KEY, String(pageNum)); } catch (e) {}
+                var params = new URLSearchParams(window.location.search);
+                if (params.get('page') !== String(pageNum)) {
+                    params.set('page', String(pageNum));
+                    window.history.replaceState({}, '', window.location.pathname + '?' + params.toString());
+                }
+                var pageInput = document.getElementById('page_number');
+                if (pageInput) pageInput.value = pageNum;
+                syncReturnPageInputs();
+                updatePageScrollerUI();
+            }
+
+            function readSignatureFieldsState() {
+                try {
+                    var raw = sessionStorage.getItem(SIG_FIELDS_STATE_KEY);
+                    return raw ? JSON.parse(raw) : null;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            function saveSignatureFieldsState() {
+                var scroller = document.getElementById('configuredFieldsScroller');
+                var search = document.getElementById('configuredFieldsSearch');
+                var state = {
+                    mode: fieldMode || 'signature',
+                    selectedKey: selectedConfiguredKey || '',
+                    tableScrollTop: scroller ? scroller.scrollTop : 0,
+                    windowScrollY: window.pageYOffset || document.documentElement.scrollTop || 0,
+                    search: search ? (search.value || '') : '',
+                    boxesHidden: document.body.classList.contains('hide-field-boxes')
+                };
+                try {
+                    sessionStorage.setItem(SIG_FIELDS_STATE_KEY, JSON.stringify(state));
+                } catch (e) {}
+            }
+
+            function bindConfiguredFieldFormState() {
+                document.querySelectorAll('#configuredFieldsScroller form').forEach(function(form) {
+                    form.addEventListener('submit', saveSignatureFieldsState);
+                });
+            }
+
+            function updatePageScrollerUI() {
+                if (!pdfDoc) return;
+                var status = document.getElementById('pdfPageStatus');
+                if (status) status.textContent = 'Page ' + currentPage + ' of ' + pdfDoc.numPages;
+                var prevBtn = document.getElementById('pdfPrevPage');
+                var nextBtn = document.getElementById('pdfNextPage');
+                if (prevBtn) prevBtn.disabled = currentPage <= 1;
+                if (nextBtn) nextBtn.disabled = currentPage >= pdfDoc.numPages;
+                document.querySelectorAll('.pdf-page-scroller-item').forEach(function(btn) {
+                    var p = parseInt(btn.getAttribute('data-page'), 10);
+                    btn.classList.toggle('active', p === currentPage);
+                    btn.classList.toggle('has-fields', !!pagesWithFields[p]);
+                });
+                var active = document.querySelector('.pdf-page-scroller-item.active');
+                if (active && active.scrollIntoView) {
+                    active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                }
+            }
+
+            function buildPageScroller(totalPages) {
+                var scroller = document.getElementById('pdfPageScroller');
+                var toolbar = document.getElementById('pdfPageToolbar');
+                if (!scroller) return;
+                if (totalPages <= 1) {
+                    scroller.style.display = 'none';
+                    if (toolbar) toolbar.style.display = 'none';
+                    return;
+                }
+                scroller.style.display = 'flex';
+                if (toolbar) toolbar.style.display = 'flex';
+                scroller.innerHTML = '';
+                var title = document.createElement('div');
+                title.className = 'pdf-page-scroller-title';
+                title.textContent = totalPages + ' pg';
+                scroller.appendChild(title);
+                var list = document.createElement('div');
+                list.className = 'pdf-page-scroller-list';
+                list.id = 'pdfPageScrollerList';
+                for (var i = 1; i <= totalPages; i++) {
+                    (function(pageNum) {
+                        var btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.className = 'pdf-page-scroller-item';
+                        btn.setAttribute('data-page', pageNum);
+                        btn.textContent = pageNum;
+                        btn.title = 'Page ' + pageNum;
+                        btn.addEventListener('click', function() { goToPage(pageNum); });
+                        list.appendChild(btn);
+                    })(i);
+                }
+                scroller.appendChild(list);
+                updatePageScrollerUI();
+            }
+
+            function computePagesWithFields() {
+                pagesWithFields = {};
+                {% for field in existing_fields %}
+                pagesWithFields[{{ field.page_number }}] = true;
+                {% endfor %}
+                {% if existing_typed_fields %}
+                {% for field in existing_typed_fields %}
+                pagesWithFields[{{ field.page_number }}] = true;
+                {% endfor %}
+                {% endif %}
+            }
+
+            function goToPage(pageNum) {
+                if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
+                persistPage(pageNum);
+                renderPage(pageNum);
+            }
+
+            function reloadWithCurrentPage() {
+                var params = new URLSearchParams(window.location.search);
+                params.set('page', String(currentPage));
+                window.location.href = window.location.pathname + '?' + params.toString();
+            }
+
             // Load PDF using PDF.js
             function loadPDF() {
                 var canvas = document.getElementById('pdfCanvas');
                 if (!canvas) return;
+                computePagesWithFields();
+                currentPage = getInitialPage();
+                syncReturnPageInputs();
                 
                 // Set up PDF.js worker
                 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -13400,11 +16031,13 @@ def set_signature_fields(doc_id):
                     // Load the PDF
                     pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
                         pdfDoc = pdf;
-                        renderPage(1);
-                        // Wait a bit for canvas to be fully rendered before displaying fields
-                        setTimeout(function() {
-                            displayExistingFields();
-                        }, 100);
+                        buildPageScroller(pdf.numPages);
+                        var startPage = Math.min(Math.max(1, currentPage), pdf.numPages);
+                        goToPage(startPage);
+                        var prevBtn = document.getElementById('pdfPrevPage');
+                        var nextBtn = document.getElementById('pdfNextPage');
+                        if (prevBtn) prevBtn.addEventListener('click', function() { goToPage(currentPage - 1); });
+                        if (nextBtn) nextBtn.addEventListener('click', function() { goToPage(currentPage + 1); });
                     }).catch(function(error) {
                         console.error('Error loading PDF:', error);
                         document.getElementById('documentViewer').innerHTML = '<p style="padding: 20px; color: white;">Error loading PDF. Please try again.</p>';
@@ -13484,6 +16117,17 @@ def set_signature_fields(doc_id):
                     var marker = document.createElement('div');
                     marker.className = 'existing-field-marker';
                     marker.setAttribute('data-label', field.label);
+                    marker.setAttribute('data-field-kind', 'signature');
+                    marker.setAttribute('data-field-id', field.id);
+                    if (selectedConfiguredKey === 'signature-' + field.id) {
+                        marker.classList.add('selected-field-marker');
+                    }
+                    marker.addEventListener('click', function(e) {
+                        if (fieldMode !== 'select') return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        selectConfiguredField('signature', field.id);
+                    });
                     // Position markers relative to canvas (convert PDF coordinates to screen coordinates)
                     var canvas = document.getElementById('pdfCanvas');
                     if (canvas && canvas.width > 0 && canvas.height > 0) {
@@ -13522,6 +16166,7 @@ def set_signature_fields(doc_id):
                         id: {{ field.id }},
                         label: '{{ field.field_label or "Typed Field" }}',
                         type: '{{ field.field_type }}',
+                        group: '{{ field.choice_group or "" }}',
                         x: {{ field.x_position }},
                         y: {{ field.y_position }},
                         width: {{ field.width or 200 }},
@@ -13537,7 +16182,20 @@ def set_signature_fields(doc_id):
                     
                     var marker = document.createElement('div');
                     marker.className = 'existing-typed-field-marker';
-                    marker.setAttribute('data-label', field.label + ' (' + field.type + ')');
+                    var markerLabel = field.label + ' (' + field.type + ')';
+                    if (field.group) markerLabel += ' [' + field.group + ']';
+                    marker.setAttribute('data-label', markerLabel);
+                    marker.setAttribute('data-field-kind', 'typed');
+                    marker.setAttribute('data-field-id', field.id);
+                    if (selectedConfiguredKey === 'typed-' + field.id) {
+                        marker.classList.add('selected-field-marker');
+                    }
+                    marker.addEventListener('click', function(e) {
+                        if (fieldMode !== 'select') return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        selectConfiguredField('typed', field.id);
+                    });
                     // Position markers relative to canvas (convert PDF coordinates to screen coordinates)
                     var canvas = document.getElementById('pdfCanvas');
                     if (canvas && canvas.width > 0 && canvas.height > 0) {
@@ -13580,6 +16238,9 @@ def set_signature_fields(doc_id):
             
             if (canvas) {
                 canvas.addEventListener('mousedown', function(e) {
+                    if (fieldMode === 'select') {
+                        return;
+                    }
                     // Don't start creating if clicking on existing indicator or resize handle
                     if (e.target.closest('.signature-field-indicator') || e.target.closest('.typed-field-indicator') || e.target.classList.contains('resize-handle')) {
                         return;
@@ -14007,14 +16668,209 @@ def set_signature_fields(doc_id):
             var pageInput = document.getElementById('page_number');
             if (pageInput) {
                 pageInput.addEventListener('change', function() {
-                    var pageNum = parseInt(this.value) || 1;
+                    var pageNum = parseInt(this.value, 10) || 1;
                     if (pdfDoc && pageNum >= 1 && pageNum <= pdfDoc.numPages) {
-                        renderPage(pageNum);
+                        goToPage(pageNum);
                     }
                 });
             }
             
             // Toggle field type options based on selection
+            function onTypedInputTypeChange() {
+                var typedType = document.getElementById('typed_field_type').value;
+                var groupWrap = document.getElementById('typedChoiceGroupWrap');
+                var groupInput = document.getElementById('choice_group');
+                if (groupWrap) {
+                    var show = typedType === 'checkbox_choice';
+                    groupWrap.style.display = show ? 'block' : 'none';
+                    if (groupInput) groupInput.required = show;
+                }
+                if (typedType === 'checkbox_choice') {
+                    document.getElementById('width').value = 36;
+                    document.getElementById('height').value = 36;
+                }
+            }
+
+            function toggleSidebarChoiceGroup(selectEl) {
+                var form = selectEl.closest('form');
+                if (!form) return;
+                var isCheckbox = selectEl.value === 'checkbox_choice';
+                var choiceWrap = form.querySelector('.sidebar-choice-wrap');
+                var requiredWrap = form.querySelector('.sidebar-required-wrap');
+                if (choiceWrap) choiceWrap.style.display = isCheckbox ? 'block' : 'none';
+                if (requiredWrap) requiredWrap.style.display = isCheckbox ? 'none' : 'block';
+            }
+
+            function bindInventoryTypeSelects() {
+                document.querySelectorAll('.inventory-field-type').forEach(function(sel) {
+                    sel.addEventListener('change', function() {
+                        var wrap = sel.closest('.inventory-type-form').querySelector('.inventory-choice-wrap');
+                        if (wrap) wrap.style.display = sel.value === 'checkbox_choice' ? 'inline' : 'none';
+                    });
+                });
+            }
+
+            function filterConfiguredFields() {
+                var search = document.getElementById('configuredFieldsSearch');
+                var empty = document.getElementById('configuredFieldsEmpty');
+                var query = search ? (search.value || '').trim().toLowerCase() : '';
+                var visibleCount = 0;
+                document.querySelectorAll('.configured-field-row').forEach(function(row) {
+                    var haystack = row.getAttribute('data-search') || '';
+                    var rowKey = row.getAttribute('data-field-kind') + '-' + row.getAttribute('data-field-id');
+                    var visible = selectedConfiguredKey
+                        ? rowKey === selectedConfiguredKey
+                        : (!query || haystack.indexOf(query) !== -1);
+                    row.style.display = visible ? '' : 'none';
+                    if (visible) visibleCount += 1;
+                });
+                if (empty) empty.style.display = visibleCount ? 'none' : 'block';
+            }
+
+            function bindConfiguredFieldsSearch() {
+                var search = document.getElementById('configuredFieldsSearch');
+                if (search) search.addEventListener('input', filterConfiguredFields);
+                var clearBtn = document.getElementById('clearConfiguredSelection');
+                if (clearBtn) clearBtn.addEventListener('click', clearConfiguredFieldSelection);
+            }
+
+            function restoreSignatureFieldsState() {
+                var state = readSignatureFieldsState();
+                if (!state) return;
+                restoredSignatureFieldsState = state;
+
+                if (state.boxesHidden && !document.body.classList.contains('hide-field-boxes')) {
+                    toggleFieldBoxes();
+                }
+
+                var mode = state.mode || 'signature';
+                if (mode === 'signature' || mode === 'typed' || mode === 'select') {
+                    setFieldMode(mode);
+                    var selector = document.getElementById('field_type_selector');
+                    if (selector && mode !== 'select') {
+                        selector.value = mode === 'typed' ? 'typed' : 'signature';
+                    }
+                }
+
+                var search = document.getElementById('configuredFieldsSearch');
+                if (search) search.value = state.search || '';
+
+                var restoredRow = state.selectedKey ? document.getElementById('configured-field-' + state.selectedKey) : null;
+                if (state.selectedKey && restoredRow) {
+                    selectedConfiguredKey = state.selectedKey;
+                    var clearBtn = document.getElementById('clearConfiguredSelection');
+                    if (clearBtn) clearBtn.style.display = 'inline-block';
+                    if (search) {
+                        search.value = '';
+                        search.disabled = true;
+                    }
+                }
+                filterConfiguredFields();
+
+                var selectedRow = selectedConfiguredKey ? restoredRow : null;
+                if (selectedRow) {
+                    selectedRow.classList.add('selected-configured-field');
+                }
+
+                setTimeout(function() {
+                    var scroller = document.getElementById('configuredFieldsScroller');
+                    if (scroller && !selectedConfiguredKey) {
+                        scroller.scrollTop = parseInt(state.tableScrollTop, 10) || 0;
+                    }
+                    window.scrollTo(0, parseInt(state.windowScrollY, 10) || 0);
+                }, 100);
+            }
+
+            function clearConfiguredFieldSelection() {
+                selectedConfiguredKey = null;
+                document.querySelectorAll('.configured-field-row.selected-configured-field').forEach(function(row) {
+                    row.classList.remove('selected-configured-field');
+                });
+                document.querySelectorAll('.existing-field-marker.selected-field-marker, .existing-typed-field-marker.selected-field-marker').forEach(function(marker) {
+                    marker.classList.remove('selected-field-marker');
+                });
+                var clearBtn = document.getElementById('clearConfiguredSelection');
+                if (clearBtn) clearBtn.style.display = 'none';
+                var search = document.getElementById('configuredFieldsSearch');
+                if (search) search.disabled = false;
+                filterConfiguredFields();
+            }
+
+            function selectConfiguredField(kind, fieldId) {
+                var key = kind + '-' + fieldId;
+                if (selectedConfiguredKey === key) {
+                    clearConfiguredFieldSelection();
+                    return;
+                }
+                selectedConfiguredKey = key;
+                document.querySelectorAll('.configured-field-row.selected-configured-field').forEach(function(row) {
+                    row.classList.remove('selected-configured-field');
+                });
+                document.querySelectorAll('.existing-field-marker.selected-field-marker, .existing-typed-field-marker.selected-field-marker').forEach(function(marker) {
+                    marker.classList.remove('selected-field-marker');
+                });
+
+                var row = document.getElementById('configured-field-' + key);
+                var marker = document.querySelector('[data-field-kind="' + kind + '"][data-field-id="' + fieldId + '"]');
+                if (row) {
+                    var search = document.getElementById('configuredFieldsSearch');
+                    if (search) {
+                        search.value = '';
+                        search.disabled = true;
+                    }
+                    var clearBtn = document.getElementById('clearConfiguredSelection');
+                    if (clearBtn) clearBtn.style.display = 'inline-block';
+                    filterConfiguredFields();
+                    row.classList.add('selected-configured-field');
+                    var scroller = document.getElementById('configuredFieldsScroller');
+                    if (scroller) {
+                        scroller.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                        scroller.scrollTop = Math.max(0, row.offsetTop - scroller.offsetTop - 36);
+                    }
+                    var editable = row.querySelector('select, .inventory-label-input, input');
+                    if (editable) {
+                        editable.focus();
+                    }
+                }
+                if (marker) {
+                    marker.classList.add('selected-field-marker');
+                }
+            }
+
+            function setFieldMode(mode) {
+                fieldMode = mode;
+                document.body.classList.toggle('select-field-mode', mode === 'select');
+
+                var sigBtn = document.getElementById('modeSignature');
+                var typedBtn = document.getElementById('modeTyped');
+                var selectBtn = document.getElementById('modeSelect');
+                [sigBtn, typedBtn, selectBtn].forEach(function(btn) {
+                    if (!btn) return;
+                    btn.style.background = '#2f3a4f';
+                    btn.style.color = '#f2f5fb';
+                });
+                if (mode === 'signature' && sigBtn) {
+                    sigBtn.style.background = '#fe0100';
+                    sigBtn.style.color = '#fff';
+                } else if (mode === 'typed' && typedBtn) {
+                    typedBtn.style.background = '#fe0100';
+                    typedBtn.style.color = '#fff';
+                } else if (mode === 'select' && selectBtn) {
+                    selectBtn.style.background = '#6ea8fe';
+                    selectBtn.style.color = '#07111f';
+                }
+            }
+
+            function toggleFieldBoxes() {
+                var hidden = document.body.classList.toggle('hide-field-boxes');
+                var btn = document.getElementById('toggleFieldBoxes');
+                if (btn) {
+                    btn.textContent = hidden ? 'Show Boxes' : 'Hide Boxes';
+                    btn.style.background = hidden ? '#6ea8fe' : '#2f3a4f';
+                    btn.style.color = hidden ? '#07111f' : '#f2f5fb';
+                }
+            }
+
             function toggleFieldTypeOptions() {
                 var fieldType = document.getElementById('field_type_selector').value;
                 var signatureOptions = document.getElementById('signatureFieldOptions');
@@ -14031,35 +16887,17 @@ def set_signature_fields(doc_id):
                     document.getElementById('height').value = 80;
                     // Update mode to signature
                     if (typeof fieldMode !== 'undefined') {
-                        fieldMode = 'signature';
-                        var sigBtn = document.getElementById('modeSignature');
-                        var typedBtn = document.getElementById('modeTyped');
-                        if (sigBtn && typedBtn) {
-                            sigBtn.style.background = '#28a745';
-                            sigBtn.style.color = 'white';
-                            typedBtn.style.background = '#e0e0e0';
-                            typedBtn.style.color = '#000';
-                        }
+                        setFieldMode('signature');
                     }
                 } else {
                     signatureOptions.style.display = 'none';
                     typedOptions.style.display = 'block';
                     submitButton.textContent = 'Add Typed Field';
                     submitButton.className = 'btn btn-primary';
-                    // Set default size for typed fields
-                    document.getElementById('width').value = 200;
-                    document.getElementById('height').value = 30;
+                    onTypedInputTypeChange();
                     // Update mode to typed
                     if (typeof fieldMode !== 'undefined') {
-                        fieldMode = 'typed';
-                        var sigBtn = document.getElementById('modeSignature');
-                        var typedBtn = document.getElementById('modeTyped');
-                        if (sigBtn && typedBtn) {
-                            typedBtn.style.background = '#ffc107';
-                            typedBtn.style.color = '#000';
-                            sigBtn.style.background = '#e0e0e0';
-                            sigBtn.style.color = '#000';
-                        }
+                        setFieldMode('typed');
                     }
                 }
             }
@@ -14095,6 +16933,7 @@ def set_signature_fields(doc_id):
                 }
                 
                 if (fieldType === 'signature') {
+                    saveSignatureFieldsState();
                     // Submit as signature field (traditional form submit)
                     var signatureData = {
                         field_label: fieldLabel,
@@ -14117,6 +16956,11 @@ def set_signature_fields(doc_id):
                         input.value = signatureData[key];
                         tempForm.appendChild(input);
                     }
+                    var pageHidden = document.createElement('input');
+                    pageHidden.type = 'hidden';
+                    pageHidden.name = 'return_page';
+                    pageHidden.value = String(currentPage);
+                    tempForm.appendChild(pageHidden);
                     document.body.appendChild(tempForm);
                     tempForm.submit();
                 } else {
@@ -14130,6 +16974,7 @@ def set_signature_fields(doc_id):
                         field_label: fieldLabel,
                         page_number: formData.get('page_number'),
                         field_type: formData.get('typed_field_type') || 'text',
+                        choice_group: formData.get('choice_group') || '',
                         placeholder: formData.get('placeholder') || '',
                         is_required: formData.get('is_required') ? 'on' : '',
                         x_position: xPos,
@@ -14178,9 +17023,10 @@ def set_signature_fields(doc_id):
                     })
                     .then(function(data) {
                         if (data && data.success) {
-                            // Success - show message and reload to display the new field
+                            pagesWithFields[currentPage] = true;
+                            saveSignatureFieldsState();
                             alert('Typed field saved successfully!');
-                            window.location.reload();
+                            reloadWithCurrentPage();
                         } else {
                             var errorMsg = (data && data.message) ? data.message : 'Unknown error occurred';
                             alert('Error: ' + errorMsg);
@@ -14205,6 +17051,10 @@ def set_signature_fields(doc_id):
             if (document.getElementById('field_type_selector')) {
                 toggleFieldTypeOptions();
             }
+            var typedFieldTypeSelect = document.getElementById('typed_field_type');
+            if (typedFieldTypeSelect) {
+                typedFieldTypeSelect.addEventListener('change', onTypedInputTypeChange);
+            }
             
             // Add mode toggle buttons for signature vs typed field (only once, after page loads)
             // Also sync with the field type selector
@@ -14216,15 +17066,13 @@ def set_signature_fields(doc_id):
                     modeContainer.style.cssText = 'position: absolute; top: 10px; right: 10px; z-index: 200; background: #141b28; color: #f2f5fb; padding: 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 2px 10px rgba(0,0,0,0.35);';
                     modeContainer.innerHTML = '<label style="font-size: 0.9em; font-weight: bold; margin-right: 10px; color: #f2f5fb;">Mode:</label>' +
                         '<button type="button" id="modeSignature" style="padding: 5px 15px; margin-right: 5px; background: #fe0100; color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 3px; cursor: pointer;">Signature</button>' +
-                        '<button type="button" id="modeTyped" style="padding: 5px 15px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Typed Field</button>';
+                        '<button type="button" id="modeTyped" style="padding: 5px 15px; margin-right: 5px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Typed Field</button>' +
+                        '<button type="button" id="modeSelect" title="Click an existing field on the PDF to edit it above" style="padding: 5px 15px; margin-right: 5px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Select/Edit</button>' +
+                        '<button type="button" id="toggleFieldBoxes" title="Hide or show saved field boxes on the PDF preview" style="padding: 5px 15px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Hide Boxes</button>';
                     viewerContainer.appendChild(modeContainer);
                     
                     document.getElementById('modeSignature').addEventListener('click', function() {
-                        fieldMode = 'signature';
-                        this.style.background = '#fe0100';
-                        this.style.color = 'white';
-                        document.getElementById('modeTyped').style.background = '#2f3a4f';
-                        document.getElementById('modeTyped').style.color = '#f2f5fb';
+                        setFieldMode('signature');
                         // Sync with form selector
                         var selector = document.getElementById('field_type_selector');
                         if (selector) selector.value = 'signature';
@@ -14232,16 +17080,18 @@ def set_signature_fields(doc_id):
                     });
                     
                     document.getElementById('modeTyped').addEventListener('click', function() {
-                        fieldMode = 'typed';
-                        this.style.background = '#fe0100';
-                        this.style.color = '#fff';
-                        document.getElementById('modeSignature').style.background = '#2f3a4f';
-                        document.getElementById('modeSignature').style.color = '#f2f5fb';
+                        setFieldMode('typed');
                         // Sync with form selector
                         var selector = document.getElementById('field_type_selector');
                         if (selector) selector.value = 'typed';
                         toggleFieldTypeOptions();
                     });
+
+                    document.getElementById('modeSelect').addEventListener('click', function() {
+                        setFieldMode('select');
+                    });
+
+                    document.getElementById('toggleFieldBoxes').addEventListener('click', toggleFieldBoxes);
                     
                     // Sync mode buttons when form selector changes
                     var selector = document.getElementById('field_type_selector');
@@ -14254,20 +17104,44 @@ def set_signature_fields(doc_id):
                             }
                         });
                     }
+                    restoreSignatureFieldsState();
                 }
             }, 500);
             
             
             // Initialize when page loads
             if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', loadPDF);
+                document.addEventListener('DOMContentLoaded', function() {
+                    bindInventoryTypeSelects();
+                    bindConfiguredFieldsSearch();
+                    bindConfiguredFieldFormState();
+                    loadPDF();
+                });
             } else {
+                bindInventoryTypeSelects();
+                bindConfiguredFieldsSearch();
+                bindConfiguredFieldFormState();
                 loadPDF();
             }
         </script>
     </body>
     </html>
-    ''', document=document, existing_fields=existing_fields, existing_typed_fields=existing_typed_fields, is_pdf=is_pdf)
+    ''', document=document, existing_fields=existing_fields, existing_typed_fields=existing_typed_fields,
+         is_pdf=is_pdf, initial_page=initial_page, acro_widget_count=acro_widget_count,
+         configured_field_count=configured_field_count, field_inventory=field_inventory,
+         typed_field_type_choices=TYPED_FIELD_TYPE_CHOICES,
+         field_editor_type_choices=FIELD_EDITOR_TYPE_CHOICES)
+
+
+def _signature_fields_redirect(doc_id, page=None):
+    """Redirect back to set signature fields, preserving the active PDF page."""
+    if page is None:
+        page = request.form.get('return_page') or request.args.get('page')
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+    return redirect(url_for('set_signature_fields', doc_id=doc_id, page=page))
 
 
 @app.route('/admin/documents/<int:doc_id>/signature-fields/add', methods=['POST'])
@@ -14280,7 +17154,7 @@ def add_signature_field(doc_id):
         return redirect(url_for('manage_documents'))
     
     try:
-        signature_type = request.form.get('signature_type', 'image')  # 'image' or 'cryptographic'
+        signature_type = 'image'
         signature_field = DocumentSignatureField(
             document_id=doc_id,
             page_number=int(request.form.get('page_number', 1)),
@@ -14302,7 +17176,7 @@ def add_signature_field(doc_id):
         db.session.rollback()
         flash(f'Error adding signature field: {str(e)}', 'error')
     
-    return redirect(url_for('set_signature_fields', doc_id=doc_id))
+    return _signature_fields_redirect(doc_id, request.form.get('page_number') or request.form.get('return_page'))
 
 
 @app.route('/admin/documents/<int:doc_id>/typed-fields/add', methods=['POST'])
@@ -14318,6 +17192,7 @@ def add_typed_field(doc_id):
         return redirect(url_for('manage_documents'))
     
     try:
+        _ensure_document_typed_field_columns()
         # Check if table exists by trying to query it
         try:
             DocumentTypedField.query.first()
@@ -14328,7 +17203,15 @@ def add_typed_field(doc_id):
             flash(error_msg, 'error')
             return redirect(url_for('set_signature_fields', doc_id=doc_id))
         
-        field_type = request.form.get('field_type', 'text')  # 'text', 'date', 'name', etc.
+        field_type = normalize_typed_field_type(request.form.get('field_type'))
+        choice_group = (request.form.get('choice_group') or '').strip() or None
+        if field_type == 'checkbox_choice':
+            if not choice_group:
+                error_msg = 'Choice group name is required for checkbox fields.'
+                if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                    return jsonify({'success': False, 'message': error_msg}), 400
+                flash(error_msg, 'error')
+                return _signature_fields_redirect(doc_id, request.form.get('page_number'))
         
         # Get and validate required fields
         x_pos = request.form.get('x_position')
@@ -14360,8 +17243,9 @@ def add_typed_field(doc_id):
             height=float(height),
             field_label=field_label,
             field_type=field_type,
+            choice_group=choice_group if field_type == 'checkbox_choice' else None,
             placeholder=request.form.get('placeholder', '').strip() or None,
-            is_required=request.form.get('is_required') == 'on',
+            is_required=False if field_type == 'checkbox_choice' else True,
             created_by=current_user.username
         )
         
@@ -14399,7 +17283,66 @@ def add_typed_field(doc_id):
         
         flash(error_msg, 'error')
     
-    return redirect(url_for('set_signature_fields', doc_id=doc_id))
+    return _signature_fields_redirect(doc_id, request.form.get('page_number') or request.form.get('return_page'))
+
+
+@app.route('/admin/documents/typed-fields/<int:field_id>/update', methods=['POST'])
+@admin_required
+def update_typed_field(field_id):
+    """Update an existing typed field's label, input type, and options."""
+    typed_field = DocumentTypedField.query.get(field_id)
+    if not typed_field:
+        flash('Typed field not found.', 'error')
+        return redirect(url_for('manage_documents'))
+
+    doc_id = typed_field.document_id
+    try:
+        _ensure_document_typed_field_columns()
+        requested_field_type = (request.form.get('field_type') or 'text').strip().lower()
+        field_label = (request.form.get('field_label') or '').strip()
+        choice_group = (request.form.get('choice_group') or '').strip() or None
+
+        if requested_field_type == 'signature':
+            signature_field = DocumentSignatureField(
+                document_id=doc_id,
+                page_number=typed_field.page_number,
+                x_position=typed_field.x_position,
+                y_position=typed_field.y_position,
+                width=max(float(typed_field.width or 200), 120.0),
+                height=max(float(typed_field.height or 30), 50.0),
+                field_label=field_label or typed_field.field_label or 'Signature',
+                signature_type='image',
+                is_required=True,
+                created_by=current_user.username,
+            )
+            db.session.add(signature_field)
+            DocumentTypedFieldValue.query.filter_by(typed_field_id=field_id).delete()
+            db.session.delete(typed_field)
+            db.session.commit()
+            flash('Field converted to signature successfully.', 'success')
+            return _signature_fields_redirect(doc_id, request.form.get('return_page'))
+
+        field_type = normalize_typed_field_type(requested_field_type)
+        if field_type == 'checkbox_choice':
+            if not choice_group:
+                flash('Choice group name is required for checkbox fields.', 'error')
+                return _signature_fields_redirect(doc_id, request.form.get('return_page'))
+            typed_field.choice_group = choice_group
+            typed_field.is_required = False
+        else:
+            typed_field.choice_group = None
+            typed_field.is_required = True
+
+        if field_label:
+            typed_field.field_label = field_label
+        typed_field.field_type = field_type
+        db.session.commit()
+        flash('Field updated successfully.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating field: {str(e)}', 'error')
+
+    return _signature_fields_redirect(doc_id, request.form.get('return_page'))
 
 
 @app.route('/admin/documents/typed-fields/<int:field_id>/delete', methods=['POST'])
@@ -14424,7 +17367,7 @@ def delete_typed_field(field_id):
             db.session.rollback()
             flash(f'Error deleting typed field: {str(e)}', 'error')
         
-        return redirect(url_for('set_signature_fields', doc_id=doc_id))
+        return _signature_fields_redirect(doc_id, request.form.get('return_page'))
     except Exception as e:
         flash(f'Error: {str(e)}. Typed fields feature may not be available.', 'error')
         return redirect(url_for('manage_documents'))
@@ -14471,7 +17414,7 @@ def delete_signature_field(field_id):
         db.session.rollback()
         flash(f'Error deleting signature field: {str(e)}', 'error')
     
-    return redirect(url_for('set_signature_fields', doc_id=doc_id))
+    return _signature_fields_redirect(doc_id, request.form.get('return_page'))
 
 
 @app.route('/admin/documents/<int:doc_id>/assign')
@@ -14862,6 +17805,7 @@ def assign_document(doc_id):
             
             <div class="admin-panel">
                 <h2>Assign to Users</h2>
+                <p style="color: #b7c1d3; font-size: 0.95em; margin-bottom: 16px; max-width: 640px;">Creates a signing task and shows this document on the user&rsquo;s <strong>Files</strong> page, even if it is <strong>Not in library</strong> on Manage Documents. Use the library toggle only for optional browse access without assignment.</p>
                 <form method="POST" action="{{ url_for('assign_document_submit', doc_id=document.id) }}">
                     <div class="form-group assign-doc-users-form-group">
                         <div class="assign-doc-users-shell"
@@ -14999,25 +17943,9 @@ def assign_document_submit(doc_id):
                 assigned_count += 1
         
         db.session.commit()
-        
-        # Send email to newly assigned users (if mail configured)
-        sign_url = url_for('sign_document', doc_id=doc_id, _external=True)
-        doc_name = document.name_for_users or 'Document'
-        due_str = f" Due: {due_date_str}" if due_date_str else ""
+
         for username in newly_assigned_usernames:
-            to_email = get_email_for_username(username)
-            if to_email:
-                send_email(
-                    to_email,
-                    subject=f"Document to sign: {doc_name}",
-                    body_html=f"""
-                    <p>Hello,</p>
-                    <p>You have been assigned to sign the following document: <strong>{doc_name}</strong>.</p>
-                    <p><a href="{sign_url}">Sign the document here</a></p>
-                    {f'<p>Due date: {due_date_str}</p>' if due_date_str else ''}
-                    <p>— Ziebart Onboarding</p>
-                    """.strip()
-                )
+            reset_onboarding_completion_state(username)
         
         flash(f'Document assigned to {assigned_count} user(s).', 'success')
     except Exception as e:
@@ -15079,60 +18007,31 @@ def _view_documents_impl():
     is_admin = current_user.is_admin() if current_user else False
     user_first_name = (current_user.username if current_user else 'User') or 'User'
     user_full_name = (current_user.username if current_user else 'User') or 'User'
+    assigned_documents = []
+    assigned_doc_ids = set()
 
     try:
-        if current_user.is_admin():
-            documents = Document.query.order_by(Document.created_at.desc()).all()
-        else:
-            assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
-            assigned_doc_ids = [a.document_id for a in assigned_documents]
-            if assigned_doc_ids:
-                documents = Document.query.filter(Document.id.in_(assigned_doc_ids)).order_by(Document.created_at.desc()).all()
-            else:
-                documents = []
-    except Exception as e:
-        db.session.rollback()
-        # Try adding display_name if missing (MSSQL/pyodbc error text can vary)
-        err_str = (str(e) or '').lower()
-        try:
-            db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-        # Retry the query (succeeds if the only issue was missing display_name)
-        try:
-            if current_user.is_admin():
-                documents = Document.query.order_by(Document.created_at.desc()).all()
-            else:
-                assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
-                assigned_doc_ids = [a.document_id for a in assigned_documents]
-                documents = Document.query.filter(Document.id.in_(assigned_doc_ids)).order_by(Document.created_at.desc()).all() if assigned_doc_ids else []
-        except Exception:
-            db.session.rollback()
-            raise
-
-        # Get assigned documents for current user
-        assigned_documents = DocumentAssignment.query.filter_by(username=current_user.username).all()
+        documents, assigned_documents = documents_for_user_files(current_user.username)
         assigned_doc_ids = set(a.document_id for a in assigned_documents)
 
-        # Check signature status for each document
+        # Check signature / typed field completion for each document
         for doc in documents:
             signature_fields = DocumentSignatureField.query.filter_by(document_id=doc.id).all()
-            doc.has_signature_fields = len(signature_fields) > 0
-            # Check if current user has signed all required fields (using helper to handle deleted fields)
-            required_fields = [f for f in signature_fields if f.is_required]
             try:
-                doc.all_signed = len(required_fields) > 0 and all(is_signature_field_signed(doc.id, f, current_user.username) for f in required_fields)
-            except Exception as e:
-                # If checking signatures fails, assume not signed
+                typed_count = DocumentTypedField.query.filter_by(document_id=doc.id).count()
+            except Exception:
+                typed_count = 0
+            doc.has_signature_fields = len(signature_fields) > 0
+            doc.has_form_fields = len(signature_fields) > 0 or typed_count > 0
+            try:
+                doc.all_signed = document_fully_completed_for_user(doc.id, current_user.username)
+            except Exception:
                 doc.all_signed = False
-            # Only require signature if document is assigned
             doc.is_assigned = doc.id in assigned_doc_ids
-            doc.needs_signature = doc.is_assigned and len(required_fields) > 0 and not doc.all_signed
+            doc.needs_signature = doc.is_assigned and doc.has_form_fields and not doc.all_signed
             if doc.is_assigned:
                 doc.assignment = next((a for a in assigned_documents if a.document_id == doc.id), None)
 
-        # Get user info for header (guard against None first/last name from NewHire)
         is_admin = current_user.is_admin()
         user_new_hire = NewHire.query.filter_by(username=current_user.username).first()
         if user_new_hire:
@@ -15146,17 +18045,44 @@ def _view_documents_impl():
             user_first_name = current_user.username
         if not user_full_name:
             user_full_name = current_user.username
-
     except Exception as e:
-        import traceback
-        app.logger.error(f'Error in view_documents for {current_user.username if current_user else "unknown"}: {str(e)}')
-        app.logger.error(traceback.format_exc())
         db.session.rollback()
-        flash('Unable to load document list. Showing empty list.', 'error')
-        documents = []
-        is_admin = current_user.is_admin() if current_user else False
-        user_first_name = (current_user.username if current_user else 'User') or 'User'
-        user_full_name = (current_user.username if current_user else 'User') or 'User'
+        err_str = (str(e) or '').lower()
+        if 'display_name' in err_str or 'invalid column' in err_str:
+            try:
+                db.session.execute(text("ALTER TABLE documents ADD display_name NVARCHAR(255) NULL"))
+                db.session.commit()
+                documents, assigned_documents = documents_for_user_files(current_user.username)
+                assigned_doc_ids = set(a.document_id for a in assigned_documents)
+                for doc in documents:
+                    signature_fields = DocumentSignatureField.query.filter_by(document_id=doc.id).all()
+                    try:
+                        typed_count = DocumentTypedField.query.filter_by(document_id=doc.id).count()
+                    except Exception:
+                        typed_count = 0
+                    doc.has_signature_fields = len(signature_fields) > 0
+                    doc.has_form_fields = len(signature_fields) > 0 or typed_count > 0
+                    try:
+                        doc.all_signed = document_fully_completed_for_user(doc.id, current_user.username)
+                    except Exception:
+                        doc.all_signed = False
+                    doc.is_assigned = doc.id in assigned_doc_ids
+                    doc.needs_signature = doc.is_assigned and doc.has_form_fields and not doc.all_signed
+                    if doc.is_assigned:
+                        doc.assignment = next((a for a in assigned_documents if a.document_id == doc.id), None)
+            except Exception:
+                db.session.rollback()
+                import traceback
+                app.logger.error(f'Error in view_documents for {current_user.username}: {e}')
+                app.logger.error(traceback.format_exc())
+                flash('Unable to load document list. Showing empty list.', 'error')
+                documents = []
+        else:
+            import traceback
+            app.logger.error(f'Error in view_documents for {current_user.username if current_user else "unknown"}: {str(e)}')
+            app.logger.error(traceback.format_exc())
+            flash('Unable to load document list. Showing empty list.', 'error')
+            documents = []
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -15560,7 +18486,7 @@ def _view_documents_impl():
                 {% if documents %}
                 <div class="document-list">
                     {% for doc in documents %}
-                    <div class="document-item {{ 'signed' if (doc.has_signature_fields and doc.all_signed) else 'needs-signature' if doc.needs_signature else '' }}">
+                    <div class="document-item {{ 'signed' if (doc.has_form_fields and doc.all_signed) else 'needs-signature' if doc.needs_signature else '' }}">
                         <div class="document-info">
                             <h3>
                                 {% if doc.needs_signature %}
@@ -15670,9 +18596,9 @@ def view_document(doc_id):
             flash('This document is not available.', 'error')
             return redirect(url_for('dashboard'))
     
-    # Check if file exists
-    if not os.path.exists(document.file_path):
-        flash('File not found on server.', 'error')
+    file_path = resolve_document_file_path(document)
+    if not file_path:
+        flash('File not found on server. Ask an administrator to re-upload the document file.', 'error')
         return redirect(url_for('dashboard'))
     
     # Determine if file can be viewed in browser
@@ -15686,7 +18612,7 @@ def view_document(doc_id):
     if file_type in viewable_types or file_ext in viewable_extensions:
         # Serve file for viewing in browser
         return send_file(
-            document.file_path,
+            file_path,
             as_attachment=False,
             mimetype=file_type or 'application/octet-stream'
         )
@@ -15723,6 +18649,14 @@ def view_document_embed(doc_id, username=None):
             user_store_id = get_current_user_store_id()
             if not document_visible_to_store(document, user_store_id):
                 return "This document is not available.", 403
+
+    file_path = resolve_document_file_path(document)
+    if not file_path:
+        app.logger.warning(
+            'Document file missing on disk: doc_id=%s path=%s filename=%s',
+            doc_id, document.file_path, document.filename,
+        )
+        return "File not found on server.", 404
 
     # If username is provided and current user is admin OR it's their own username, show signed version
     # Otherwise, show original blank document
@@ -15765,7 +18699,7 @@ def view_document_embed(doc_id, username=None):
                 os.close(temp_fd)
                 
                 # Copy original PDF
-                shutil.copy2(document.file_path, temp_path)
+                shutil.copy2(file_path, temp_path)
                 
                 # Embed signatures and typed field values into temp copy
                 pdf_doc = fitz.open(temp_path)
@@ -16001,14 +18935,11 @@ def view_document_embed(doc_id, username=None):
             traceback.print_exc()
             # Fall through to serve original
     
-    # Serve original blank document
-    if not os.path.exists(document.file_path):
-        return "File not found on server.", 404
-    
+    # Serve original blank document (file_path resolved above)
     file_type = document.file_type or 'application/octet-stream'
     
     response = send_file(
-        document.file_path,
+        file_path,
         as_attachment=False,
         mimetype=file_type
     )
@@ -16229,7 +19160,23 @@ def _serve_sign_document_page(doc_id):
             typed_fields = []
         
         if not signature_fields and not typed_fields:
-            flash('This document does not have any fields configured.', 'error')
+            if _document_is_fillable_pdf(document):
+                _try_auto_import_acroform_fields(document, current_user.username)
+                signature_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).order_by(
+                    DocumentSignatureField.page_number, DocumentSignatureField.id
+                ).all()
+                try:
+                    typed_fields = DocumentTypedField.query.filter_by(document_id=doc_id).order_by(
+                        DocumentTypedField.page_number, DocumentTypedField.id
+                    ).all()
+                except Exception:
+                    typed_fields = []
+        if not signature_fields and not typed_fields:
+            flash(
+                'This document does not have any fields configured. '
+                'For fillable PDFs from Adobe, open Set Signature Fields and click Import fields from PDF.',
+                'error',
+            )
             return redirect(url_for('view_documents'))
         
         # Get existing signatures by current user
@@ -16308,6 +19255,77 @@ def _serve_sign_document_page(doc_id):
                 saved_signature_kind = (getattr(user_row, 'saved_signature_kind', None) or '').strip() or None
         except Exception:
             db.session.rollback()
+
+        document_file_path = resolve_document_file_path(document)
+        document_file_missing = bool(is_pdf and not document_file_path)
+
+        import json as _json
+        sign_overlay_fields = []
+        for field in signature_fields:
+            sig_img = None
+            if field.is_signed and field.matching_signature and field.matching_signature.signature_image:
+                sig_img = field.matching_signature.signature_image
+            sign_overlay_fields.append({
+                'id': field.id,
+                'kind': 'signature',
+                'field_type': 'signature',
+                'label': field.field_label or 'Signature',
+                'page': field.page_number,
+                'x': float(field.x_position),
+                'y': float(field.y_position),
+                'width': float(field.width or 200),
+                'height': float(field.height or 80),
+                'filled': bool(field.is_signed),
+                'value': None,
+                'signature_image': sig_img,
+                'phone_like': False,
+                'choice_group': '',
+                'is_required': True,
+            })
+        for field in typed_fields:
+            phone_like = typed_field_is_phone_like(field)
+            filled = field.id in filled_typed_field_ids
+            val = filled_typed_field_ids.get(field.id, '') if filled else ''
+            if not filled and field.field_type == 'typed_name':
+                val = user_display_name
+            elif not filled and field.field_type == 'typed_initials':
+                val = user_initials
+            elif not filled and field.field_type == 'date':
+                val = today_date
+            ph = (field.placeholder or '').strip()
+            if ph.startswith(ACRO_PLACEHOLDER_PREFIX):
+                input_hint = ''
+            else:
+                input_hint = ph[:200]
+            if not input_hint:
+                if phone_like:
+                    input_hint = '(555) 123-4567'
+                elif field.field_type == 'last4':
+                    input_hint = '1234'
+                elif field.field_type == 'number':
+                    input_hint = 'Enter number'
+                else:
+                    lbl = (field.field_label or '').strip()
+                    input_hint = f'Enter {lbl}' if lbl else ''
+            sign_overlay_fields.append({
+                'id': field.id,
+                'kind': 'typed',
+                'field_type': field.field_type,
+                'label': field.field_label or 'Typed Field',
+                'page': field.page_number,
+                'x': float(field.x_position),
+                'y': float(field.y_position),
+                'width': float(field.width or 200),
+                'height': float(field.height or 30),
+                'filled': filled,
+                'value': val if filled or field.field_type in ('typed_name', 'typed_initials', 'date') else '',
+                'signature_image': None,
+                'phone_like': phone_like,
+                'choice_group': (field.choice_group or '').strip(),
+                'is_required': field.field_type != 'checkbox_choice',
+                'input_hint': input_hint,
+            })
+        sign_overlay_fields_json = _json.dumps(sign_overlay_fields)
         
         return render_template_string('''
     <!DOCTYPE html>
@@ -16316,6 +19334,9 @@ def _serve_sign_document_page(doc_id):
         <title>Sign Document - {{ document.name_for_users }}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta name="color-scheme" content="dark">
+        {% if is_pdf and not document_file_missing %}
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+        {% endif %}
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             html.sign-document-html, body.sign-document-page { color-scheme: dark; }
@@ -16388,10 +19409,75 @@ def _serve_sign_document_page(doc_id):
             .btn-danger {
                 background: #FE0100;
             }
+            .choice-checkbox-row {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+            }
+            .choice-checkbox-btn {
+                width: 40px;
+                height: 40px;
+                min-width: 40px;
+                border: 2px solid #333;
+                border-radius: 4px;
+                background: #fff;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 0;
+            }
+            .choice-checkbox-btn-selected {
+                border-color: #28a745;
+                background: #e8f5e9;
+            }
+            .choice-checkbox-mark {
+                font-size: 1.4em;
+                font-weight: 800;
+                line-height: 1;
+                color: #000;
+            }
             .main-content {
-                display: grid;
-                grid-template-columns: 1fr 400px;
-                gap: 20px;
+                display: block;
+                max-width: 1200px;
+                margin: 0 auto;
+            }
+            .sign-doc-toolbar {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 12px;
+                padding: 10px 12px;
+                background: rgba(0, 0, 0, 0.25);
+                border-radius: 6px;
+            }
+            .sign-progress-wrap {
+                flex: 1;
+                min-width: 160px;
+            }
+            #signProgressText {
+                font-size: 0.9em;
+                color: #f2f5fb;
+                display: block;
+                margin-bottom: 6px;
+            }
+            .sign-progress-bar {
+                height: 6px;
+                background: rgba(255, 255, 255, 0.15);
+                border-radius: 3px;
+                overflow: hidden;
+            }
+            #signProgressFill {
+                height: 100%;
+                width: 0%;
+                background: #28a745;
+                border-radius: 3px;
+                transition: width 0.25s ease;
+            }
+            #signNextFieldBtn {
+                background: #fe0100;
+                white-space: nowrap;
             }
             .document-viewer-container {
                 background: white;
@@ -16399,6 +19485,90 @@ def _serve_sign_document_page(doc_id):
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 padding: 20px;
                 position: relative;
+            }
+            .document-viewer-layout {
+                display: flex;
+                gap: 12px;
+                align-items: stretch;
+            }
+            .document-viewer-wrap {
+                flex: 1;
+                min-width: 0;
+            }
+            .pdf-page-toolbar {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 10px;
+                padding: 8px 12px;
+                background: rgba(0, 0, 0, 0.25);
+                border-radius: 6px;
+                font-size: 0.9em;
+                color: #f2f5fb;
+            }
+            .pdf-page-toolbar button {
+                padding: 4px 12px;
+                background: rgba(255, 255, 255, 0.12);
+                color: #f2f5fb;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.85em;
+            }
+            .pdf-page-toolbar button:hover:not(:disabled) {
+                background: rgba(255, 255, 255, 0.2);
+            }
+            .pdf-page-toolbar button:disabled {
+                opacity: 0.4;
+                cursor: not-allowed;
+            }
+            .pdf-page-scroller {
+                display: none;
+                flex-direction: column;
+                width: 56px;
+                flex-shrink: 0;
+                background: rgba(0, 0, 0, 0.35);
+                border-radius: 8px;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                padding: 8px 6px;
+                max-height: min(860px, calc(100vh - 180px));
+            }
+            .pdf-page-scroller-title {
+                font-size: 0.65em;
+                font-weight: 700;
+                text-align: center;
+                color: #b7c1d3;
+                margin-bottom: 8px;
+                line-height: 1.2;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .pdf-page-scroller-list {
+                flex: 1;
+                overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                align-items: center;
+            }
+            .pdf-page-scroller-item {
+                width: 38px;
+                min-height: 38px;
+                padding: 4px;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 6px;
+                background: rgba(255, 255, 255, 0.08);
+                color: #f2f5fb;
+                font-size: 0.85em;
+                font-weight: 600;
+                cursor: pointer;
+            }
+            .pdf-page-scroller-item.active {
+                background: #fe0100;
+                border-color: rgba(255, 255, 255, 0.4);
+            }
+            .pdf-page-scroller-item.has-fields {
+                box-shadow: inset 0 0 0 2px rgba(110, 168, 254, 0.7);
             }
             .document-viewer {
                 position: relative;
@@ -16417,38 +19587,164 @@ def _serve_sign_document_page(doc_id):
                 background: white;
                 display: block;
             }
-            .document-embed-frame {
-                width: 100%;
-                border: none;
-                height: 800px;
-                display: block;
-            }
-            .signature-overlay {
+            #fieldOverlay {
                 position: absolute;
+                top: 0;
+                left: 0;
                 pointer-events: none;
-                z-index: 1000;
-                top: 20px;
-                left: 20px;
-                right: 20px;
-                bottom: 20px;
+                z-index: 100;
                 overflow: visible;
             }
-            .signature-overlay-item {
-                position: absolute;
-                border: 2px solid #28a745;
-                background: rgba(255, 255, 255, 0.95);
-                pointer-events: none;
-                box-sizing: border-box;
-                padding: 2px;
-                z-index: 1001;
-                transform: translateZ(0);
+            #fieldOverlay .field-overlay {
+                pointer-events: auto;
             }
-            .signature-overlay-item img {
+            .field-overlay {
+                position: absolute;
+                box-sizing: border-box;
+                pointer-events: auto;
+                cursor: text;
+                border: 1px solid transparent;
+                background: transparent;
+                border-radius: 2px;
+                min-width: 24px;
+                min-height: 20px;
+                display: flex;
+                align-items: center;
+                justify-content: flex-start;
+                overflow: hidden;
+                z-index: 101;
+                transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+            }
+            .field-overlay:hover:not(.active):not(.filled) {
+                border-color: rgba(0, 123, 255, 0.45);
+                background: rgba(255, 255, 255, 0.35);
+            }
+            .field-overlay.kind-signature {
+                cursor: pointer;
+            }
+            .field-overlay.kind-signature:hover:not(.filled) {
+                border-color: rgba(254, 1, 0, 0.5);
+                background: rgba(255, 255, 255, 0.25);
+            }
+            .field-overlay.filled {
+                border: 1px solid rgba(40, 167, 69, 0.35);
+                background: rgba(255, 255, 255, 0.88);
+                cursor: pointer;
+            }
+            .field-overlay.active {
+                border-color: #007bff;
+                background: #fff;
+                box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.35);
+                z-index: 102;
+            }
+            .field-overlay-label {
+                display: none;
+            }
+            .field-overlay-value {
+                font-size: 11px;
+                color: #000;
+                padding: 2px;
+                width: 100%;
+                height: 100%;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                display: none;
+            }
+            .field-overlay.filled .field-overlay-value {
+                display: block;
+            }
+            .field-overlay img.field-overlay-sig {
                 width: 100%;
                 height: 100%;
                 object-fit: contain;
-                background: white;
                 display: block;
+            }
+            .field-overlay-input {
+                width: 100%;
+                height: 100%;
+                border: none;
+                padding: 2px 4px;
+                font-size: 12px;
+                background: #fff !important;
+                color: #000 !important;
+                -webkit-text-fill-color: #000 !important;
+                caret-color: #000 !important;
+                box-sizing: border-box;
+                box-shadow: none !important;
+            }
+            .field-overlay-choice-mark {
+                font-size: 1.2em;
+                font-weight: 800;
+                color: #000;
+            }
+            .signature-popover {
+                position: fixed;
+                z-index: 10000;
+                background: #fff;
+                border: 2px solid #333;
+                border-radius: 8px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+                padding: 12px;
+                min-width: 280px;
+                max-width: 95vw;
+            }
+            .signature-popover canvas {
+                width: 100%;
+                height: 140px;
+                border: 1px solid #ddd;
+                cursor: crosshair;
+                display: block;
+                touch-action: none;
+            }
+            .signature-popover-actions {
+                display: flex;
+                gap: 8px;
+                margin-top: 10px;
+                flex-wrap: wrap;
+            }
+            .signature-popover-actions button {
+                flex: 1;
+                min-width: 80px;
+                padding: 8px;
+                border-radius: 4px;
+                border: 1px solid #ddd;
+                cursor: pointer;
+                font-size: 13px;
+            }
+            .sign-field-item.active-field {
+                outline: 2px solid #007bff;
+                outline-offset: 2px;
+            }
+            .sign-hint-banner {
+                font-size: 0.9em;
+                color: #b7c1d3;
+                margin-bottom: 10px;
+                padding: 8px 12px;
+                background: rgba(110, 168, 254, 0.12);
+                border-radius: 6px;
+            }
+            .sign-doc-toolbar .btn-done-link {
+                color: #f2f5fb;
+                text-decoration: none;
+                padding: 8px 16px;
+                border: 1px solid rgba(255,255,255,0.25);
+                border-radius: 5px;
+                font-size: 14px;
+            }
+            .sign-doc-toolbar .btn-done-link:hover {
+                background: rgba(255,255,255,0.1);
+            }
+            .missing-file-banner {
+                padding: 24px;
+                background: rgba(255, 193, 7, 0.12);
+                border: 1px solid rgba(255, 193, 7, 0.45);
+                border-radius: 8px;
+                color: #f2f5fb;
+                min-height: 200px;
+            }
+            .missing-file-banner strong {
+                color: #ffc107;
             }
             .signature-panel {
                 background: white;
@@ -16575,11 +19871,11 @@ def _serve_sign_document_page(doc_id):
                     min-height: 0;
                     padding: 8px;
                 }
-                .document-embed-frame,
-                .document-viewer iframe {
-                    width: 100% !important;
-                    height: min(55vh, 520px) !important;
-                    min-height: 280px;
+                .document-viewer {
+                    min-height: min(55vh, 520px);
+                }
+                #pdfCanvas {
+                    max-height: min(55vh, 520px);
                 }
                 .signature-pad-container {
                     margin-bottom: 10px;
@@ -16716,7 +20012,8 @@ def _serve_sign_document_page(doc_id):
             body.sign-document-page .typed-field-input,
             body.sign-document-page input[type="text"].typed-field-input,
             body.sign-document-page input[type="date"].typed-field-input,
-            body.sign-document-page input[type="number"].typed-field-input {
+            body.sign-document-page input[type="number"].typed-field-input,
+            body.sign-document-page input.typed-field-input-phone {
                 background: #121a26 !important;
                 color: #f2f5fb !important;
                 border: 1px solid rgba(255,255,255,0.24) !important;
@@ -16744,6 +20041,70 @@ def _serve_sign_document_page(doc_id):
                 -webkit-text-fill-color: #f2f5fb !important;
                 opacity: 1 !important;
             }
+            body.sign-document-page .typed-field-input-phone.phone-invalid {
+                border-color: #dc3545 !important;
+            }
+            body.sign-document-page .typed-field-input-phone.phone-complete {
+                border-color: #28a745 !important;
+            }
+            body.sign-document-page .phone-format-hint,
+            body.sign-document-page .last4-format-hint {
+                font-size: 0.85em;
+                color: #666;
+                margin-top: 5px;
+            }
+            body.sign-document-page .last4-input-row {
+                display: flex;
+                align-items: stretch;
+                width: 100%;
+            }
+            body.sign-document-page .last4-prefix {
+                display: inline-flex;
+                align-items: center;
+                padding: 8px 10px;
+                background: #2a3753 !important;
+                color: #aab4c8 !important;
+                border: 1px solid rgba(255,255,255,0.24);
+                border-right: none;
+                border-radius: 4px 0 0 4px;
+                font-family: monospace;
+                font-size: 0.95em;
+                letter-spacing: 0.05em;
+                user-select: none;
+                white-space: nowrap;
+            }
+            body.sign-document-page .typed-field-input-last4 {
+                border-radius: 0 4px 4px 0 !important;
+                border-left: none !important;
+                font-family: monospace;
+                letter-spacing: 0.12em;
+            }
+            body.sign-document-page .typed-field-input-last4.last4-invalid {
+                border-color: #dc3545 !important;
+            }
+            body.sign-document-page .typed-field-input-last4.last4-complete {
+                border-color: #28a745 !important;
+            }
+            body.sign-document-page #fieldOverlay .last4-overlay-wrap {
+                display: flex;
+                align-items: center;
+                width: 100%;
+                height: 100%;
+                background: #fff;
+            }
+            body.sign-document-page #fieldOverlay .last4-overlay-prefix {
+                padding: 0 4px;
+                font-family: monospace;
+                font-size: inherit;
+                color: #666;
+                user-select: none;
+                white-space: nowrap;
+            }
+            body.sign-document-page #fieldOverlay input.typed-field-input-last4 {
+                flex: 1;
+                min-width: 0;
+                font-family: monospace;
+            }
             /* Readonly typed-field inputs (auto-filled name / initials / date) */
             body.sign-document-page .signature-field-item input.typed-field-input[readonly],
             body.sign-document-page .signature-field-item input.typed-field-input[style*="background: #f8f9fa"],
@@ -16753,6 +20114,36 @@ def _serve_sign_document_page(doc_id):
                 -webkit-text-fill-color: #f2f5fb !important;
                 border: 1px solid rgba(255,255,255,0.18) !important;
                 opacity: 1 !important;
+            }
+            /* PDF overlay inputs: must stay dark-on-white (global theme forces light text on all inputs) */
+            body.sign-document-page #fieldOverlay input,
+            body.sign-document-page #fieldOverlay input.field-overlay-input,
+            body.sign-document-page #fieldOverlay input.typed-field-input-phone,
+            body.sign-document-page .field-overlay input[type="text"],
+            body.sign-document-page .field-overlay input[type="number"],
+            body.sign-document-page .field-overlay input[type="date"],
+            body.sign-document-page .field-overlay input[type="tel"] {
+                background: #ffffff !important;
+                color: #000000 !important;
+                -webkit-text-fill-color: #000000 !important;
+                caret-color: #000000 !important;
+                border: none !important;
+                box-shadow: none !important;
+            }
+            body.sign-document-page #fieldOverlay input::placeholder {
+                color: #666666 !important;
+                -webkit-text-fill-color: #666666 !important;
+            }
+            body.sign-document-page #fieldOverlay input:focus {
+                background: #ffffff !important;
+                color: #000000 !important;
+                -webkit-text-fill-color: #000000 !important;
+                border: none !important;
+                box-shadow: inset 0 0 0 1px #007bff !important;
+            }
+            body.sign-document-page .field-overlay-value {
+                color: #000000 !important;
+                -webkit-text-fill-color: #000000 !important;
             }
         </style>
     </head>
@@ -16766,161 +20157,51 @@ def _serve_sign_document_page(doc_id):
         
         <div class="container">
             
-            <div class="main-content">
+            <div class="main-content sign-doc-main">
                 <div class="document-viewer-container">
-                    <h3 style="margin-bottom: 15px;">Document Preview</h3>
-                    <div class="document-viewer" id="documentViewer">
-                        {% if is_pdf %}
-                        <iframe class="document-embed-frame" src="{{ url_for('view_document_embed', doc_id=document.id, username=current_user.username) }}" title="Document preview"></iframe>
-                        {% else %}
-                        <p style="padding: 20px; color: white;">Please download the document to view it.</p>
-                        {% endif %}
-                    </div>
-                </div>
-                
-                <div class="signature-panel">
-                    <h3 style="margin-bottom: 15px;">Signature Fields</h3>
-                    
-                    {% for field in signature_fields %}
-                    <div class="signature-field-item {% if field.is_signed %}signed{% endif %} sign-field-item" id="field-{{ field.id }}" data-field-id="{{ field.id }}" data-field-type="signature">
-                        <h4>{{ field.field_label or 'Signature Field' }}</h4>
-                        <p>Page: {{ field.page_number }}</p>
-                        {% if field.signature_type == 'cryptographic' %}
-                            <p style="font-size: 0.85em; color: #0066cc; margin-bottom: 10px;">
-                                <strong>🔒 Cryptographic Signature</strong><br>
-                                This is a legally binding, tamper-evident signature.
-                            </p>
-                        {% endif %}
-                        <div id="signature-field-container-{{ field.id }}">
-                        {% if field.is_signed and field.matching_signature %}
-                            <p style="color: #28a745; font-weight: bold;">✓ Signed</p>
-                            {% set sig = field.matching_signature %}
-                            {% if sig.signature_type and sig.signature_type == 'cryptographic' %}
-                                <div class="signature-preview" style="padding: 15px; background: #e8f4f8; border: 2px solid #0066cc; border-radius: 4px;">
-                                    <p style="margin: 0; color: #0066cc; font-weight: bold;">🔒 Cryptographically Signed</p>
-                                    <p style="margin: 5px 0 0 0; font-size: 0.85em; color: #666;">
-                                        Signed: {{ sig.signed_at.strftime('%Y-%m-%d %H:%M:%S') if sig.signed_at else 'N/A' }}<br>
-                                        {% if sig.signature_hash %}
-                                        Hash: {{ sig.signature_hash[:16] }}...
-                                        {% endif %}
-                                    </p>
-                                </div>
-                            {% else %}
-                                {% if sig.signature_image %}
-                                <div class="signature-preview">
-                                    <img src="data:image/png;base64,{{ sig.signature_image }}" alt="Signature">
-                                </div>
-                                {% endif %}
-                            {% endif %}
-                            <button type="button" onclick="redoSignature({{ field.id }})" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Signature</button>
-                        {% else %}
-                            {% if field.signature_type == 'cryptographic' %}
-                                <div class="cryptographic-signature-form">
-                                    <div style="padding: 15px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; margin-bottom: 15px;">
-                                        <p style="margin: 0 0 10px 0; font-weight: bold;">Electronic Signature Consent</p>
-                                        <p style="margin: 0; font-size: 0.9em; color: #856404;">
-                                            By clicking "Sign Electronically", you agree that:<br>
-                                            • This electronic signature has the same legal effect as a handwritten signature<br>
-                                            • You consent to conduct business electronically<br>
-                                            • The signed document will be legally binding
-                                        </p>
-                                    </div>
-                                    <label style="display: flex; align-items: center; margin-bottom: 15px; cursor: pointer;">
-                                        <input type="checkbox" id="consent-{{ field.id }}" style="margin-right: 8px; width: 18px; height: 18px;">
-                                        <span>I agree to sign this document electronically</span>
-                                    </label>
-                                    <button type="button" onclick="saveCryptographicSignature({{ field.id }})" class="btn-success" style="width: 100%; padding: 12px; font-size: 1em; font-weight: bold;">
-                                        🔒 Sign Electronically
-                                    </button>
-                                </div>
-                            {% else %}
-                                <div class="signature-pad-container">
-                                    <canvas id="signaturePad-{{ field.id }}" width="350" height="200"></canvas>
-                                </div>
-                                {% if saved_signature_image %}
-                                <div style="margin-top: 10px; padding: 10px; border: 1px dashed rgba(255,255,255,0.3); border-radius: 6px;">
-                                    <p style="font-size: 0.85em; margin-bottom: 8px; color: #b7c1d3;">
-                                        Saved signature{% if saved_signature_kind %} ({{ saved_signature_kind }}){% endif %}
-                                    </p>
-                                    <img src="data:image/png;base64,{{ saved_signature_image }}" alt="Saved signature preview" style="max-width: 100%; max-height: 70px; object-fit: contain; display: block; margin-bottom: 8px;">
-                                    <button type="button" onclick="applySavedSignature({{ field.id }})" class="btn" style="width: 100%; margin-bottom: 8px; background: #fe0100;">Apply My Saved Signature</button>
-                                </div>
-                                {% endif %}
-                                <label style="display: flex; align-items: center; margin: 10px 0; font-size: 0.9em;">
-                                    <input type="checkbox" id="consent-image-{{ field.id }}" style="margin-right: 8px; width: 16px; height: 16px;">
-                                    <span>I confirm I intentionally apply my signature to this field.</span>
-                                </label>
-                                <div class="signature-controls">
-                                    <button type="button" onclick="clearSignature({{ field.id }})">Clear</button>
-                                    <button type="button" onclick="saveSignature({{ field.id }})" class="btn-success">Save Signature</button>
-                                </div>
-                            {% endif %}
-                        {% endif %}
+                    <h3 style="margin-bottom: 15px;">{{ document.name_for_users }}</h3>
+                    {% if is_pdf and not document_file_missing and sign_overlay_fields %}
+                    <div class="sign-doc-toolbar" id="signDocToolbar">
+                        <div class="sign-progress-wrap">
+                            <span id="signProgressText">0 / 0 complete</span>
+                            <div class="sign-progress-bar"><div id="signProgressFill"></div></div>
                         </div>
+                        <button type="button" id="signNextFieldBtn" class="btn" style="background:#fe0100;">Next field</button>
+                        <a href="{{ url_for('view_documents') }}" class="btn-done-link">Done</a>
                     </div>
-                    {% endfor %}
-                    
-                    {% if typed_fields %}
-                    <hr style="margin: 30px 0; border: 1px solid #ddd;">
-                    <h3 style="margin-bottom: 15px;">Typed Fields</h3>
-                    
-                    {% for field in typed_fields %}
-                    <div class="signature-field-item sign-field-item typed-field-item" style="border-left-color: #ffc107;" id="typed-field-item-{{ field.id }}" data-field-id="{{ field.id }}" data-field-type="typed" data-typed-type="{{ field.field_type }}">
-                        <h4>{{ field.field_label or 'Typed Field' }}</h4>
-                        <p>Type: {{ field.field_type|replace('_', ' ')|title }} • Page: {{ field.page_number }}</p>
-                        <div id="typed-field-container-{{ field.id }}">
-                        {% if field.id in filled_typed_field_ids %}
-                            <p style="color: #28a745; font-weight: bold;">✓ Filled</p>
-                            <div style="padding: 10px; background: #f8f9fa; border-radius: 4px; margin-top: 10px;">
-                                <strong>Value:</strong> {{ filled_typed_field_ids[field.id] }}
-                            </div>
-                            <button type="button" onclick="redoTypedField({{ field.id }})" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Field</button>
-                        {% else %}
-                            <div class="form-group" style="margin-top: 10px;">
-                                {% if field.field_type == 'typed_name' %}
-                                    <input type="text" id="typed-field-{{ field.id }}" class="typed-field-input" readonly
-                                           value="{{ user_display_name }}"
-                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">
-                                    <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Your name will be used. Click below to sign.</p>
-                                    <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Click to Sign</button>
-                                {% elif field.field_type == 'typed_initials' %}
-                                    <input type="text" id="typed-field-{{ field.id }}" class="typed-field-input" readonly
-                                           value="{{ user_initials }}"
-                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">
-                                    <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Your initials will be used. Click below to sign.</p>
-                                    <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Click to Sign</button>
-                                {% elif field.field_type == 'date' %}
-                                    <input type="date" id="typed-field-{{ field.id }}" class="typed-field-input" readonly
-                                           value="{{ today_date }}"
-                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: #f8f9fa;">
-                                    <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Today's date. Click below to sign.</p>
-                                    <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Click to Sign</button>
-                                {% elif field.field_type == 'number' %}
-                                    <input type="number" id="typed-field-{{ field.id }}" class="typed-field-input" 
-                                           placeholder="{{ field.placeholder or 'Enter number' }}" 
-                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"
-                                           {% if field.is_required %}required{% endif %}>
-                                {% else %}
-                                    <input type="text" id="typed-field-{{ field.id }}" class="typed-field-input" 
-                                           placeholder="{{ field.placeholder or 'Enter ' + field.field_label|lower }}" 
-                                           style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"
-                                           {% if field.is_required %}required{% endif %}>
-                                {% endif %}
-                                {% if field.field_type not in ['typed_name', 'typed_initials', 'date'] %}
-                                <button type="button" onclick="saveTypedField({{ field.id }})" class="btn-success" style="width: 100%; margin-top: 10px; padding: 10px;">Save {{ field.field_label }}</button>
-                                {% endif %}
-                            </div>
-                        {% endif %}
-                        </div>
-                    </div>
-                    {% endfor %}
+                    <p class="sign-hint-banner">Click a field on the form to type or sign. Press Tab to move between fields. Each field saves when you click away.</p>
+                    {% elif is_pdf and not document_file_missing %}
+                    <p class="sign-hint-banner">This document has no fillable fields configured yet. Contact your administrator.</p>
+                    <p style="margin-bottom: 12px;"><a href="{{ url_for('view_documents') }}" class="btn-done-link">← Back to documents</a></p>
                     {% endif %}
-                    
-                    <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd;">
-                        <p style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
-                            By signing this document, you acknowledge that you have read and agree to its contents.
-                        </p>
-                        <a href="{{ url_for('view_documents') }}" class="btn" style="width: 100%;">Done</a>
+                    <div class="document-viewer-layout">
+                        <div class="document-viewer-wrap">
+                            {% if document_file_missing %}
+                            <div class="missing-file-banner" role="alert">
+                                <p><strong>Document file not found on server</strong></p>
+                                <p style="margin-top: 8px; font-size: 0.95em; color: #b7c1d3;">
+                                    The PDF for this form is missing from storage (it may have been deleted or never uploaded to this server).
+                                    Ask an administrator to re-upload the file under <strong>Manage Documents → Replace File</strong> for
+                                    &ldquo;{{ document.name_for_users }}&rdquo;.
+                                </p>
+                            </div>
+                            {% elif is_pdf %}
+                            <div class="pdf-page-toolbar" id="pdfPageToolbar" style="display: none;">
+                                <span id="pdfPageStatus">Page 1</span>
+                                <button type="button" id="pdfPrevPage" title="Previous page">Prev</button>
+                                <button type="button" id="pdfNextPage" title="Next page">Next</button>
+                            </div>
+                            <div class="document-viewer" id="documentViewer">
+                                <canvas id="pdfCanvas"></canvas>
+                                <div id="fieldOverlay"></div>
+                            </div>
+                            {% else %}
+                            <p style="padding: 20px; color: white;">Please download the document to view it.</p>
+                            {% endif %}
+                        </div>
+                        {% if is_pdf and not document_file_missing %}
+                        <aside class="pdf-page-scroller" id="pdfPageScroller" aria-label="Document pages"></aside>
+                        {% endif %}
                     </div>
                 </div>
             </div>
@@ -16935,400 +20216,678 @@ def _serve_sign_document_page(doc_id):
             var canvasOffsetY = 0;
             var savedSignatureImageBase64 = {{ ('"' ~ saved_signature_image ~ '"')|safe if saved_signature_image else 'null' }};
             
-            // Scroll sidebar to the first incomplete (unsigned/unfilled) field
-            function scrollToFirstIncompleteField() {
-                var panel = document.querySelector('.signature-panel');
-                if (!panel) return;
-                var items = panel.querySelectorAll('.sign-field-item');
-                for (var i = 0; i < items.length; i++) {
-                    if (!items[i].classList.contains('signed')) {
-                        items[i].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                        break;
+            var signOverlayFields = {{ sign_overlay_fields_json|safe }};
+            var currentPage = 1;
+            var pagesWithFields = {};
+            var activeOverlayFieldId = null;
+            var editingOverlayFieldId = null;
+            var popoverPadCanvas = null;
+            var popoverFieldId = null;
+
+            function getSignField(fieldId) {
+                for (var i = 0; i < signOverlayFields.length; i++) {
+                    if (signOverlayFields[i].id === fieldId) return signOverlayFields[i];
+                }
+                return null;
+            }
+
+            function computePagesWithFields() {
+                pagesWithFields = {};
+                signOverlayFields.forEach(function(f) {
+                    pagesWithFields[f.page] = true;
+                });
+            }
+
+            function getFieldScreenRect(field) {
+                var canvas = document.getElementById('pdfCanvas');
+                if (!canvas) return null;
+                var canvasRect = canvas.getBoundingClientRect();
+                var scaleX = canvas.width / canvasRect.width;
+                var scaleY = canvas.height / canvasRect.height;
+                if (!scaleX || !scaleY) return null;
+                return {
+                    left: field.x / scaleX,
+                    top: field.y / scaleY,
+                    width: Math.max(field.width / scaleX, 24),
+                    height: Math.max(field.height / scaleY, 20)
+                };
+            }
+
+            function positionOverlayElement(el, field) {
+                var rect = getFieldScreenRect(field);
+                if (!rect) return;
+                el.style.left = rect.left + 'px';
+                el.style.top = rect.top + 'px';
+                el.style.width = rect.width + 'px';
+                el.style.height = rect.height + 'px';
+            }
+
+            function countFilledSignFields() {
+                var n = 0;
+                signOverlayFields.forEach(function(f) { if (f.filled) n++; });
+                return n;
+            }
+
+            function updateSignProgress() {
+                var total = signOverlayFields.length;
+                var done = countFilledSignFields();
+                var text = document.getElementById('signProgressText');
+                var fill = document.getElementById('signProgressFill');
+                if (text) text.textContent = done + ' / ' + total + ' complete';
+                if (fill) fill.style.width = (total ? (100 * done / total) : 0) + '%';
+            }
+
+            function highlightActiveOverlays() {
+                document.querySelectorAll('.field-overlay').forEach(function(el) {
+                    var fid = parseInt(el.getAttribute('data-field-id'), 10);
+                    el.classList.toggle('active', fid === activeOverlayFieldId);
+                });
+            }
+
+            function buildFieldOverlayContent(field, el) {
+                el.innerHTML = '';
+                if (field.filled) {
+                    if (field.kind === 'signature' && field.signature_image) {
+                        var img = document.createElement('img');
+                        img.className = 'field-overlay-sig';
+                        img.src = 'data:image/png;base64,' + field.signature_image;
+                        img.alt = 'Signature';
+                        el.appendChild(img);
+                    } else if (field.field_type === 'checkbox_choice') {
+                        var mk = document.createElement('span');
+                        mk.className = 'field-overlay-choice-mark';
+                        mk.textContent = field.value === 'X' ? 'X' : '';
+                        el.appendChild(mk);
+                    } else {
+                        var val = document.createElement('span');
+                        val.className = 'field-overlay-value';
+                        val.textContent = field.value || '';
+                        val.style.display = 'block';
+                        el.appendChild(val);
                     }
                 }
             }
-            
-            // Load PDF using PDF.js
-            function loadPDF() {
-                var canvas = document.getElementById('pdfCanvas');
-                if (!canvas) return;
-                
-                // Set up PDF.js worker
-                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-                
-                // Get PDF URL
-                var pdfUrl = '{{ url_for("view_document_embed", doc_id=document.id) }}';
-                
-                // Load the PDF
-                pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
-                    pdfDoc = pdf;
-                    
-                    // Render first page (or page with signature fields)
-                    var pageNum = 1;
-                    {% if signature_fields %}
-                    pageNum = {{ signature_fields[0].page_number }};
-                    {% endif %}
-                    
-                    renderPage(pageNum);
-                }).catch(function(error) {
-                    console.error('Error loading PDF:', error);
-                    document.getElementById('documentViewer').innerHTML = '<p style="padding: 20px; color: white;">Error loading PDF. Please try downloading the document.</p>';
+
+            function renderFieldOverlays() {
+                if (editingOverlayFieldId !== null) return;
+                var overlay = document.getElementById('fieldOverlay');
+                var viewer = document.getElementById('documentViewer');
+                if (!overlay || !viewer) return;
+                overlay.innerHTML = '';
+                var statusEl = document.getElementById('pdfPageStatus');
+                if (statusEl && pdfDoc) statusEl.textContent = 'Page ' + currentPage + ' / ' + pdfDoc.numPages;
+                signOverlayFields.forEach(function(field) {
+                    if (field.page !== currentPage) return;
+                    var el = document.createElement('div');
+                    el.className = 'field-overlay kind-' + field.kind + (field.filled ? ' filled' : '') + (activeOverlayFieldId === field.id ? ' active' : '');
+                    el.setAttribute('data-field-id', field.id);
+                    el.setAttribute('data-kind', field.kind);
+                    el.title = field.label;
+                    positionOverlayElement(el, field);
+                    buildFieldOverlayContent(field, el);
+                    el.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        handleFieldOverlayClick(field.id);
+                    });
+                    overlay.appendChild(el);
+                });
+                updatePageScrollerUI();
+                updateSignProgress();
+            }
+
+            function handleFieldOverlayClick(fieldId) {
+                var field = getSignField(fieldId);
+                if (!field) return;
+                if (editingOverlayFieldId === fieldId) return;
+                activeOverlayFieldId = fieldId;
+                if (field.filled) {
+                    if (field.kind === 'signature') {
+                        openSignaturePopover(fieldId);
+                        return;
+                    }
+                    if (field.field_type === 'checkbox_choice') {
+                        toggleChoiceCheckbox(fieldId);
+                        return;
+                    }
+                    startInlineTypedEdit(fieldId);
+                    return;
+                }
+                if (field.kind === 'signature') {
+                    renderFieldOverlays();
+                    openSignaturePopover(fieldId);
+                    return;
+                }
+                if (field.field_type === 'checkbox_choice') {
+                    toggleChoiceCheckbox(fieldId);
+                    return;
+                }
+                if (field.field_type === 'typed_name' || field.field_type === 'typed_initials' || field.field_type === 'date') {
+                    var autoVal = field.value || '';
+                    if (field.field_type === 'date' && !autoVal) {
+                        var t = new Date();
+                        autoVal = t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+                    }
+                    saveTypedFieldValue(fieldId, autoVal, null);
+                    return;
+                }
+                startInlineTypedEdit(fieldId);
+            }
+
+            function startInlineTypedEdit(fieldId) {
+                var field = getSignField(fieldId);
+                if (!field) return;
+                editingOverlayFieldId = fieldId;
+                var overlay = document.getElementById('fieldOverlay');
+                var el = overlay && overlay.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+                if (!el) {
+                    editingOverlayFieldId = null;
+                    renderFieldOverlays();
+                    el = overlay && overlay.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+                    if (!el) return;
+                    editingOverlayFieldId = fieldId;
+                }
+                el.classList.add('active');
+                el.innerHTML = '';
+                var input;
+                if (field.field_type === 'date') {
+                    input = document.createElement('input');
+                    input.type = 'date';
+                    input.className = 'field-overlay-input';
+                    input.value = field.value || '';
+                } else if (field.field_type === 'last4') {
+                    var wrap = document.createElement('div');
+                    wrap.className = 'last4-overlay-wrap';
+                    var prefixEl = document.createElement('span');
+                    prefixEl.className = 'last4-overlay-prefix';
+                    prefixEl.textContent = 'XXX-XX-';
+                    input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'field-overlay-input typed-field-input-last4';
+                    input.inputMode = 'numeric';
+                    input.placeholder = field.input_hint || '1234';
+                    input.maxLength = 4;
+                    input.value = last4DigitsFromValue(field.value || '');
+                    wrap.appendChild(prefixEl);
+                    wrap.appendChild(input);
+                    el.appendChild(wrap);
+                } else if (field.phone_like) {
+                    input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'field-overlay-input typed-field-input-phone';
+                    input.inputMode = 'tel';
+                    input.placeholder = field.input_hint || '(555) 123-4567';
+                    input.maxLength = 14;
+                } else if (field.field_type === 'number' && !field.phone_like) {
+                    input = document.createElement('input');
+                    input.type = 'number';
+                    input.className = 'field-overlay-input';
+                    input.placeholder = field.input_hint || '';
+                } else {
+                    input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'field-overlay-input';
+                    input.placeholder = field.input_hint || '';
+                }
+                if (field.field_type !== 'last4') {
+                    input.value = field.value || '';
+                    var fs = Math.max(10, Math.min(14, (field.height || 30) * 0.35));
+                    input.style.fontSize = fs + 'px';
+                    input.style.background = '#fff';
+                    input.style.color = '#000';
+                    input.style.webkitTextFillColor = '#000';
+                    input.style.caretColor = '#000';
+                    el.appendChild(input);
+                } else {
+                    var fs2 = Math.max(10, Math.min(14, (field.height || 30) * 0.35));
+                    input.style.fontSize = fs2 + 'px';
+                }
+                input.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+                input.addEventListener('click', function(e) { e.stopPropagation(); });
+                initPhoneTypedFieldInputs();
+                initLast4TypedFieldInputs();
+                function commit(forceSave) {
+                    editingOverlayFieldId = null;
+                    var val = field.field_type === 'last4' ? getLast4FullValue(input) : input.value.trim();
+                    if (!val && !forceSave) {
+                        renderFieldOverlays();
+                        return;
+                    }
+                    if (!val) return;
+                    saveTypedFieldValue(fieldId, val, null);
+                }
+                input.addEventListener('blur', function() {
+                    setTimeout(function() {
+                        if (editingOverlayFieldId !== fieldId) return;
+                        commit(false);
+                    }, 200);
+                });
+                input.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        editingOverlayFieldId = null;
+                        renderFieldOverlays();
+                    }
+                });
+                setTimeout(function() { input.focus(); }, 0);
+            }
+
+            function updateOverlayFieldState(fieldId, filled, value, signatureImage) {
+                var field = getSignField(fieldId);
+                if (!field) return;
+                field.filled = filled;
+                if (value !== undefined) field.value = value;
+                if (signatureImage !== undefined) field.signature_image = signatureImage;
+                activeOverlayFieldId = null;
+                editingOverlayFieldId = null;
+                renderFieldOverlays();
+            }
+
+            function closeSignaturePopover() {
+                var pop = document.getElementById('signaturePopover');
+                if (pop) pop.remove();
+                popoverPadCanvas = null;
+                popoverFieldId = null;
+            }
+
+            function openSignaturePopover(fieldId) {
+                closeSignaturePopover();
+                popoverFieldId = fieldId;
+                var field = getSignField(fieldId);
+                var overlayEl = document.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+                var pop = document.createElement('div');
+                pop.id = 'signaturePopover';
+                pop.className = 'signature-popover';
+                pop.innerHTML = '<p style="margin-bottom:8px;font-weight:600;">' + (field ? field.label : 'Sign') + '</p>' +
+                    '<canvas id="popoverSignaturePad" width="320" height="140"></canvas>' +
+                    '<label style="display:block;margin-top:8px;font-size:0.85em;"><input type="checkbox" id="popoverConsent"> I agree to apply my signature to this field</label>' +
+                    '<div class="signature-popover-actions">' +
+                    '<button type="button" id="popoverClearBtn">Clear</button>' +
+                    '<button type="button" id="popoverSaveBtn" style="background:#28a745;color:#fff;">Save</button>' +
+                    (savedSignatureImageBase64 ? '<button type="button" id="popoverSavedBtn" style="background:#007bff;color:#fff;">Use saved</button>' : '') +
+                    '<button type="button" id="popoverCancelBtn">Cancel</button></div>';
+                document.body.appendChild(pop);
+                if (overlayEl) {
+                    var r = overlayEl.getBoundingClientRect();
+                    pop.style.left = Math.min(r.left, window.innerWidth - 300) + 'px';
+                    pop.style.top = Math.min(r.bottom + 8, window.innerHeight - 220) + 'px';
+                } else {
+                    pop.style.left = '50%';
+                    pop.style.top = '30%';
+                    pop.style.transform = 'translateX(-50%)';
+                }
+                popoverPadCanvas = document.getElementById('popoverSignaturePad');
+                if (popoverPadCanvas) initPopoverSignaturePad(popoverPadCanvas);
+                document.getElementById('popoverClearBtn').onclick = function() {
+                    if (popoverPadCanvas) {
+                        var ctx = popoverPadCanvas.getContext('2d');
+                        ctx.clearRect(0, 0, popoverPadCanvas.width, popoverPadCanvas.height);
+                    }
+                };
+                document.getElementById('popoverCancelBtn').onclick = closeSignaturePopover;
+                document.getElementById('popoverSaveBtn').onclick = function() { saveSignatureFromPopover(fieldId, false); };
+                var savedBtn = document.getElementById('popoverSavedBtn');
+                if (savedBtn) savedBtn.onclick = function() { saveSignatureFromPopover(fieldId, true); };
+            }
+
+            function initPopoverSignaturePad(canvas) {
+                var ctx = canvas.getContext('2d');
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
+                ctx.lineCap = 'round';
+                var drawing = false, lx = 0, ly = 0;
+                function start(e) {
+                    drawing = true;
+                    var rect = canvas.getBoundingClientRect();
+                    lx = e.clientX - rect.left;
+                    ly = e.clientY - rect.top;
+                }
+                function move(e) {
+                    if (!drawing) return;
+                    var rect = canvas.getBoundingClientRect();
+                    var cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+                    ctx.beginPath();
+                    ctx.moveTo(lx, ly);
+                    ctx.lineTo(cx, cy);
+                    ctx.stroke();
+                    lx = cx; ly = cy;
+                }
+                function stop() { drawing = false; }
+                canvas.onmousedown = start;
+                canvas.onmousemove = move;
+                canvas.onmouseup = stop;
+                canvas.onmouseout = stop;
+            }
+
+            function submitSignatureApi(fieldId, base64Data, usedSaved, onSuccess) {
+                fetch('{{ url_for("submit_signature", doc_id=document.id) }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        signature_field_id: fieldId,
+                        signature_image: base64Data,
+                        consent_given: true,
+                        used_saved_signature: usedSaved
+                    })
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.success) {
+                        if (onSuccess) onSuccess();
+                    } else {
+                        alert('Error saving signature: ' + (data.error || 'Unknown error'));
+                    }
+                })
+                .catch(function(err) {
+                    console.error(err);
+                    alert('Error saving signature. Please try again.');
                 });
             }
-            
-            // Render a PDF page
+
+            function saveSignatureFromPopover(fieldId, useSaved) {
+                var consent = document.getElementById('popoverConsent');
+                if (!consent || !consent.checked) {
+                    alert('Please confirm your intent to apply a signature to this field.');
+                    return;
+                }
+                var base64Data;
+                if (useSaved) {
+                    if (!savedSignatureImageBase64) {
+                        alert('No saved signature found.');
+                        return;
+                    }
+                    base64Data = savedSignatureImageBase64;
+                } else {
+                    if (!popoverPadCanvas) return;
+                    var ctx = popoverPadCanvas.getContext('2d');
+                    var imageData = ctx.getImageData(0, 0, popoverPadCanvas.width, popoverPadCanvas.height);
+                    var hasDrawing = false;
+                    for (var i = 0; i < imageData.data.length; i += 4) {
+                        if (imageData.data[i + 3] > 0) { hasDrawing = true; break; }
+                    }
+                    if (!hasDrawing) {
+                        alert('Please sign before saving.');
+                        return;
+                    }
+                    base64Data = popoverPadCanvas.toDataURL('image/png').split(',')[1];
+                }
+                submitSignatureApi(fieldId, base64Data, useSaved, function() {
+                    updateOverlayFieldState(fieldId, true, null, base64Data);
+                    closeSignaturePopover();
+                    scrollToFirstIncompleteField();
+                });
+            }
+
+            function updatePageScrollerUI() {
+                document.querySelectorAll('.pdf-page-scroller-item').forEach(function(btn) {
+                    var p = parseInt(btn.getAttribute('data-page'), 10);
+                    btn.classList.toggle('active', p === currentPage);
+                    btn.classList.toggle('has-fields', !!pagesWithFields[p]);
+                });
+            }
+
+            function buildPageScroller(totalPages) {
+                var scroller = document.getElementById('pdfPageScroller');
+                var toolbar = document.getElementById('pdfPageToolbar');
+                if (!scroller) return;
+                if (totalPages <= 1) {
+                    scroller.style.display = 'none';
+                    if (toolbar) toolbar.style.display = 'none';
+                    return;
+                }
+                scroller.style.display = 'flex';
+                if (toolbar) toolbar.style.display = 'flex';
+                scroller.innerHTML = '';
+                var title = document.createElement('div');
+                title.className = 'pdf-page-scroller-title';
+                title.textContent = totalPages + ' pg';
+                scroller.appendChild(title);
+                var list = document.createElement('div');
+                list.className = 'pdf-page-scroller-list';
+                for (var i = 1; i <= totalPages; i++) {
+                    (function(pageNum) {
+                        var btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.className = 'pdf-page-scroller-item';
+                        btn.setAttribute('data-page', pageNum);
+                        btn.textContent = pageNum;
+                        btn.addEventListener('click', function() { goToPage(pageNum); });
+                        list.appendChild(btn);
+                    })(i);
+                }
+                scroller.appendChild(list);
+                updatePageScrollerUI();
+            }
+
+            function goToPage(pageNum) {
+                if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
+                closeSignaturePopover();
+                renderPage(pageNum);
+            }
+
+            function loadPDF() {
+                var canvas = document.getElementById('pdfCanvas');
+                if (!canvas || typeof pdfjsLib === 'undefined') return;
+                computePagesWithFields();
+                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                var pdfUrl = '{{ url_for("view_document_embed", doc_id=document.id) }}';
+                pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+                    pdfDoc = pdf;
+                    buildPageScroller(pdf.numPages);
+                    var pageNum = 1;
+                    for (var i = 0; i < signOverlayFields.length; i++) {
+                        if (!signOverlayFields[i].filled) {
+                            pageNum = signOverlayFields[i].page;
+                            break;
+                        }
+                    }
+                    {% if signature_fields %}
+                    if (pageNum === 1) pageNum = {{ signature_fields[0].page_number }};
+                    {% endif %}
+                    var prevBtn = document.getElementById('pdfPrevPage');
+                    var nextBtn = document.getElementById('pdfNextPage');
+                    if (prevBtn) prevBtn.onclick = function() { goToPage(currentPage - 1); };
+                    if (nextBtn) nextBtn.onclick = function() { goToPage(currentPage + 1); };
+                    goToPage(Math.min(pageNum, pdf.numPages));
+                }).catch(function(error) {
+                    console.error('Error loading PDF:', error);
+                    var viewer = document.getElementById('documentViewer');
+                    if (viewer) viewer.innerHTML = '<p style="padding: 20px; color: white;">Error loading PDF.</p>';
+                });
+            }
+
             function renderPage(pageNum) {
                 if (!pdfDoc) return;
-                
                 var canvas = document.getElementById('pdfCanvas');
                 var ctx = canvas.getContext('2d');
-                
                 pdfDoc.getPage(pageNum).then(function(page) {
-                    // Calculate scale to fit 800px height (matching viewer where admin clicked)
                     var viewerHeight = 800;
                     var viewport = page.getViewport({ scale: 1.0 });
                     var scale = viewerHeight / viewport.height;
                     pdfScale = scale;
-                    
-                    // Set canvas size
                     var scaledViewport = page.getViewport({ scale: scale });
                     canvas.width = scaledViewport.width;
                     canvas.height = scaledViewport.height;
-                    
-                    // Render PDF page
-                    var renderContext = {
-                        canvasContext: ctx,
-                        viewport: scaledViewport
-                    };
-                    
-                    page.render(renderContext).promise.then(function() {
-                        // Calculate canvas offset within viewer (accounting for padding/centering)
+                    page.render({ canvasContext: ctx, viewport: scaledViewport }).promise.then(function() {
+                        currentPage = pageNum;
                         var viewer = document.getElementById('documentViewer');
                         var viewerRect = viewer.getBoundingClientRect();
                         var canvasRect = canvas.getBoundingClientRect();
                         canvasOffsetX = canvasRect.left - viewerRect.left;
                         canvasOffsetY = canvasRect.top - viewerRect.top;
-                        
-                        // After PDF is rendered, display signatures
-                        displaySignaturesOnPDF();
+                        var overlay = document.getElementById('fieldOverlay');
+                        if (overlay) {
+                            overlay.style.left = canvasOffsetX + 'px';
+                            overlay.style.top = canvasOffsetY + 'px';
+                            overlay.style.width = canvasRect.width + 'px';
+                            overlay.style.height = canvasRect.height + 'px';
+                            overlay.style.pointerEvents = 'none';
+                        }
+                        setTimeout(renderFieldOverlays, 50);
                     });
                 });
             }
-            
-            // Display existing signatures on PDF
-            function displaySignaturesOnPDF() {
-                var overlay = document.getElementById('signatureOverlay');
-                var canvas = document.getElementById('pdfCanvas');
-                var viewer = document.getElementById('documentViewer');
-                if (!overlay || !canvas || !viewer) {
-                    console.log('Missing elements:', {overlay: !!overlay, canvas: !!canvas, viewer: !!viewer});
-                    return;
-                }
-                
-                // Clear existing overlays
-                overlay.innerHTML = '';
-                
-                // Get actual dimensions of viewer container
-                var viewerRect = viewer.getBoundingClientRect();
-                
-                // Signature data from server - build a map of field_id to field data
-                var fieldMap = {
-                    {% for field in signature_fields %}
-                    {{ field.id }}: {
-                        x_position: {{ field.x_position }},
-                        y_position: {{ field.y_position }},
-                        width: {{ field.width or 200 }},
-                        height: {{ field.height or 80 }},
-                        page_number: {{ field.page_number }}
-                    }{% if not loop.last %},{% endif %}
-                    {% endfor %}
-                };
-                
-                var signatures = [
-                    {% for sig in user_signatures %}
-                    {
-                        field_id: {{ sig.signature_field_id }},
-                        signature_image: 'data:image/png;base64,{{ sig.signature_image }}',
-                        field: fieldMap[{{ sig.signature_field_id }}]
-                    }{% if not loop.last %},{% endif %}
-                    {% endfor %}
-                ];
-                
-                console.log('Viewer container dimensions:', viewerRect.width, 'x', viewerRect.height);
-                console.log('Signatures to display:', signatures.length);
-                console.log('Field map:', fieldMap);
-                
-                // Display each signature
-                // Coordinates are stored relative to viewer container (where admin clicked)
-                // Adjust for canvas offset within viewer
-                signatures.forEach(function(sigData) {
-                    if (!sigData.field || sigData.field.x_position === undefined) {
+
+            function scrollToFirstIncompleteField() {
+                if (editingOverlayFieldId !== null) return;
+                for (var i = 0; i < signOverlayFields.length; i++) {
+                    var f = signOverlayFields[i];
+                    if (!f.filled) {
+                        if (f.page !== currentPage && pdfDoc) goToPage(f.page);
+                        setTimeout(function(fid) {
+                            activeOverlayFieldId = fid;
+                            renderFieldOverlays();
+                            var el = document.querySelector('.field-overlay[data-field-id="' + fid + '"]');
+                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }, 200, f.id);
                         return;
                     }
-                    
-                    var overlayItem = document.createElement('div');
-                    overlayItem.className = 'signature-overlay-item';
-                    
-                    // Use coordinates directly - they're stored relative to viewer
-                    // and overlay is also positioned relative to viewer
-                    overlayItem.style.position = 'absolute';
-                    overlayItem.style.left = sigData.field.x_position + 'px';
-                    overlayItem.style.top = sigData.field.y_position + 'px';
-                    overlayItem.style.width = (sigData.field.width || 200) + 'px';
-                    overlayItem.style.height = (sigData.field.height || 80) + 'px';
-                    
-                    var img = document.createElement('img');
-                    img.src = sigData.signature_image;
-                    img.alt = 'Signature';
-                    img.style.display = 'block';
-                    img.style.width = '100%';
-                    img.style.height = '100%';
-                    img.style.objectFit = 'contain';
-                    overlayItem.appendChild(img);
-                    
-                    overlay.appendChild(overlayItem);
-                    
-                    console.log('Positioned signature at:', sigData.field.x_position, sigData.field.y_position);
-                });
-            }
-            
-            // Initialize when page loads
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', loadPDF);
-            } else {
-                loadPDF();
-            }
-            
-            // Initialize signature pads for unsigned fields
-            {% for field in signature_fields %}
-                {% if field.id not in signed_field_ids %}
-                (function() {
-                    var canvas = document.getElementById('signaturePad-{{ field.id }}');
-                    var ctx = canvas.getContext('2d');
-                    ctx.strokeStyle = '#000';
-                    ctx.lineWidth = 2;
-                    ctx.lineCap = 'round';
-                    ctx.lineJoin = 'round';
-                    
-                    var lastX = 0;
-                    var lastY = 0;
-                    
-                    function startDrawing(e) {
-                        isDrawing = true;
-                        var rect = canvas.getBoundingClientRect();
-                        lastX = e.clientX - rect.left;
-                        lastY = e.clientY - rect.top;
-                    }
-                    
-                    function draw(e) {
-                        if (!isDrawing) return;
-                        var rect = canvas.getBoundingClientRect();
-                        var currentX = e.clientX - rect.left;
-                        var currentY = e.clientY - rect.top;
-                        
-                        ctx.beginPath();
-                        ctx.moveTo(lastX, lastY);
-                        ctx.lineTo(currentX, currentY);
-                        ctx.stroke();
-                        
-                        lastX = currentX;
-                        lastY = currentY;
-                    }
-                    
-                    function stopDrawing() {
-                        isDrawing = false;
-                    }
-                    
-                    canvas.addEventListener('mousedown', startDrawing);
-                    canvas.addEventListener('mousemove', draw);
-                    canvas.addEventListener('mouseup', stopDrawing);
-                    canvas.addEventListener('mouseout', stopDrawing);
-                    
-                    // Touch events for mobile
-                    canvas.addEventListener('touchstart', function(e) {
-                        e.preventDefault();
-                        var touch = e.touches[0];
-                        var mouseEvent = new MouseEvent('mousedown', {
-                            clientX: touch.clientX,
-                            clientY: touch.clientY
-                        });
-                        canvas.dispatchEvent(mouseEvent);
-                    });
-                    
-                    canvas.addEventListener('touchmove', function(e) {
-                        e.preventDefault();
-                        var touch = e.touches[0];
-                        var mouseEvent = new MouseEvent('mousemove', {
-                            clientX: touch.clientX,
-                            clientY: touch.clientY
-                        });
-                        canvas.dispatchEvent(mouseEvent);
-                    });
-                    
-                    canvas.addEventListener('touchend', function(e) {
-                        e.preventDefault();
-                        var mouseEvent = new MouseEvent('mouseup', {});
-                        canvas.dispatchEvent(mouseEvent);
-                    });
-                    
-                    signaturePads[{{ field.id }}] = canvas;
-                })();
-                {% endif %}
-            {% endfor %}
-            
-            function clearSignature(fieldId) {
-                var canvas = document.getElementById('signaturePad-' + fieldId);
-                if (canvas) {
-                    var ctx = canvas.getContext('2d');
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
                 }
             }
-            
-            function saveSignature(fieldId) {
-                var canvas = document.getElementById('signaturePad-' + fieldId);
-                if (!canvas) return;
-                var consentCheckbox = document.getElementById('consent-image-' + fieldId);
-                if (!consentCheckbox || !consentCheckbox.checked) {
-                    alert('Please confirm your intent to apply a signature to this field.');
-                    return;
+
+            var resizeOverlayTimer;
+            window.addEventListener('resize', function() {
+                clearTimeout(resizeOverlayTimer);
+                resizeOverlayTimer = setTimeout(function() {
+                    if (editingOverlayFieldId !== null) return;
+                    renderFieldOverlays();
+                }, 150);
+            });
+
+            var typedFieldPhoneRegex = new RegExp({{ typed_field_phone_regex_js|tojson }});
+            var typedFieldLast4Regex = new RegExp({{ typed_field_last4_regex_js|tojson }});
+            var TYPED_FIELD_LAST4_PREFIX = 'XXX-XX-';
+
+            function typedFieldDigitsOnly(val) {
+                return (val || '').replace(/\\D/g, '');
+            }
+
+            function formatTypedFieldPhone(digits) {
+                digits = (digits || '').slice(0, 10);
+                if (!digits.length) return '';
+                if (digits.length <= 3) return '(' + digits;
+                if (digits.length <= 6) return '(' + digits.slice(0, 3) + ') ' + digits.slice(3);
+                return '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6);
+            }
+
+            function last4DigitsFromValue(val) {
+                var raw = (val || '').toUpperCase();
+                var digits;
+                if (raw.indexOf(TYPED_FIELD_LAST4_PREFIX) === 0) {
+                    digits = typedFieldDigitsOnly(raw.slice(TYPED_FIELD_LAST4_PREFIX.length));
+                } else {
+                    digits = typedFieldDigitsOnly(raw);
                 }
-                
-                // Check if canvas has any drawing
-                var ctx = canvas.getContext('2d');
-                var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                var hasDrawing = false;
-                for (var i = 0; i < imageData.data.length; i += 4) {
-                    if (imageData.data[i + 3] > 0) {
-                        hasDrawing = true;
-                        break;
+                if (digits.length > 4) digits = digits.slice(-4);
+                return digits.slice(0, 4);
+            }
+
+            function getLast4FullValue(input) {
+                if (!input) return '';
+                var digits = last4DigitsFromValue(input.value);
+                if (digits.length !== 4) return '';
+                return TYPED_FIELD_LAST4_PREFIX + digits;
+            }
+
+            function initLast4TypedFieldInputs() {
+                document.querySelectorAll('.typed-field-input-last4').forEach(function(input) {
+                    if (input._last4FormatterBound) return;
+                    input._last4FormatterBound = true;
+                    function applyLast4Digits(digits) {
+                        if (digits.length > 4) digits = digits.slice(-4);
+                        digits = digits.slice(0, 4);
+                        input.value = digits;
+                        var complete = digits.length === 4;
+                        input.classList.toggle('last4-invalid', digits.length > 0 && !complete);
+                        input.classList.toggle('last4-complete', complete);
                     }
-                }
-                
-                if (!hasDrawing) {
-                    alert('Please sign before saving.');
-                    return;
-                }
-                
-                // Convert canvas to base64
-                var signatureData = canvas.toDataURL('image/png');
-                var base64Data = signatureData.split(',')[1];
-                
-                // Send to server
-                fetch('{{ url_for("submit_signature", doc_id=document.id) }}', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        signature_field_id: fieldId,
-                        signature_image: base64Data,
-                        consent_given: true,
-                        used_saved_signature: false
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert('Signature saved successfully!');
-                        // Reload to show signature on PDF
-                        location.reload();
-                    } else {
-                        alert('Error saving signature: ' + (data.error || 'Unknown error'));
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    alert('Error saving signature. Please try again.');
+                    input.addEventListener('input', function() {
+                        applyLast4Digits(typedFieldDigitsOnly(input.value));
+                    });
+                    input.addEventListener('paste', function(e) {
+                        e.preventDefault();
+                        var pasted = '';
+                        try {
+                            pasted = (e.clipboardData || window.clipboardData).getData('text') || '';
+                        } catch (err) {}
+                        applyLast4Digits(typedFieldDigitsOnly(pasted));
+                    });
+                    input.addEventListener('keydown', function(e) {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            input.blur();
+                        }
+                    });
                 });
             }
 
-            function applySavedSignature(fieldId) {
-                if (!savedSignatureImageBase64) {
-                    alert('No saved signature found. Set one under Profile > Manage Signature.');
-                    return;
-                }
-                var consentCheckbox = document.getElementById('consent-image-' + fieldId);
-                if (!consentCheckbox || !consentCheckbox.checked) {
-                    alert('Please confirm your intent before applying your saved signature.');
-                    return;
-                }
-                if (!confirm('Apply your saved signature to this field now?')) {
-                    return;
-                }
+            function initPhoneTypedFieldInputs() {
+                document.querySelectorAll('.typed-field-input-phone').forEach(function(input) {
+                    if (input._phoneFormatterBound) return;
+                    input._phoneFormatterBound = true;
+                    input.addEventListener('input', function() {
+                        var digits = typedFieldDigitsOnly(input.value);
+                        var formatted = formatTypedFieldPhone(digits);
+                        var oldLen = input.value.length;
+                        var start = input.selectionStart;
+                        input.value = formatted;
+                        if (document.activeElement === input && start != null) {
+                            try {
+                                var delta = formatted.length - oldLen;
+                                var pos = Math.max(0, Math.min(formatted.length, start + delta));
+                                input.setSelectionRange(pos, pos);
+                            } catch (e) {}
+                        }
+                        var complete = digits.length === 10;
+                        input.classList.toggle('phone-invalid', digits.length > 0 && !complete);
+                        input.classList.toggle('phone-complete', complete);
+                    });
+                    input.addEventListener('keydown', function(e) {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            input.blur();
+                        }
+                    });
+                });
+            }
 
-                fetch('{{ url_for("submit_signature", doc_id=document.id) }}', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        signature_field_id: fieldId,
-                        signature_image: savedSignatureImageBase64,
-                        consent_given: true,
-                        used_saved_signature: true
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert('Saved signature applied successfully.');
-                        location.reload();
-                    } else {
-                        alert('Error applying saved signature: ' + (data.error || 'Unknown error'));
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    alert('Error applying saved signature. Please try again.');
-                });
-            }
-            
-            function saveCryptographicSignature(fieldId) {
-                var consentCheckbox = document.getElementById('consent-' + fieldId);
-                if (!consentCheckbox || !consentCheckbox.checked) {
-                    alert('You must agree to sign electronically before proceeding.');
-                    return;
+            function updateChoiceCheckboxUI(fieldId, isSelected) {
+                var fld = getSignField(fieldId);
+                if (fld) {
+                    fld.filled = isSelected;
+                    fld.value = isSelected ? 'X' : '';
+                    renderFieldOverlays();
                 }
-                
-                if (!confirm('This will create a legally binding, cryptographically signed document. Continue?')) {
-                    return;
-                }
-                
-                // Send to server
-                fetch('{{ url_for("submit_signature", doc_id=document.id) }}', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        signature_field_id: fieldId,
-                        signature_image: null,
-                        consent_given: true
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert('Document signed cryptographically! The signature is legally binding and tamper-evident.');
-                        // Reload to show signature status
-                        location.reload();
-                    } else {
-                        alert('Error signing document: ' + (data.error || 'Unknown error'));
-                    }
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    alert('Error signing document. Please try again.');
-                });
             }
-            
-            function saveTypedField(fieldId) {
-                var input = document.getElementById('typed-field-' + fieldId);
-                if (!input) return;
-                
-                var value = input.value.trim();
-                if (!value) {
+
+            function toggleChoiceCheckbox(fieldId) {
+                var field = getSignField(fieldId);
+                var currentlySelected = field && field.filled && (field.value || '').toUpperCase() === 'X';
+                var newValue = currentlySelected ? '' : 'X';
+                saveTypedFieldValue(fieldId, newValue, null);
+            }
+
+            function saveTypedFieldValue(fieldId, value, itemEl) {
+                var field = getSignField(fieldId);
+                var typedType = field ? field.field_type : (itemEl ? itemEl.getAttribute('data-typed-type') : '');
+                if (typedType === 'checkbox_choice') {
+                    value = (value || '').trim().toUpperCase() === 'X' ? 'X' : '';
+                } else if (!value) {
+                    if (editingOverlayFieldId !== null) {
+                        renderFieldOverlays();
+                        return;
+                    }
                     alert('Please enter a value for this field.');
+                    return;
+                }
+                var isPhoneField = field ? field.phone_like : (itemEl && itemEl.getAttribute('data-phone-field') === '1');
+                if (isPhoneField && !typedFieldPhoneRegex.test(value)) {
+                    alert('Please enter a valid 10-digit phone number (e.g. (555) 123-4567).');
+                    return;
+                }
+                var isLast4Field = field ? field.field_type === 'last4' : (itemEl && itemEl.getAttribute('data-last4-field') === '1');
+                if (isLast4Field && !typedFieldLast4Regex.test(value)) {
+                    alert('Please enter exactly 4 digits for the last part of your SSN (XXX-XX-####).');
                     return;
                 }
                 
@@ -17359,38 +20918,25 @@ def _serve_sign_document_page(doc_id):
                 })
                 .then(data => {
                     if (data.success) {
-                        // Update UI to show field is filled without reloading
-                        var fieldContainer = document.getElementById('typed-field-container-' + fieldId);
-                        if (fieldContainer) {
-                            var itemEl = fieldContainer.closest('.signature-field-item');
-                            if (itemEl) itemEl.classList.add('signed');
-                            fieldContainer.innerHTML = '<p style="color: #28a745; font-weight: bold;">✓ Filled</p>' +
-                                '<div style="padding: 10px; background: #f8f9fa; border-radius: 4px; margin-top: 10px;"><strong>Value:</strong> ' + value + '</div>' +
-                                '<button type="button" onclick="redoTypedField(' + fieldId + ')" class="btn" style="width: 100%; margin-top: 10px; padding: 8px; background: #ffc107; color: #000;">Redo Field</button>';
-                            scrollToFirstIncompleteField();
-                            
-                            // Reload the PDF iframe to show the typed field value
-                            setTimeout(function() {
-                                var iframe = document.querySelector('iframe[src*="view_document_embed"]') || 
-                                             document.querySelector('iframe[src*="embed"]') ||
-                                             document.getElementById('documentViewer')?.querySelector('iframe');
-                                if (iframe) {
-                                    var currentSrc = iframe.src;
-                                    // Remove existing cache-busting parameter if present
-                                    currentSrc = currentSrc.split('&_t=')[0].split('?_t=')[0];
-                                    // Add cache-busting parameter
-                                    var separator = currentSrc.includes('?') ? '&' : '?';
-                                    iframe.src = currentSrc + separator + '_t=' + Date.now();
-                                } else {
-                                    // Fallback: reload the entire page
-                                    console.log('Iframe not found, reloading page');
-                                    location.reload();
+                        if (typedType === 'checkbox_choice') {
+                            var group = field ? field.choice_group : '';
+                            signOverlayFields.forEach(function(f) {
+                                if (f.field_type === 'checkbox_choice' && group && f.choice_group === group && f.id !== fieldId) {
+                                    updateChoiceCheckboxUI(f.id, false);
                                 }
-                            }, 500); // Small delay to ensure PDF is generated
-                        } else {
-                            // Fallback: reload if container not found
-                            location.reload();
+                            });
+                            if (value === 'X') {
+                                updateChoiceCheckboxUI(fieldId, true);
+                            } else {
+                                updateOverlayFieldState(fieldId, false, '', null);
+                            }
+                            updateSignProgress();
+                            scrollToFirstIncompleteField();
+                            return;
                         }
+                        updateOverlayFieldState(fieldId, true, value, null);
+                        updateSignProgress();
+                        scrollToFirstIncompleteField();
                     } else {
                         alert('Error saving field: ' + (data.error || 'Unknown error'));
                     }
@@ -17401,7 +20947,7 @@ def _serve_sign_document_page(doc_id):
                     alert('Error saving field: ' + errorMsg);
                 });
             }
-            
+
             // Redo signature field - delete existing signature and show input form again
             function redoSignature(fieldId) {
                 if (!confirm('Are you sure you want to redo this signature? The current signature will be deleted.')) {
@@ -17427,8 +20973,8 @@ def _serve_sign_document_page(doc_id):
                 })
                 .then(data => {
                     if (data.success) {
-                        // Reload page to show signature input form again
-                        location.reload();
+                        updateOverlayFieldState(fieldId, false, null, null);
+                        openSignaturePopover(fieldId);
                     } else {
                         alert('Error: ' + (data.error || 'Unknown error'));
                     }
@@ -17439,17 +20985,17 @@ def _serve_sign_document_page(doc_id):
                 });
             }
             
-            // On load: scroll to first incomplete field; ensure date fields are pre-filled with today
+            // On load: PDF canvas, overlays, scroll to first incomplete field
             document.addEventListener('DOMContentLoaded', function() {
-                var today = new Date();
-                var yyyy = today.getFullYear();
-                var mm = String(today.getMonth() + 1).padStart(2, '0');
-                var dd = String(today.getDate()).padStart(2, '0');
-                var todayStr = yyyy + '-' + mm + '-' + dd;
-                document.querySelectorAll('input.typed-field-input[type="date"]').forEach(function(inp) {
-                    if (!inp.value || inp.value.trim() === '') inp.value = todayStr;
-                });
-                setTimeout(scrollToFirstIncompleteField, 400);
+                initPhoneTypedFieldInputs();
+                initLast4TypedFieldInputs();
+                var nextBtn = document.getElementById('signNextFieldBtn');
+                if (nextBtn) nextBtn.addEventListener('click', scrollToFirstIncompleteField);
+                updateSignProgress();
+                {% if is_pdf and not document_file_missing %}
+                loadPDF();
+                {% endif %}
+                setTimeout(scrollToFirstIncompleteField, 600);
             });
             
             // Redo typed field - delete existing value and show input form again
@@ -17477,8 +21023,8 @@ def _serve_sign_document_page(doc_id):
                 })
                 .then(data => {
                     if (data.success) {
-                        // Reload page to show input form again
-                        location.reload();
+                        updateOverlayFieldState(fieldId, false, '', null);
+                        startInlineTypedEdit(fieldId);
                     } else {
                         alert('Error: ' + (data.error || 'Unknown error'));
                     }
@@ -17494,7 +21040,13 @@ def _serve_sign_document_page(doc_id):
     ''', document=document, signature_fields=signature_fields, signed_field_ids=signed_field_ids, 
          user_signatures=user_signatures, typed_fields=typed_fields, filled_typed_field_ids=filled_typed_field_ids, is_pdf=is_pdf,
          user_display_name=user_display_name, user_initials=user_initials, today_date=today_date,
-         saved_signature_image=saved_signature_image, saved_signature_kind=saved_signature_kind)
+         saved_signature_image=saved_signature_image, saved_signature_kind=saved_signature_kind,
+         document_file_missing=document_file_missing,
+         typed_field_phone_pattern_html=TYPED_FIELD_PHONE_PATTERN_HTML,
+         typed_field_phone_regex_js=TYPED_FIELD_PHONE_REGEX_JS,
+         typed_field_last4_regex_js=TYPED_FIELD_LAST4_REGEX_JS,
+         sign_overlay_fields_json=sign_overlay_fields_json,
+         sign_overlay_fields=sign_overlay_fields)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -17506,8 +21058,8 @@ def _serve_sign_document_page(doc_id):
 @app.route('/documents/<int:doc_id>/sign')
 @login_required
 def sign_document(doc_id):
-    """Sign a document - only allowed if document is assigned to user."""
-    return _serve_sign_document_page(doc_id)
+    """Redirect to /documents?sign= for reliable routing behind IIS."""
+    return redirect(url_for('view_documents', sign=doc_id))
 
 
 def embed_signature_in_pdf(document, signature_field, signature_image_base64):
@@ -17854,6 +21406,31 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
             except Exception:
                 continue
 
+        # Fill native AcroForm widgets when fields were imported from Acrobat
+        widget_by_name = {}
+        for page in pdf_doc:
+            for w in page.widgets() or []:
+                if w.field_name:
+                    widget_by_name[w.field_name] = w
+        for typed_field_id, field_value in typed_value_map.items():
+            try:
+                typed_field = DocumentTypedField.query.get(typed_field_id)
+                if not typed_field or not typed_field.placeholder:
+                    continue
+                ph = typed_field.placeholder.strip()
+                if not ph.startswith(ACRO_PLACEHOLDER_PREFIX):
+                    continue
+                wname = ph[len(ACRO_PLACEHOLDER_PREFIX):]
+                w = widget_by_name.get(wname)
+                if not w:
+                    continue
+                w.field_value = acro_value_for_widget(
+                    w, field_value, typed_field.field_type or 'text',
+                )
+                w.update()
+            except Exception:
+                continue
+
         pdf_doc.save(work_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         pdf_doc.close()
         return True, work_path
@@ -17922,20 +21499,10 @@ def submit_signature(doc_id):
     if not signature_field or signature_field.document_id != doc_id:
         return jsonify({'success': False, 'error': 'Invalid signature field'}), 400
     
-    # Check signature type (default to 'image' if None)
-    signature_type = signature_field.signature_type or 'image'
-    is_cryptographic = signature_type == 'cryptographic'
-    
-    if is_cryptographic:
-        # Cryptographic signatures require consent
-        if not consent_given:
-            return jsonify({'success': False, 'error': 'Electronic signature consent is required'}), 400
-    else:
-        # Image signatures require the image
-        if not signature_image:
-            return jsonify({'success': False, 'error': 'Missing signature image'}), 400
-        if not consent_given:
-            return jsonify({'success': False, 'error': 'Intent confirmation is required before applying a signature'}), 400
+    if not signature_image:
+        return jsonify({'success': False, 'error': 'Missing signature image'}), 400
+    if not consent_given:
+        return jsonify({'success': False, 'error': 'Intent confirmation is required before applying a signature'}), 400
     
     try:
         # Check if user already signed this field (by ID or by location for orphaned signatures)
@@ -17974,8 +21541,7 @@ def submit_signature(doc_id):
         
         if existing_signature:
             # Update existing signature
-            if not is_cryptographic:
-                existing_signature.signature_image = signature_image
+            existing_signature.signature_image = signature_image
             existing_signature.signed_at = datetime.utcnow()
             existing_signature.ip_address = request.remote_addr
             existing_signature.user_agent = request.headers.get('User-Agent', '')
@@ -18001,8 +21567,8 @@ def submit_signature(doc_id):
                 document_id=doc_id,
                 signature_field_id=signature_field_id,
                 username=current_user.username,
-                signature_image=signature_image if not is_cryptographic else None,
-                signature_type=signature_field.signature_type,
+                signature_image=signature_image,
+                signature_type='image',
                 signed_at=datetime.utcnow(),
                 ip_address=request.remote_addr,
                 user_agent=request.headers.get('User-Agent', ''),
@@ -18028,18 +21594,8 @@ def submit_signature(doc_id):
         # - Save signature/typed data in DB
         # - Generate signed copies on demand for preview/download
         #   (do NOT write image signatures into document.file_path)
-        # Embed signature based on type
-        if is_cryptographic:
-            # Cryptographic signature
-            success, message = sign_pdf_cryptographically(document, signature_field, current_user.username)
-            if success:
-                # Calculate hash of signed PDF for audit trail
-                pdf_hash = calculate_pdf_hash(document.file_path)
-                sig_to_embed.signature_hash = pdf_hash
-        else:
-            # Image signature: do not mutate the original file.
-            # Signed overlays are rendered into temporary copies for viewing/downloading.
-            success, message = True, "Signature saved to database"
+        # Image signature: stored in DB; signed PDF copies generated on demand.
+        success, message = True, "Signature saved to database"
         
         if not success:
             db.session.rollback()
@@ -18054,32 +21610,12 @@ def submit_signature(doc_id):
             used_saved_signature=used_saved_signature
         )
         
-        # Check if all required fields are signed (using helper to handle deleted fields)
-        all_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
-        required_fields = [f for f in all_fields if f.is_required]
-        all_signed = all(is_signature_field_signed(doc_id, f, current_user.username) for f in required_fields) if required_fields else False
+        all_complete = document_fully_completed_for_user(doc_id, current_user.username)
         
-        # Update task completion if all fields signed
-        if all_signed:
+        # Update task completion if all fields signed and typed
+        if all_complete:
             signed_copy_rel_path = None
-            # Mark document assignment as completed
-            assignment = DocumentAssignment.query.filter_by(
-                document_id=doc_id,
-                username=current_user.username
-            ).first()
-            if assignment:
-                assignment.is_completed = True
-                assignment.completed_at = datetime.utcnow()
-            
-            # Mark user task as completed (UserTask uses status, not is_completed; task_type is 'document')
-            task = UserTask.query.filter_by(
-                document_id=doc_id,
-                username=current_user.username,
-                task_type='document'
-            ).first()
-            if task:
-                task.status = 'completed'
-                task.completed_at = datetime.utcnow()
+            _mark_document_assignment_complete_if_ready(doc_id, current_user.username)
             
             # Persist a finalized signed PDF copy for audit/download history.
             try:
@@ -18102,36 +21638,10 @@ def submit_signature(doc_id):
                 used_saved_signature=any_saved_used,
                 signed_copy_path=signed_copy_rel_path
             )
-
-            # Email a signed copy to the user
             try:
-                to_email = get_email_for_username(current_user.username)
-                if to_email:
-                    email_source = (BASE_DIR / signed_copy_rel_path) if signed_copy_rel_path else (
-                        Path(document.file_path) if os.path.isabs(document.file_path) else (BASE_DIR / document.file_path)
-                    )
-                    pdf_path = email_source
-                    if pdf_path.exists():
-                        with open(pdf_path, 'rb') as f:
-                            pdf_bytes = f.read()
-                        doc_name = (document.display_name or document.original_filename or 'document').strip()
-                        if not doc_name.lower().endswith('.pdf'):
-                            doc_name += '.pdf'
-                        safe_name = "".join(c for c in doc_name if c.isalnum() or c in ' ._-').strip() or 'signed_document.pdf'
-                        subject = f"Your signed copy: {doc_name}"
-                        body_html = (
-                            f"<p>Hello,</p>"
-                            f"<p>Please find your signed copy of <strong>{doc_name}</strong> attached.</p>"
-                            f"<p>You completed signing this document in the Ziebart Onboarding portal.</p>"
-                            f"<p>Thank you,<br>Onboarding Team</p>"
-                        )
-                        if send_email_with_attachment(to_email, subject, body_html, safe_name, pdf_bytes):
-                            app.logger.info(f"Sent signed PDF to {to_email} for document {doc_id}")
-                        else:
-                            app.logger.warning(f"Could not email signed PDF to {to_email}")
+                maybe_send_all_tasks_completed_email(current_user.username)
             except Exception as e:
-                app.logger.warning(f"Failed to email signed copy: {e}")
-                _log_exception_to_file(e)
+                app.logger.warning(f"All-tasks-completed email check failed: {e}")
         
         return jsonify({'success': True, 'message': 'Signature saved and embedded in PDF'})
         
@@ -18286,9 +21796,6 @@ def submit_typed_field(doc_id):
         if not typed_field_id:
             return jsonify({'success': False, 'error': 'Missing typed field ID'}), 400
         
-        if not field_value:
-            return jsonify({'success': False, 'error': 'Field value is required'}), 400
-        
         # Verify typed field exists and belongs to this document
         try:
             typed_field = DocumentTypedField.query.get(typed_field_id)
@@ -18297,6 +21804,17 @@ def submit_typed_field(doc_id):
         
         if not typed_field or typed_field.document_id != doc_id:
             return jsonify({'success': False, 'error': 'Invalid typed field'}), 400
+
+        if typed_field.field_type == 'checkbox_choice':
+            field_value = (field_value or '').strip()
+            if field_value.upper() == 'X':
+                field_value = 'X'
+            else:
+                field_value = ''
+        elif typed_field.field_type == 'last4':
+            field_value = normalize_last4_typed_value(field_value)
+        elif not field_value:
+            return jsonify({'success': False, 'error': 'Field value is required'}), 400
         
         # For typed_name/typed_initials, allow server-side default if client sent empty
         if not field_value and typed_field.field_type in ('typed_name', 'typed_initials'):
@@ -18320,10 +21838,23 @@ def submit_typed_field(doc_id):
             except Exception:
                 field_value = current_user.username if typed_field.field_type == 'typed_name' else (current_user.username[:2] if len(current_user.username) >= 2 else current_user.username).upper()
         
-        if not field_value:
+        if typed_field.field_type != 'checkbox_choice' and not field_value:
             return jsonify({'success': False, 'error': 'Field value is required'}), 400
+
+        ok, validation_error = validate_typed_field_value(
+            typed_field.field_type, field_value, typed_field.field_label
+        )
+        if not ok:
+            return jsonify({'success': False, 'error': validation_error}), 400
     
         try:
+            _ensure_document_typed_field_columns()
+            cleared_field_ids = []
+            if typed_field.field_type == 'checkbox_choice' and field_value == 'X':
+                cleared_field_ids = clear_choice_group_selections_except(
+                    doc_id, current_user.username, typed_field.choice_group, typed_field_id
+                )
+
             # Check if user already filled this field
             try:
                 existing_value = DocumentTypedFieldValue.query.filter_by(
@@ -18337,14 +21868,16 @@ def submit_typed_field(doc_id):
                 traceback.print_exc()
                 return jsonify({'success': False, 'error': 'Database table not available. Please contact administrator.'}), 500
             
-            if existing_value:
-                # Update existing value
+            if field_value == '' and existing_value:
+                db.session.delete(existing_value)
+            elif field_value == '':
+                pass
+            elif existing_value:
                 existing_value.field_value = field_value
                 existing_value.filled_at = datetime.utcnow()
                 existing_value.ip_address = request.remote_addr
                 existing_value.user_agent = request.headers.get('User-Agent', '')
             else:
-                # Create new value record
                 new_value = DocumentTypedFieldValue(
                     document_id=doc_id,
                     typed_field_id=typed_field_id,
@@ -18357,7 +21890,26 @@ def submit_typed_field(doc_id):
                 db.session.add(new_value)
             
             db.session.commit()
-            return jsonify({'success': True, 'message': 'Typed field value saved successfully'})
+
+            all_complete = document_fully_completed_for_user(doc_id, current_user.username)
+            if all_complete:
+                _mark_document_assignment_complete_if_ready(doc_id, current_user.username)
+                try:
+                    document = Document.query.get(doc_id)
+                    if document:
+                        _persist_signed_pdf_copy(document, current_user.username)
+                except Exception as e:
+                    app.logger.warning('Failed to persist signed PDF after typed fields: %s', e)
+                db.session.commit()
+
+            return jsonify({
+                'success': True,
+                'message': 'Typed field value saved successfully',
+                'field_value': field_value,
+                'cleared_field_ids': cleared_field_ids,
+                'selected_field_id': typed_field_id if field_value == 'X' else None,
+                'document_complete': all_complete,
+            })
         except Exception as e:
             db.session.rollback()
             import traceback
@@ -18640,9 +22192,9 @@ def view_signed_documents(doc_id):
         # If query fails (columns don't exist), use empty dict
         signed_users = {}
     
-    # Get signature fields to check if all required fields are signed
+    # All signature fields are required; checkbox/radio groups are handled by document completion logic elsewhere.
     signature_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
-    required_fields = [f for f in signature_fields if f.is_required]
+    required_fields = signature_fields
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -18867,14 +22419,11 @@ def view_form_signatures(doc_id):
             flash('Document not found.', 'error')
             return redirect(url_for('admin_dashboard'))
         
-        # Get all required signature fields for this document
-        required_fields = DocumentSignatureField.query.filter_by(
-            document_id=doc_id,
-            is_required=True
-        ).all()
+        # All signature fields are required for document completion.
+        required_fields = DocumentSignatureField.query.filter_by(document_id=doc_id).all()
         
         if not required_fields:
-            flash('This document has no required signature fields.', 'error')
+            flash('This document has no signature fields.', 'error')
             return redirect(url_for('admin_dashboard'))
         
         # Get only users who have been assigned this document
@@ -19712,6 +23261,12 @@ def view_new_hire_details(username):
             all_roles = Role.query.order_by(Role.name).all()
         except Exception:
             all_roles = []
+        try:
+            all_departments = Department.query.order_by(Department.name).all()
+        except Exception:
+            db.session.rollback()
+            _ensure_departments_table()
+            all_departments = Department.query.order_by(Department.name).all()
         
         return render_template_string('''
     <!DOCTYPE html>
@@ -20129,7 +23684,14 @@ def view_new_hire_details(username):
                         </tr>
                         <tr>
                             <td>Department (optional)</td>
-                            <td><input type="text" name="department" value="{{ new_hire.department or '' }}" placeholder="Not set"></td>
+                            <td>
+                                <select name="department_id" aria-label="Department">
+                                    <option value="">— No department —</option>
+                                    {% for d in all_departments %}
+                                    <option value="{{ d.id }}" {% if new_hire.department_id == d.id %}selected{% elif not new_hire.department_id and new_hire.department and new_hire.department|lower == d.name|lower %}selected{% endif %}>{{ d.name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </td>
                         </tr>
                         <tr>
                             <td>Position/Title</td>
@@ -20312,7 +23874,7 @@ def view_new_hire_details(username):
     </html>
     ''', new_hire=new_hire, video_progress=video_progress, signed_documents=signed_documents, 
          user_tasks=user_tasks, username=username, user_record=user_record, user_is_revoked=user_is_revoked,
-         all_stores=all_stores, all_roles=all_roles)
+         all_stores=all_stores, all_roles=all_roles, all_departments=all_departments)
     except Exception as e:
         # Log the error for debugging
         import traceback
@@ -20450,27 +24012,7 @@ def admin_assign_task():
             )
             db.session.add(task)
             db.session.commit()
-
-            if document is not None:
-                try:
-                    to_email = get_email_for_username(username)
-                    if to_email:
-                        sign_url = url_for('sign_document', doc_id=document_id, _external=True)
-                        doc_name = document.name_for_users or 'Document'
-                        due_html = f'<p>Due date: {due_date_str}</p>' if due_date_str else ''
-                        send_email(
-                            to_email,
-                            subject=f"Document to sign: {doc_name}",
-                            body_html=(
-                                f"<p>Hello,</p>"
-                                f"<p>You have been assigned to sign the following document: <strong>{doc_name}</strong>.</p>"
-                                f"<p><a href=\"{sign_url}\">Sign the document here</a></p>"
-                                f"{due_html}"
-                                f"<p>— Ziebart Onboarding</p>"
-                            ),
-                        )
-                except Exception:
-                    app.logger.exception('admin_assign_task email notification failed')
+            reset_onboarding_completion_state(username)
 
             display_name = user_display_names.get(username, username)
             if document is not None:
@@ -20780,11 +24322,9 @@ def update_new_hire_details(username):
             return redirect(url_for('view_new_hire_details', username=username))
         
         # Update department
-        department = request.form.get('department', '').strip()
-        if department:
-            new_hire.department = department
-        else:
-            new_hire.department = None
+        dept_id, dept_name = resolve_department_from_form(request.form.get('department_id', ''))
+        new_hire.department_id = dept_id
+        new_hire.department = dept_name
         
         # Update position/title (role_id dropdown)
         role_id_raw = (request.form.get('role_id') or '').strip()
@@ -24937,7 +28477,7 @@ def admin_reports():
                     </thead>
                     <tbody>
                         <tr>
-                            <td>Visible Documents</td>
+                            <td>Documents in user library</td>
                             <td>{{ visible_documents }}</td>
                         </tr>
                         <tr>
@@ -26984,6 +30524,12 @@ def serve_ziebart_logo():
     return send_from_directory(app.config['UPLOAD_FOLDER'], 'ziebart.svg', mimetype='image/svg+xml')
 
 
+@app.route('/favicon.ico')
+def serve_favicon():
+    """Serve the Ziebart logo as the browser tab icon fallback."""
+    return send_from_directory(app.config['UPLOAD_FOLDER'], 'ziebart.svg', mimetype='image/svg+xml')
+
+
 @app.route('/uploads/quick-links/<filename>')
 def serve_quick_link_image(filename):
     """Serve quick link images"""
@@ -27093,6 +30639,11 @@ def save_training_score():
                     task.completed_at = datetime.utcnow()
             
             db.session.commit()
+            if is_passed and progress.is_completed:
+                try:
+                    maybe_send_all_tasks_completed_email(current_user.username)
+                except Exception as e:
+                    app.logger.warning(f"All-tasks-completed email check failed: {e}")
         return jsonify({'success': True})
     except Exception as e:
         db.session.rollback()
@@ -27758,6 +31309,10 @@ def complete_task(task_id):
     task.completed_at = datetime.utcnow()
     task.updated_at = datetime.utcnow()
     db.session.commit()
+    try:
+        maybe_send_all_tasks_completed_email(current_user.username)
+    except Exception as e:
+        app.logger.warning(f"All-tasks-completed email check failed: {e}")
     
     return jsonify({'success': True})
 
