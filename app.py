@@ -37,7 +37,7 @@ from sqlalchemy import exists, or_, and_, text, bindparam, func, select
 from auth import login_required, admin_required, manager_required, User, check_user_can_login_as_admin, authenticate_by_email_password
 from models import (db, NewHire, User as UserModel, Document, ChecklistItem, NewHireChecklist,
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
-                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, Department, ManagerPermission, SignatureAuditLog, document_stores, role_documents)
+                    DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, Department, ManagerPermission, SignatureAuditLog, document_stores, role_documents, new_hire_required_training, training_video_stores)
 from membership import get_token_groups, get_local_groups
 from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR
 from datetime import datetime
@@ -218,6 +218,36 @@ def uses_manager_new_hires_home():
     return False
 
 
+def uses_manager_console_scope(force_manager=False):
+    """True when shared /admin/* tools should behave like Manager Console (store-scoped, view-only).
+
+    Pure managers always qualify. Admin+manager hybrids qualify when ?staff_console=manager or session
+    staff_console_home is manager (same rule as _view_all_new_hires_impl).
+    """
+    try:
+        if not current_user.is_authenticated:
+            return False
+    except Exception:
+        return False
+    if current_user.is_manager() and not current_user.is_admin():
+        return True
+    if current_user.is_admin() and current_user.is_manager():
+        if force_manager:
+            return True
+        sc = (
+            request.args.get(STAFF_CONSOLE_QUERY_KEY)
+            or session.get(STAFF_CONSOLE_HOME_KEY)
+            or ''
+        ).strip().lower()
+        return sc == 'manager'
+    return False
+
+
+def document_manage_requires_store_scope():
+    """True when document list/download should be limited to the user's store (not full admin)."""
+    return uses_manager_console_scope()
+
+
 @app.template_global()
 def manager_new_hires_list_url():
     """URL for the manager-scoped new hires list (/manager/new-hires)."""
@@ -300,11 +330,31 @@ GLOBAL_METALLIC_THEME_CSS = """
     --text-muted: #b7c1d3;
     --border-soft: rgba(255,255,255,0.17);
     --shadow-elev: 0 18px 42px rgba(0,0,0,0.36);
+    --btn-radius: 0.5rem;
+    --btn-padding-y: 10px;
+    --btn-padding-x: 18px;
+    --btn-padding-y-sm: 8px;
+    --btn-padding-x-sm: 14px;
+    --btn-font-size: 0.95em;
+    --btn-font-size-sm: 0.82em;
+    --btn-font-weight: 600;
+    --btn-border: 1px solid rgba(255, 255, 255, 0.22);
+    --btn-bg: rgba(255, 255, 255, 0.1);
+    --btn-color: #ffffff;
+    --btn-bg-hover: rgba(255, 255, 255, 0.18);
+}
+html {
+    background-color: #090d14;
+}
+html, body {
+    min-height: 100%;
+    min-height: 100vh;
 }
 body {
     background:
         radial-gradient(circle at 20% 0%, rgba(255,255,255,0.07), transparent 46%),
-        linear-gradient(136deg, #090d14 0%, #111824 56%, #0c121d 100%) !important;
+        linear-gradient(180deg, #111824 0%, #090d14 100%) !important;
+    background-attachment: fixed !important;
     color: var(--text-primary) !important;
 }
 .top-header {
@@ -355,6 +405,16 @@ input, select, textarea {
     border: 1px solid rgba(255,255,255,0.24) !important;
     color: var(--text-primary) !important;
 }
+select option,
+select optgroup {
+    background: #121a26 !important;
+    color: #f2f5fb !important;
+}
+select option:checked,
+select option:hover {
+    background: #1e2a3d !important;
+    color: #ffffff !important;
+}
 input::placeholder, textarea::placeholder {
     color: #9aa5b8 !important;
 }
@@ -362,11 +422,49 @@ input:focus, select:focus, textarea:focus {
     border-color: rgba(254,1,0,0.7) !important;
     box-shadow: 0 0 0 3px rgba(254,1,0,0.18) !important;
 }
-button, .btn, .btn-login, .task-btn, .video-btn, .dashboard-cta-link {
-    background: linear-gradient(180deg, #ff2624 0%, #d50000 65%, #9e0000 100%) !important;
+button,
+.btn,
+a.btn,
+.btn-login,
+.task-btn,
+.video-btn,
+.dashboard-cta-link,
+input[type="submit"],
+input[type="button"] {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    padding: var(--btn-padding-y) var(--btn-padding-x) !important;
+    border-radius: var(--btn-radius) !important;
+    font-size: var(--btn-font-size) !important;
+    font-weight: var(--btn-font-weight) !important;
+    line-height: 1.25 !important;
+    font-family: 'URW Form', Arial, sans-serif !important;
+    text-decoration: none !important;
+    cursor: pointer !important;
+    white-space: nowrap !important;
+    min-height: auto !important;
+    background: var(--btn-bg) !important;
+    color: var(--btn-color) !important;
+    border: var(--btn-border) !important;
+    box-shadow: none !important;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease !important;
+}
+button:hover,
+.btn:hover,
+a.btn:hover,
+.btn-login:hover,
+.task-btn:hover,
+.video-btn:hover,
+.dashboard-cta-link:hover,
+input[type="submit"]:hover,
+input[type="button"]:hover {
+    background: var(--btn-bg-hover) !important;
     color: #ffffff !important;
-    border: 1px solid rgba(255,255,255,0.28) !important;
-    box-shadow: 0 8px 20px rgba(254,1,0,0.3), inset 0 1px 0 rgba(255,255,255,0.35) !important;
+    box-shadow: none !important;
+    filter: none !important;
+    transform: none !important;
 }
 .dropdown-menu, .notification-dropdown {
     background: #151b28 !important;
@@ -375,6 +473,12 @@ button, .btn, .btn-login, .task-btn, .video-btn, .dashboard-cta-link {
 }
 .dropdown-item, .notification-title, .quick-link-text, table th, table td, label, .info-value, .progress-name a {
     color: var(--text-primary) !important;
+}
+.dropdown-item:hover,
+.dropdown-item:focus,
+.dropdown-item:focus-visible {
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #ffffff !important;
 }
 table, .table, .table-container {
     background: var(--bg-panel) !important;
@@ -452,6 +556,11 @@ table tr:hover {
 }
 .mobile-bottom-nav {
     display: none;
+}
+body.user-app-shell .mobile-menu-toggle,
+body.user-app-shell .mobile-nav,
+body.user-app-shell #mobileNav {
+    display: none !important;
 }
 @media (max-width: 768px) {
     body.user-app-shell {
@@ -961,6 +1070,12 @@ table tr:hover {
 .header .header-content h1 {
     color: var(--text-primary) !important;
 }
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
 .admin-panel,
 .store-banner,
 .collapsible-upload-panel,
@@ -990,14 +1105,25 @@ table tr:hover {
     position: relative;
     z-index: 1;
 }
-.back-btn {
-    background: rgba(255, 255, 255, 0.1) !important;
-    color: #ffffff !important;
-    border: 1px solid rgba(255, 255, 255, 0.22) !important;
+.back-btn,
+a.back-btn {
+    padding: var(--btn-padding-y) var(--btn-padding-x) !important;
+    border-radius: var(--btn-radius) !important;
+    font-size: var(--btn-font-size) !important;
+    font-weight: var(--btn-font-weight) !important;
+    background: var(--btn-bg) !important;
+    color: var(--btn-color) !important;
+    border: var(--btn-border) !important;
+    box-shadow: none !important;
+    text-decoration: none !important;
 }
-.back-btn:hover {
-    background: rgba(255, 255, 255, 0.18) !important;
+.back-btn:hover,
+a.back-btn:hover {
+    background: var(--btn-bg-hover) !important;
     color: #ffffff !important;
+    box-shadow: none !important;
+    filter: none !important;
+    transform: none !important;
 }
 .quick-link-item,
 .form-status-item,
@@ -1027,36 +1153,109 @@ table a:hover {
 }
 .btn-primary,
 a.btn-primary {
-    background: linear-gradient(180deg, #3a8eef 0%, #1e6fd0 55%, #1558a8 100%) !important;
-    border: 1px solid rgba(255, 255, 255, 0.28) !important;
-    box-shadow: 0 6px 18px rgba(30, 120, 220, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.28) !important;
+    background: rgba(58, 142, 239, 0.2) !important;
+    border: 1px solid rgba(120, 180, 255, 0.42) !important;
+    box-shadow: none !important;
     color: #ffffff !important;
+}
+.btn-primary:hover,
+a.btn-primary:hover {
+    background: rgba(58, 142, 239, 0.32) !important;
+    border-color: rgba(140, 195, 255, 0.55) !important;
+    color: #ffffff !important;
+    filter: none !important;
+    transform: none !important;
 }
 .btn-success,
 a.btn-success {
-    background: linear-gradient(180deg, #3ecf6a 0%, #239748 55%, #1a7036 100%) !important;
-    border: 1px solid rgba(255, 255, 255, 0.22) !important;
-    box-shadow: 0 6px 16px rgba(40, 160, 80, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.22) !important;
+    background: rgba(40, 167, 69, 0.2) !important;
+    border: 1px solid rgba(90, 200, 120, 0.42) !important;
+    box-shadow: none !important;
     color: #ffffff !important;
+}
+.btn-success:hover,
+a.btn-success:hover {
+    background: rgba(40, 167, 69, 0.32) !important;
+    border-color: rgba(110, 220, 140, 0.55) !important;
+    color: #ffffff !important;
+    filter: none !important;
+    transform: none !important;
 }
 .btn-secondary,
 a.btn-secondary {
-    background: linear-gradient(180deg, #5a6578 0%, #3d4656 55%, #2a313d 100%) !important;
-    border: 1px solid rgba(255, 255, 255, 0.2) !important;
-    color: #f2f5fb !important;
+    background: var(--btn-bg) !important;
+    border: var(--btn-border) !important;
+    box-shadow: none !important;
+    color: var(--btn-color) !important;
 }
-.badge {
-    background: rgba(255, 255, 255, 0.12) !important;
+.btn-secondary:hover,
+a.btn-secondary:hover {
+    background: var(--btn-bg-hover) !important;
+    color: #ffffff !important;
+    filter: none !important;
+    transform: none !important;
+}
+.btn-danger,
+a.btn-danger,
+button.btn-danger {
+    background: rgba(220, 53, 69, 0.2) !important;
+    border: 1px solid rgba(255, 120, 130, 0.42) !important;
+    box-shadow: none !important;
+    color: #ffffff !important;
+}
+.btn-danger:hover,
+a.btn-danger:hover,
+button.btn-danger:hover {
+    background: rgba(220, 53, 69, 0.32) !important;
+    border-color: rgba(255, 140, 150, 0.55) !important;
+    color: #ffffff !important;
+    filter: none !important;
+    transform: none !important;
+}
+.task-btn,
+.video-btn,
+.dashboard-cta-link,
+.btn-login {
+    background: rgba(254, 1, 0, 0.18) !important;
+    border: 1px solid rgba(254, 80, 78, 0.48) !important;
+    box-shadow: none !important;
+    color: #ffffff !important;
+}
+.task-btn:hover,
+.video-btn:hover,
+.dashboard-cta-link:hover,
+.btn-login:hover {
+    background: rgba(254, 1, 0, 0.28) !important;
+    border-color: rgba(255, 110, 108, 0.58) !important;
+    color: #ffffff !important;
+    filter: none !important;
+    transform: none !important;
+}
+.badge,
+span.badge {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: var(--btn-padding-y-sm) var(--btn-padding-x-sm) !important;
+    border-radius: var(--btn-radius) !important;
+    font-size: var(--btn-font-size-sm) !important;
+    font-weight: var(--btn-font-weight) !important;
+    line-height: 1.25 !important;
+    border: var(--btn-border) !important;
+    box-shadow: none !important;
+    background: var(--btn-bg) !important;
     color: var(--text-primary) !important;
 }
 .badge-active,
 .badge.badge-active {
-    background: linear-gradient(180deg, #34c86a 0%, #1f8f4a 100%) !important;
+    background: rgba(40, 167, 69, 0.28) !important;
+    border-color: rgba(90, 200, 120, 0.5) !important;
     color: #ffffff !important;
 }
 .badge-inactive,
 .badge.badge-inactive {
-    background: rgba(255, 255, 255, 0.1) !important;
+    background: var(--btn-bg) !important;
+    border: var(--btn-border) !important;
     color: var(--text-muted) !important;
 }
 .card .hint {
@@ -1080,19 +1279,23 @@ a.btn-secondary {
     border-top-color: rgba(255, 255, 255, 0.12) !important;
 }
 .badge-visible {
-    background: rgba(72, 190, 120, 0.32) !important;
+    background: rgba(72, 190, 120, 0.28) !important;
+    border-color: rgba(90, 200, 120, 0.5) !important;
     color: #e8fff0 !important;
 }
 .badge-hidden {
-    background: rgba(255, 255, 255, 0.12) !important;
+    background: var(--btn-bg) !important;
+    border: var(--btn-border) !important;
     color: var(--text-primary) !important;
 }
 .badge-revoked {
-    background: rgba(200, 60, 60, 0.38) !important;
+    background: rgba(200, 60, 60, 0.28) !important;
+    border-color: rgba(255, 120, 120, 0.45) !important;
     color: #ffe4e4 !important;
 }
 .badge-admin {
-    background: linear-gradient(180deg, #ff3a38 0%, #b80000 100%) !important;
+    background: rgba(254, 1, 0, 0.22) !important;
+    border: 1px solid rgba(254, 80, 78, 0.48) !important;
     color: #ffffff !important;
 }
 .badge-user {
@@ -1100,13 +1303,39 @@ a.btn-secondary {
     color: var(--text-primary) !important;
 }
 .store-dropdown-btn {
-    background: rgba(255, 255, 255, 0.12) !important;
-    color: var(--text-primary) !important;
-    border: 1px solid rgba(255, 255, 255, 0.22) !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    padding: var(--btn-padding-y-sm) var(--btn-padding-x-sm) !important;
+    border-radius: var(--btn-radius) !important;
+    font-size: var(--btn-font-size-sm) !important;
+    font-weight: var(--btn-font-weight) !important;
+    line-height: 1.25 !important;
+    white-space: nowrap !important;
+    cursor: pointer !important;
+    background: var(--btn-bg) !important;
+    color: var(--btn-color) !important;
+    border: var(--btn-border) !important;
+    box-shadow: none !important;
+    min-height: auto !important;
 }
 .store-dropdown-btn:hover {
-    background: rgba(255, 255, 255, 0.18) !important;
+    background: var(--btn-bg-hover) !important;
     color: #ffffff !important;
+    box-shadow: none !important;
+    filter: none !important;
+    transform: none !important;
+}
+.btn-small,
+.btn.btn-small,
+a.btn.btn-small,
+button.btn-small {
+    padding: var(--btn-padding-y-sm) var(--btn-padding-x-sm) !important;
+    font-size: var(--btn-font-size-sm) !important;
+    border-radius: var(--btn-radius) !important;
+    margin: 2px 4px !important;
+    box-shadow: none !important;
 }
 
 /* Strip remaining light-gray / white “cards” on admin & manager pages */
@@ -1905,6 +2134,20 @@ def _ensure_stores_and_store_id():
             db.session.commit()
         except Exception:
             db.session.rollback()
+    try:
+        db.session.execute(text("SELECT TOP 1 video_id FROM training_video_stores"))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text(
+                "CREATE TABLE training_video_stores (video_id INT NOT NULL, store_id INT NOT NULL, "
+                "PRIMARY KEY (video_id, store_id), "
+                "FOREIGN KEY (video_id) REFERENCES training_videos(id), "
+                "FOREIGN KEY (store_id) REFERENCES stores(id))"
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
     _stores_migrated = True
 
 
@@ -2128,6 +2371,99 @@ def document_visible_to_store(document, store_id):
     return any(getattr(s, 'id', None) == store_id for s in store_ids)
 
 
+def training_videos_visible_to_store_query(store_id, base_filter=None):
+    """Return TrainingVideo query scoped to a store. No rows in training_video_stores = all stores."""
+    q = TrainingVideo.query
+    if base_filter is not None:
+        q = q.filter(base_filter)
+    if store_id is not None:
+        no_stores = ~exists().where(training_video_stores.c.video_id == TrainingVideo.id)
+        in_store = exists().where(
+            and_(training_video_stores.c.video_id == TrainingVideo.id, training_video_stores.c.store_id == store_id)
+        )
+        q = q.filter(or_(no_stores, in_store))
+    return q
+
+
+def _stores_for_training_video(video_id):
+    """Stores linked to a training video (empty = all stores)."""
+    if not video_id:
+        return []
+    try:
+        store_ids = [
+            row[0] for row in db.session.execute(
+                select(training_video_stores.c.store_id).where(
+                    training_video_stores.c.video_id == video_id
+                )
+            ).fetchall()
+        ]
+    except Exception:
+        db.session.rollback()
+        return []
+    if not store_ids:
+        return []
+    return Store.query.filter(Store.id.in_(store_ids)).order_by(Store.name).all()
+
+
+def _attach_training_video_store_lists(videos):
+    """Set video.store_ids for admin Training Management store dropdown."""
+    if not videos:
+        return
+    video_ids = [v.id for v in videos if v.id]
+    by_video = {vid: [] for vid in video_ids}
+    if video_ids:
+        try:
+            rows = db.session.execute(
+                select(training_video_stores.c.video_id, training_video_stores.c.store_id).where(
+                    training_video_stores.c.video_id.in_(video_ids)
+                )
+            ).fetchall()
+            for vid, store_id in rows:
+                by_video.setdefault(vid, []).append(store_id)
+        except Exception:
+            db.session.rollback()
+    all_store_ids = {sid for ids in by_video.values() for sid in ids}
+    stores_by_id = {}
+    if all_store_ids:
+        stores_by_id = {s.id: s for s in Store.query.filter(Store.id.in_(all_store_ids)).all()}
+    for video in videos:
+        video.store_ids = [
+            stores_by_id[sid] for sid in by_video.get(video.id, []) if sid in stores_by_id
+        ]
+
+
+def training_video_visible_to_store(video, store_id):
+    """True if training video is visible to the given store."""
+    if not video:
+        return False
+    store_ids = getattr(video, 'store_ids', None)
+    if store_ids is None:
+        store_ids = _stores_for_training_video(video.id)
+    if not store_ids:
+        return True
+    if store_id is None:
+        return True
+    return any(getattr(s, 'id', None) == store_id for s in store_ids)
+
+
+def training_videos_for_store_detail(store_id):
+    """Training videos explicitly scoped to one store (excludes global all-stores videos)."""
+    try:
+        video_ids = [
+            row[0] for row in db.session.execute(
+                select(training_video_stores.c.video_id).where(
+                    training_video_stores.c.store_id == store_id
+                )
+            ).fetchall()
+        ]
+    except Exception:
+        db.session.rollback()
+        return []
+    if not video_ids:
+        return []
+    return TrainingVideo.query.filter(TrainingVideo.id.in_(video_ids)).order_by(TrainingVideo.title).all()
+
+
 def documents_for_user_files(username):
     """Documents for the user Files tab: explicitly assigned to user, scoped to user's store.
 
@@ -2287,7 +2623,7 @@ def manager_has_permission(permission_key):
         return False
 
 
-# Permission keys for managers (used in Settings and when gating actions)
+# Permission keys for managers (used in Manage Users and when gating actions)
 MANAGER_PERMISSION_KEYS = [
     ('start_onboarding', 'Start onboarding (add new hires)'),
     ('manage_documents', 'Manage documents'),
@@ -3440,9 +3776,13 @@ def dashboard():
         unread_count = len([n for n in notifications if not n['is_read']])
         pending_count = unread_count
         
-        # Get all training videos (for the training videos section)
+        # Get training videos for the user's store (for the training videos section)
         try:
-            all_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.created_at.desc()).limit(6).all()
+            _user_store_id = get_current_user_store_id()
+            all_videos = training_videos_visible_to_store_query(
+                _user_store_id,
+                base_filter=(TrainingVideo.is_active == True),
+            ).order_by(TrainingVideo.created_at.desc()).limit(6).all()
         except Exception as e:
             all_videos = []
         
@@ -4141,44 +4481,6 @@ def dashboard():
                 color: #c4ccda;
                 text-align: left;
             }
-            /* Mobile Menu Toggle */
-            .mobile-menu-toggle {
-                display: none;
-                background: none;
-                border: none;
-                color: #ffffff;
-                font-size: 1.5em;
-                cursor: pointer;
-                padding: 8px;
-            }
-            .mobile-nav {
-                display: none;
-                position: absolute;
-                top: 100%;
-                left: 0;
-                right: 0;
-                background: #000000;
-                flex-direction: column;
-                padding: 20px;
-                z-index: 1000;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-            }
-            .mobile-nav.show {
-                display: flex;
-            }
-            .mobile-nav a {
-                color: #ffffff;
-                text-decoration: none;
-                padding: 12px 0;
-                font-size: 1.1em;
-                border-bottom: 1px solid rgba(255,255,255,0.1);
-            }
-            .mobile-nav a:last-child {
-                border-bottom: none;
-            }
-            .mobile-nav a:hover {
-                color: #FE0100;
-            }
             
             @media (max-width: 768px) {
                 .dashboard-page-wrap {
@@ -4287,7 +4589,6 @@ def dashboard():
                 background: rgba(255,255,255,0.08);
                 box-shadow: none;
             }
-            .mobile-nav a:hover { color: #ff6a6a; }
             .user-dropdown:hover, .back-btn:hover { background: rgba(255,255,255,0.14); }
             .user-icon {
                 background: linear-gradient(180deg, #ff2726 0%, #cf0000 100%);
@@ -4565,16 +4866,8 @@ def dashboard():
                 <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
                 <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
             </div>
-            <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="nav-links">
                 <a href="{{ url_for('dashboard') }}" class="nav-tab-active">Home</a>
-                <a href="{{ url_for('user_tasks') }}">Tasks</a>
-                <a href="{{ url_for('view_documents') }}">Files</a>
-                <a href="{{ url_for('list_training_videos') }}">Videos</a>
-                <a href="{{ url_for('profile') }}">Profile</a>
-            </div>
-            <div class="mobile-nav" id="mobileNav">
-                <a href="{{ url_for('dashboard') }}">Home</a>
                 <a href="{{ url_for('user_tasks') }}">Tasks</a>
                 <a href="{{ url_for('view_documents') }}">Files</a>
                 <a href="{{ url_for('list_training_videos') }}">Videos</a>
@@ -4883,13 +5176,6 @@ def dashboard():
                 });
             }
             
-            function toggleMobileMenu() {
-                var mobileNav = document.getElementById('mobileNav');
-                if (mobileNav) {
-                    mobileNav.classList.toggle('show');
-                }
-            }
-            
             window.onclick = function(event) {
                 if (!event.target.closest('.user-dropdown')) {
                     var dropdown = document.getElementById('userDropdown');
@@ -4901,12 +5187,6 @@ def dashboard():
                     var notifDropdown = document.getElementById('notificationDropdown');
                     if (notifDropdown && notifDropdown.classList.contains('show')) {
                         notifDropdown.classList.remove('show');
-                    }
-                }
-                if (!event.target.closest('.mobile-menu-toggle') && !event.target.closest('.mobile-nav')) {
-                    var mobileNav = document.getElementById('mobileNav');
-                    if (mobileNav && mobileNav.classList.contains('show')) {
-                        mobileNav.classList.remove('show');
                     }
                 }
             }
@@ -6585,8 +6865,8 @@ def profile():
             <div class="info-section">
                 <h2 class="section-title-dash">Signature</h2>
                 <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
-                    <p style="color: #808080;">Create and save a default signature to apply intentionally while signing documents.</p>
-                    <a href="{{ url_for('manage_signature') }}" class="btn" style="text-decoration: none;">Manage Signature</a>
+                    <p style="margin: 0;">Create and save a default signature to apply intentionally while signing documents.</p>
+                    <a href="{{ url_for('manage_signature') }}" class="btn btn-secondary" style="text-decoration: none; white-space: nowrap;">Manage Signature</a>
                 </div>
             </div>
         </div>
@@ -7330,7 +7610,7 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <div class="header-right">
-                <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+                <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('viewNewHiresUserDropdown').classList.toggle('show');">
                     <div class="user-icon">{{ (admin_name or 'A')[0].upper() }}</div>
                     <div class="dropdown-menu" id="viewNewHiresUserDropdown">
@@ -7473,7 +7753,11 @@ def add_new_hire():
     """Add a new hire with step-by-step onboarding wizard. Admin or manager with start_onboarding permission."""
     if not current_user.is_admin() and not manager_has_permission('start_onboarding'):
         abort(403)
-    videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.title).all()
+    store_id = get_current_user_store_id() if current_user.is_manager() else None
+    videos = training_videos_visible_to_store_query(
+        store_id,
+        base_filter=(TrainingVideo.is_active == True),
+    ).order_by(TrainingVideo.title).all()
     # Get documents visible to this store (or all visible for admin) that have signature fields
     store_id = get_current_user_store_id() if current_user.is_manager() else None
     documents = documents_visible_to_store_query(
@@ -7978,7 +8262,7 @@ def add_new_hire():
             <div class="header-content">
                 <h1>🚀 New Hire Onboarding Wizard</h1>
             </div>
-            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -8927,8 +9211,7 @@ def _admin_dashboard_impl():
                 flex: 1 1 auto;
                 min-width: 0;
             }
-            .admin-header-page-label .admin-header-title,
-            .mobile-nav .admin-header-title {
+            .admin-header-page-label .admin-header-title {
                 color: #ffffff;
                 font-size: 1.15em;
                 font-weight: 800;
@@ -9544,44 +9827,6 @@ def _admin_dashboard_impl():
             .new-hire-item:last-child {
                 border-bottom: none;
             }
-            /* Mobile Menu */
-            .mobile-menu-toggle {
-                display: none;
-                background: none;
-                border: none;
-                color: #ffffff;
-                font-size: 1.5em;
-                cursor: pointer;
-                padding: 8px;
-            }
-            .mobile-nav {
-                display: none;
-                position: absolute;
-                top: 100%;
-                left: 0;
-                right: 0;
-                background: #000000;
-                flex-direction: column;
-                padding: 20px;
-                z-index: 1000;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-            }
-            .mobile-nav.show {
-                display: flex;
-            }
-            .mobile-nav a {
-                color: #ffffff;
-                text-decoration: none;
-                padding: 12px 0;
-                font-size: 1.1em;
-                border-bottom: 1px solid rgba(255,255,255,0.1);
-            }
-            .mobile-nav a:last-child {
-                border-bottom: none;
-            }
-            .mobile-nav a:hover {
-                color: #FE0100;
-            }
             
             @media (max-width: 1200px) {
                 .main-container {
@@ -9610,11 +9855,8 @@ def _admin_dashboard_impl():
                     height: 50px;
                     margin-bottom: -25px;
                 }
-                .admin-header-page-label {
-                    display: none;
-                }
-                .mobile-menu-toggle {
-                    display: block;
+                .admin-header-page-label .admin-header-title {
+                    font-size: 1em;
                 }
                 .user-section {
                     gap: 8px;
@@ -9805,10 +10047,9 @@ def _admin_dashboard_impl():
                 border-bottom: 1px solid var(--border-soft);
                 box-shadow: 0 8px 24px rgba(0,0,0,0.4);
             }
-            .nav-links a, .mobile-nav a, .user-dropdown { color: #dbe2f0; }
-            .nav-links a:hover, .mobile-nav a:hover { color: #ff6a6a; }
-            .admin-header-page-label .admin-header-title,
-            .mobile-nav .admin-header-title {
+            .nav-links a, .user-dropdown { color: #dbe2f0; }
+            .nav-links a:hover { color: #ff6a6a; }
+            .admin-header-page-label .admin-header-title {
                 color: var(--text-primary) !important;
             }
             .user-dropdown:hover, .back-btn:hover { background: rgba(255,255,255,0.14); }
@@ -9931,12 +10172,8 @@ def _admin_dashboard_impl():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
             <div class="admin-header-page-label">
                 <h1 class="admin-header-title">Admin Dashboard</h1>
-            </div>
-            <div class="mobile-nav" id="mobileNav">
-                <span class="admin-header-title">Admin Dashboard</span>
             </div>
             <div class="user-section">
                 <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
@@ -10083,11 +10320,6 @@ def _admin_dashboard_impl():
                             <span class="quick-link-text">Test Form Wizard</span>
                             <span class="quick-link-count">→</span>
                         </a>
-                        <a href="{{ url_for('settings_page') }}" class="quick-link-item" style="text-decoration: none;">
-                            <span class="quick-link-icon">⚙️</span>
-                            <span class="quick-link-text">Settings</span>
-                            <span class="quick-link-count">→</span>
-                        </a>
                         {% endif %}
                         <a href="{{ url_for('manage_roles') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">🎭</span>
@@ -10113,13 +10345,6 @@ def _admin_dashboard_impl():
             function toggleUserDropdown() {
                 var dropdown = document.getElementById('userDropdown');
                 dropdown.classList.toggle('show');
-            }
-            
-            function toggleMobileMenu() {
-                var mobileNav = document.getElementById('mobileNav');
-                if (mobileNav) {
-                    mobileNav.classList.toggle('show');
-                }
             }
             
             function toggleNotificationDropdown(event) {
@@ -10259,12 +10484,6 @@ def _admin_dashboard_impl():
                         notifDropdown.classList.remove('show');
                     }
                 }
-                if (!event.target.closest('.mobile-menu-toggle') && !event.target.closest('.mobile-nav')) {
-                    var mobileNav = document.getElementById('mobileNav');
-                    if (mobileNav && mobileNav.classList.contains('show')) {
-                        mobileNav.classList.remove('show');
-                    }
-                }
             }
         </script>
         <script type="application/json" id="hireSearchData">{{ hire_search_rows | tojson }}</script>
@@ -10381,7 +10600,6 @@ def manager_dashboard():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
-            body { background: #f5f5f5; color: #000; }
             .top-header {
                 background: #000;
                 color: white;
@@ -10394,43 +10612,89 @@ def manager_dashboard():
             }
             .logo-section { display: flex; align-items: center; gap: 12px; font-size: 1.4em; font-weight: 800; color: #fff; }
             .logo-section img { height: 80px; width: auto; align-self: flex-end; margin-bottom: -40px; }
-            .back-btn {
-                background: rgba(255,255,255,0.2);
-                color: #fff;
-                padding: 8px 16px;
-                border-radius: 0.5rem;
-                text-decoration: none;
-                font-weight: 500;
-                border: 1px solid rgba(255,255,255,0.3);
-            }
-            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
-            .container { max-width: 1000px; margin: 30px auto; padding: 0 20px; }
+            .container { max-width: 1000px; margin: 30px auto; padding: 0 20px 48px; }
             .store-banner {
-                background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
-                color: #fff;
-                padding: 24px;
+                padding: 28px 32px;
+                margin-bottom: 28px;
                 border-radius: 12px;
-                margin-bottom: 24px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             }
-            .store-banner h1 { font-size: 1.75em; margin-bottom: 8px; }
-            .store-banner .store-name { font-size: 1.1em; opacity: 0.9; }
+            .store-banner h1 {
+                font-size: 1.75em;
+                margin: 0 0 14px;
+                line-height: 1.2;
+            }
+            .store-banner .store-name {
+                font-size: 1.15em;
+                margin: 0 0 12px;
+                line-height: 1.45;
+            }
+            .store-banner-note {
+                font-size: 0.92em;
+                margin: 0;
+                line-height: 1.5;
+            }
             .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; margin-bottom: 24px; }
             .card {
-                background: white;
                 border-radius: 12px;
-                padding: 24px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                padding: 0;
                 text-decoration: none;
                 color: inherit;
-                display: block;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
                 transition: transform 0.2s, box-shadow 0.2s;
-                border: 1px solid #eee;
             }
-            .card:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
-            .card h3 { font-size: 1.1em; margin-bottom: 8px; color: #000; }
-            .card .number { font-size: 2em; font-weight: 800; color: #FE0100; }
-            .card .hint { font-size: 0.85em; color: #666; margin-top: 8px; }
+            .card:hover { transform: translateY(-3px); box-shadow: 0 12px 28px rgba(0,0,0,0.35) !important; }
+            .card-visual {
+                position: relative;
+                height: 132px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                border-bottom: 1px solid rgba(255,255,255,0.08);
+                overflow: hidden;
+            }
+            .card-visual::after {
+                content: '';
+                position: absolute;
+                inset: 0;
+                background: radial-gradient(circle at 70% 20%, rgba(255,255,255,0.12), transparent 55%);
+                pointer-events: none;
+            }
+            .card-visual svg {
+                width: 72px;
+                height: 72px;
+                position: relative;
+                z-index: 1;
+                filter: drop-shadow(0 6px 14px rgba(0,0,0,0.35));
+            }
+            .card-visual-onboarding { background: linear-gradient(145deg, rgba(254,1,0,0.28) 0%, rgba(40,12,12,0.55) 100%); }
+            .card-visual-hires { background: linear-gradient(145deg, rgba(254,1,0,0.22) 0%, rgba(18,28,48,0.75) 100%); }
+            .card-visual-documents { background: linear-gradient(145deg, rgba(255,170,60,0.22) 0%, rgba(36,24,8,0.72) 100%); }
+            .card-visual-training { background: linear-gradient(145deg, rgba(120,90,255,0.24) 0%, rgba(22,16,42,0.78) 100%); }
+            .card-visual-checklists { background: linear-gradient(145deg, rgba(40,180,120,0.22) 0%, rgba(12,32,24,0.78) 100%); }
+            .card-badge {
+                position: absolute;
+                bottom: 14px;
+                right: 16px;
+                z-index: 2;
+                min-width: 42px;
+                height: 42px;
+                padding: 0 10px;
+                border-radius: 999px;
+                background: linear-gradient(160deg, #ff2a2a 0%, #c80000 100%);
+                color: #fff;
+                font-size: 1.15em;
+                font-weight: 800;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                box-shadow: 0 4px 12px rgba(254,1,0,0.45);
+                border: 1px solid rgba(255,255,255,0.25);
+            }
+            .card-body { padding: 18px 20px 22px; }
+            .card h3 { font-size: 1.1em; margin-bottom: 8px; }
+            .card .hint { font-size: 0.85em; margin-top: 0; line-height: 1.45; }
             .card.disabled { opacity: 0.7; pointer-events: none; }
             .header-right { display: flex; align-items: center; gap: 16px; }
             .user-dropdown { cursor: pointer; position: relative; display: flex; align-items: center; }
@@ -10441,54 +10705,35 @@ def manager_dashboard():
             .user-dropdown:hover .user-icon { background: #d90000; }
             .dropdown-menu {
                 display: none; position: absolute; top: 100%; right: 0; margin-top: 8px;
-                background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-                z-index: 1000; padding: 8px 0; border: 1px solid #eee;
+                min-width: 180px; border-radius: 8px; z-index: 1000; padding: 8px 0;
             }
             .dropdown-menu.show { display: block; }
-            .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
-            .dropdown-item:hover { background: #f5f5f5; }
+            .dropdown-item { display: block; padding: 10px 16px; text-decoration: none; font-size: 0.95em; }
         {{ global_theme_css|safe }}
-            /* Set Signature Fields: explicit dark theme overrides */
-            body.sig-fields-page .document-viewer-container,
-            body.sig-fields-page .sidebar-panel {
-                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
-                border: 1px solid rgba(255, 255, 255, 0.18) !important;
-                color: #f2f5fb !important;
+            body.manager-console-page .store-banner {
+                padding: 32px 36px !important;
+                margin-bottom: 32px !important;
             }
-            body.sig-fields-page .document-viewer {
-                background: #343a46 !important;
+            body.manager-console-page .store-banner h1 {
+                margin-bottom: 16px !important;
             }
-            body.sig-fields-page .sidebar-panel h3,
-            body.sig-fields-page .sidebar-panel label,
-            body.sig-fields-page .sidebar-panel p,
-            body.sig-fields-page .document-viewer-container h3,
-            body.sig-fields-page .signature-field-item h4,
-            body.sig-fields-page .signature-field-item p,
-            body.sig-fields-page .instructions h3,
-            body.sig-fields-page .instructions li {
-                color: #f2f5fb !important;
+            body.manager-console-page .store-banner .store-name {
+                margin-bottom: 14px !important;
             }
-            body.sig-fields-page .sidebar-panel input,
-            body.sig-fields-page .sidebar-panel select {
-                background: rgba(255, 255, 255, 0.08) !important;
-                border: 1px solid rgba(255, 255, 255, 0.24) !important;
-                color: #f2f5fb !important;
+            body.manager-console-page .store-banner p,
+            body.manager-console-page .store-banner .store-name {
+                color: var(--text-muted) !important;
             }
-            body.sig-fields-page .sidebar-panel input::placeholder {
-                color: #b7c1d3 !important;
+            body.manager-console-page .store-banner-note {
+                color: var(--text-muted) !important;
+                opacity: 0.92;
             }
-            body.sig-fields-page .sidebar-panel select option {
-                background: #1a202c !important;
-                color: #f2f5fb !important;
-            }
-            body.sig-fields-page .instructions,
-            body.sig-fields-page .signature-field-item {
-                background: rgba(255, 255, 255, 0.06) !important;
-                border-left-color: rgba(110, 168, 254, 0.9) !important;
+            body.manager-console-page .card .hint {
+                color: var(--text-muted) !important;
             }
         </style>
     </head>
-    <body class="sig-fields-page">
+    <body class="manager-console-page">
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Logo">
@@ -10513,40 +10758,91 @@ def manager_dashboard():
             <div class="store-banner">
                 <h1>Your store</h1>
                 <p class="store-name">{{ store_name }}</p>
-                <p style="font-size: 0.9em; margin-top: 8px; opacity: 0.85;">All actions and data below are for this store only.</p>
+                <p class="store-banner-note">All actions and data below are for this store only.</p>
             </div>
             <div class="cards">
                 {% if can_start %}
                 <a href="{{ url_for('add_new_hire', staff_console='manager') }}" class="card">
-                    <h3>Start onboarding</h3>
-                    <div class="number">+</div>
-                    <p class="hint">Add a new hire for this store and assign training & documents.</p>
+                    <div class="card-visual card-visual-onboarding" aria-hidden="true">
+                        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <circle cx="32" cy="22" r="10" stroke="#ffb4b4" stroke-width="2.5" fill="rgba(255,255,255,0.08)"/>
+                            <path d="M14 54c2.5-10 9-16 18-16s15.5 6 18 16" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+                            <circle cx="48" cy="18" r="11" fill="#FE0100" stroke="#fff" stroke-width="2"/>
+                            <path d="M48 12v12M42 18h12" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+                        </svg>
+                    </div>
+                    <div class="card-body">
+                        <h3>Start onboarding</h3>
+                        <p class="hint">Add a new hire for this store and assign training & documents.</p>
+                    </div>
                 </a>
                 {% endif %}
                 <a href="{{ manager_new_hires_list_url() }}" class="card">
-                    <h3>New hires</h3>
-                    <div class="number">{{ new_hires_count }}</div>
-                    <p class="hint">View and track onboarding progress for this store.</p>
+                    <div class="card-visual card-visual-hires" aria-hidden="true">
+                        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <circle cx="24" cy="20" r="8" stroke="#ffb4b4" stroke-width="2.2" fill="rgba(255,255,255,0.08)"/>
+                            <path d="M10 50c2-8 7.5-13 14-13" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+                            <circle cx="44" cy="22" r="9" stroke="#fff" stroke-width="2.2" fill="rgba(254,1,0,0.25)"/>
+                            <path d="M30 52c2.5-9 9.5-15 18-15" stroke="#ffb4b4" stroke-width="2.2" stroke-linecap="round"/>
+                            <circle cx="50" cy="46" r="7" stroke="#fff" stroke-width="2" fill="rgba(255,255,255,0.06)"/>
+                            <path d="M44 46h12" stroke="#FE0100" stroke-width="2.2" stroke-linecap="round"/>
+                        </svg>
+                        <span class="card-badge">{{ new_hires_count }}</span>
+                    </div>
+                    <div class="card-body">
+                        <h3>New hires</h3>
+                        <p class="hint">View and track onboarding progress for this store.</p>
+                    </div>
                 </a>
                 {% if can_documents %}
                 <a href="{{ url_for('manage_documents', staff_console='manager') }}" class="card">
-                    <h3>Forms / documents</h3>
-                    <div class="number">{{ documents_count }}</div>
-                    <p class="hint">Forms for this store. Manage library access and assignments.</p>
+                    <div class="card-visual card-visual-documents" aria-hidden="true">
+                        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <rect x="12" y="10" width="30" height="40" rx="3" fill="rgba(255,255,255,0.08)" stroke="#ffb4b4" stroke-width="2"/>
+                            <rect x="22" y="16" width="30" height="40" rx="3" fill="rgba(254,1,0,0.18)" stroke="#fff" stroke-width="2"/>
+                            <path d="M28 28h18M28 36h18M28 44h12" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+                            <path d="M46 48l8 8" stroke="#FE0100" stroke-width="2.5" stroke-linecap="round"/>
+                            <circle cx="42" cy="44" r="6" stroke="#ffb4b4" stroke-width="2"/>
+                        </svg>
+                        <span class="card-badge">{{ documents_count }}</span>
+                    </div>
+                    <div class="card-body">
+                        <h3>Forms / documents</h3>
+                        <p class="hint">Forms for this store. Manage library access and assignments.</p>
+                    </div>
                 </a>
                 {% endif %}
                 {% if can_training %}
                 <a href="{{ url_for('manage_training', staff_console='manager') }}" class="card">
-                    <h3>Training library</h3>
-                    <div class="number">→</div>
-                    <p class="hint">Manage training videos for onboarding.</p>
+                    <div class="card-visual card-visual-training" aria-hidden="true">
+                        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <rect x="10" y="16" width="44" height="32" rx="4" fill="rgba(255,255,255,0.08)" stroke="#fff" stroke-width="2"/>
+                            <path d="M28 30l14 8-14 8V30z" fill="#FE0100" stroke="#ffb4b4" stroke-width="1.5" stroke-linejoin="round"/>
+                            <rect x="16" y="12" width="8" height="6" rx="1.5" fill="rgba(254,1,0,0.35)" stroke="#ffb4b4" stroke-width="1.5"/>
+                            <path d="M12 52h40" stroke="#ffb4b4" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </div>
+                    <div class="card-body">
+                        <h3>Training library</h3>
+                        <p class="hint">Manage training videos for onboarding.</p>
+                    </div>
                 </a>
                 {% endif %}
                 {% if can_checklist or can_user_checklists %}
                 <a href="{{ url_for('view_user_checklists', staff_console='manager') }}" class="card">
-                    <h3>Onboarding checklists</h3>
-                    <div class="number">→</div>
-                    <p class="hint">View checklist progress for new hires at your store.</p>
+                    <div class="card-visual card-visual-checklists" aria-hidden="true">
+                        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <rect x="14" y="8" width="36" height="48" rx="4" fill="rgba(255,255,255,0.08)" stroke="#fff" stroke-width="2"/>
+                            <rect x="22" y="4" width="20" height="8" rx="2" fill="rgba(254,1,0,0.35)" stroke="#ffb4b4" stroke-width="1.5"/>
+                            <path d="M22 24l4 4 8-9" stroke="#FE0100" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="M22 36l4 4 8-9" stroke="#ffb4b4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="M22 48h16" stroke="#fff" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+                        </svg>
+                    </div>
+                    <div class="card-body">
+                        <h3>Onboarding checklists</h3>
+                        <p class="hint">View checklist progress for new hires at your store.</p>
+                    </div>
                 </a>
                 {% endif %}
             </div>
@@ -10561,141 +10857,24 @@ def manager_dashboard():
 @app.route('/admin/settings')
 @admin_required
 def settings_page():
-    """Settings: stores (locations), manager permissions info. Assign store/role/permissions via Manage Users."""
-    stores = Store.query.order_by(Store.name).all()
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Settings - Onboarding App</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
-            body { background: #f5f5f5; }
-            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
-            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
-            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
-            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
-            .header-right { display: flex; align-items: center; gap: 16px; }
-            .user-dropdown { cursor: pointer; position: relative; }
-            .user-icon { width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em; }
-            .user-dropdown:hover .user-icon { background: #d90000; }
-            .dropdown-menu { display: none; position: absolute; top: 100%; right: 0; margin-top: 8px; background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); z-index: 1000; padding: 8px 0; border: 1px solid #eee; }
-            .dropdown-menu.show { display: block; }
-            .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
-            .dropdown-item:hover { background: #f5f5f5; }
-            .container { max-width: 900px; margin: 24px auto; padding: 0 20px; }
-            .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
-            .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
-            .form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
-            .form-group { flex: 1; min-width: 140px; }
-            .form-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 4px; }
-            .form-group input { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 0.35rem; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
-            th { background: #f8f9fa; font-weight: 600; font-size: 0.85em; }
-            .btn { display: inline-block; padding: 6px 12px; border-radius: 0.35rem; border: none; cursor: pointer; font-size: 0.85em; text-decoration: none; }
-            .btn-primary { background: #FE0100; color: white; }
-            .btn-danger { background: #dc3545; color: white; }
-            .btn-secondary { background: #6c757d; color: white; }
-            p { margin-bottom: 12px; color: #444; }
-            ul { margin-left: 20px; margin-bottom: 12px; }
-        {{ global_theme_css|safe }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>⚙️ Settings</h1>
-            <div class="header-right">
-                <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
-                <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('settingsUserDropdown').classList.toggle('show');">
-                    <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
-                    <div class="dropdown-menu" id="settingsUserDropdown">
-                        {{ staff_console_dropdown_links }}
-                    </div>
-                </div>
-            </div>
-        </div>
-        <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('settingsUserDropdown').classList.remove('show'); });</script>
-        <div class="container">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-            <div style="margin-bottom: 20px;">
-                {% for category, msg in messages %}
-                <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
-                {% endfor %}
-            </div>
-            {% endif %}
-            {% endwith %}
-            <div class="card">
-                <h2>Store locations</h2>
-                <p>Stores are used to scope what managers and users see. Assign a store to users in <a href="{{ url_for('manage_users') }}">Manage Users</a>. Documents can be visible to all stores or to one store.</p>
-                <form method="POST" action="{{ url_for('settings_add_store') }}" style="margin-bottom: 20px;">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Store name</label>
-                            <input type="text" name="name" placeholder="e.g. Downtown" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Code (optional)</label>
-                            <input type="text" name="code" placeholder="e.g. STORE01">
-                        </div>
-                        <div class="form-group" style="flex: 0;">
-                            <button type="submit" class="btn btn-primary">Add store</button>
-                        </div>
-                    </div>
-                </form>
-                {% if stores %}
-                <table>
-                    <thead><tr><th>Name</th><th>Code</th><th></th></tr></thead>
-                    <tbody>
-                        {% for store in stores %}
-                        <tr>
-                            <td>{{ store.name }}</td>
-                            <td>{{ store.code or '-' }}</td>
-                            <td>
-                                <a href="{{ url_for('settings_edit_store', store_id=store.id) }}" class="btn btn-secondary" style="margin-right: 8px;">Edit</a>
-                                <form method="POST" action="{{ url_for('settings_delete_store', store_id=store.id) }}" style="display: inline;" onsubmit="return confirm('Delete {{ store.name }}? Users and documents linked to it will have store cleared.');">
-                                    <button type="submit" class="btn btn-danger">Delete</button>
-                                </form>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-                {% else %}
-                <p style="color: #666;">No stores yet. Add one above; then assign stores to users and documents.</p>
-                {% endif %}
-            </div>
-            <div class="card">
-                <h2>Manager permissions</h2>
-                <p>Managers can be given limited access. When you set a user's role to <strong>Manager</strong> in <a href="{{ url_for('manage_users') }}">Manage Users</a>, you can choose what they can do:</p>
-                <ul>
-                    {% for key, label in manager_permission_keys %}
-                    <li><strong>{{ key }}</strong>: {{ label }}</li>
-                    {% endfor %}
-                </ul>
-                <p>Managers and users only see data for their assigned store. Documents with "all stores" are visible to everyone. Admins see everything.</p>
-            </div>
-        </div>
-    </body>
-    </html>
-    ''', stores=stores, manager_permission_keys=MANAGER_PERMISSION_KEYS)
+    """Legacy URL — store management lives on Manage Stores."""
+    return redirect(url_for('manage_stores'))
 
 
+@app.route('/admin/stores/<int:store_id>/edit', methods=['GET', 'POST'])
 @app.route('/admin/settings/stores/<int:store_id>/edit', methods=['GET', 'POST'])
 @admin_required
-def settings_edit_store(store_id):
+def manage_store_edit(store_id):
     """Edit store name and code."""
     store = Store.query.get(store_id)
     if not store:
         flash('Store not found.', 'error')
-        return redirect(url_for('settings_page'))
+        return redirect(url_for('manage_stores'))
     if request.method == 'POST':
         name = (request.form.get('name') or '').strip()
         if not name:
             flash('Store name is required.', 'error')
-            return redirect(url_for('settings_edit_store', store_id=store_id))
+            return redirect(url_for('manage_store_edit', store_id=store_id))
         code = (request.form.get('code') or '').strip() or None
         try:
             store.name = name
@@ -10705,7 +10884,7 @@ def settings_edit_store(store_id):
         except Exception as e:
             db.session.rollback()
             flash(f'Error updating store: {str(e)}', 'error')
-        return redirect(url_for('settings_page'))
+        return redirect(url_for('manage_stores'))
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -10734,7 +10913,7 @@ def settings_edit_store(store_id):
     <body>
         <div class="header">
             <h1>✏️ Edit Store</h1>
-            <a href="{{ url_for('settings_page') }}" class="back-btn">← Back to Settings</a>
+            <div class="header-actions"><a href="{{ url_for('manage_stores') }}" class="back-btn">← Back to Manage Stores</a></div>
         </div>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -10748,7 +10927,7 @@ def settings_edit_store(store_id):
             {% endwith %}
             <div class="card">
                 <h2>{{ store.name }}</h2>
-                <form method="POST" action="{{ url_for('settings_edit_store', store_id=store.id) }}">
+                <form method="POST" action="{{ url_for('manage_store_edit', store_id=store.id) }}">
                     <div class="form-group">
                         <label for="name">Store name</label>
                         <input type="text" name="name" id="name" value="{{ store.name }}" required placeholder="e.g. Downtown">
@@ -10758,7 +10937,7 @@ def settings_edit_store(store_id):
                         <input type="text" name="code" id="code" value="{{ store.code or '' }}" placeholder="e.g. STORE01">
                     </div>
                     <button type="submit" class="btn btn-primary">Save</button>
-                    <a href="{{ url_for('settings_page') }}" class="btn btn-secondary">Cancel</a>
+                    <a href="{{ url_for('manage_stores') }}" class="btn btn-secondary">Cancel</a>
                 </form>
             </div>
         </div>
@@ -10767,13 +10946,14 @@ def settings_edit_store(store_id):
     ''', store=store)
 
 
+@app.route('/admin/stores/add', methods=['POST'])
 @app.route('/admin/settings/stores/add', methods=['POST'])
 @admin_required
-def settings_add_store():
+def manage_stores_add():
     name = (request.form.get('name') or '').strip()
     if not name:
         flash('Store name is required.', 'error')
-        return redirect(url_for('settings_page'))
+        return redirect(url_for('manage_stores'))
     code = (request.form.get('code') or '').strip() or None
     try:
         store = Store(name=name, code=code)
@@ -10783,16 +10963,17 @@ def settings_add_store():
     except Exception as e:
         db.session.rollback()
         flash(f'Error adding store: {str(e)}', 'error')
-    return redirect(url_for('settings_page'))
+    return redirect(url_for('manage_stores'))
 
 
+@app.route('/admin/stores/<int:store_id>/delete', methods=['POST'])
 @app.route('/admin/settings/stores/<int:store_id>/delete', methods=['POST'])
 @admin_required
-def settings_delete_store(store_id):
+def manage_store_delete(store_id):
     store = Store.query.get(store_id)
     if not store:
         flash('Store not found.', 'error')
-        return redirect(url_for('settings_page'))
+        return redirect(url_for('manage_stores'))
     try:
         UserModel.query.filter_by(store_id=store_id).update({UserModel.store_id: None})
         NewHire.query.filter_by(store_id=store_id).update({NewHire.store_id: None})
@@ -10803,7 +10984,7 @@ def settings_delete_store(store_id):
     except Exception as e:
         db.session.rollback()
         flash(f'Error: {str(e)}', 'error')
-    return redirect(url_for('settings_page'))
+    return redirect(url_for('manage_stores'))
 
 
 @app.route('/admin/stores')
@@ -10854,8 +11035,15 @@ def manage_stores():
             .btn-primary:hover { background: #cc0000; color: white; }
             .btn-secondary { background: #6c757d; color: white; }
             .btn-secondary:hover { background: #5a6268; color: white; }
+            .btn-danger { background: #dc3545; color: white; }
+            .btn-danger:hover { background: #c82333; color: white; }
             .count { font-weight: 600; color: #333; }
             .count-muted { color: #666; font-weight: normal; }
+            .form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+            .form-group { flex: 1; min-width: 140px; }
+            .form-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 4px; }
+            .form-group input { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 0.35rem; }
+            .store-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
         {{ global_theme_css|safe }}
         </style>
     </head>
@@ -10863,7 +11051,7 @@ def manage_stores():
         <div class="header">
             <h1>🏪 Manage Stores</h1>
             <div class="header-right">
-                <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('manageStoresUserDropdown').classList.toggle('show');">
                     <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
                     <div class="dropdown-menu" id="manageStoresUserDropdown">
@@ -10874,9 +11062,36 @@ def manage_stores():
         </div>
         <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('manageStoresUserDropdown').classList.remove('show'); });</script>
         <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <div style="margin-bottom: 20px;">
+                {% for category, msg in messages %}
+                <div style="padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% endwith %}
+            <div class="card">
+                <h2>Add store</h2>
+                <p style="margin-bottom: 16px; color: #555;">Stores scope what managers and users see. Assign a store in <a href="{{ url_for('manage_users') }}">Manage Users</a>; set document visibility in <a href="{{ url_for('manage_documents') }}">Manage Forms</a>.</p>
+                <form method="POST" action="{{ url_for('manage_stores_add') }}" style="margin-bottom: 8px;">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Store name</label>
+                            <input type="text" name="name" placeholder="e.g. Downtown" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Code (optional)</label>
+                            <input type="text" name="code" placeholder="e.g. STORE01">
+                        </div>
+                        <div class="form-group" style="flex: 0;">
+                            <button type="submit" class="btn btn-primary">Add store</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
             <div class="card">
                 <h2>Stores</h2>
-                <p style="margin-bottom: 16px; color: #555;">View each store's managers, users, and forms. Add or delete stores in <a href="{{ url_for('settings_page') }}">Settings</a>.</p>
                 {% if store_stats %}
                 <table>
                     <thead>
@@ -10897,13 +11112,21 @@ def manage_stores():
                             <td><span class="count">{{ s.managers_count }}</span></td>
                             <td><span class="count">{{ s.users_count }}</span></td>
                             <td><span class="count">{{ s.forms_count }}</span></td>
-                            <td><a href="{{ url_for('store_detail', store_id=s.store.id) }}" class="btn btn-primary">View details</a></td>
+                            <td>
+                                <div class="store-actions">
+                                    <a href="{{ url_for('store_detail', store_id=s.store.id) }}" class="btn btn-primary">View details</a>
+                                    <a href="{{ url_for('manage_store_edit', store_id=s.store.id) }}" class="btn btn-secondary">Edit</a>
+                                    <form method="POST" action="{{ url_for('manage_store_delete', store_id=s.store.id) }}" style="display: inline;" onsubmit="return confirm('Delete {{ s.store.name }}? Users and documents linked to it will have store cleared.');">
+                                        <button type="submit" class="btn btn-danger">Delete</button>
+                                    </form>
+                                </div>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
                 {% else %}
-                <p style="color: #666;">No stores yet. <a href="{{ url_for('settings_page') }}">Add stores in Settings</a>.</p>
+                <p style="color: #666;">No stores yet. Add one above, then assign stores to users and documents.</p>
                 {% endif %}
             </div>
         </div>
@@ -10923,6 +11146,7 @@ def store_detail(store_id):
     managers = UserModel.query.filter_by(store_id=store_id, role='manager').order_by(UserModel.username).all()
     users = UserModel.query.filter_by(store_id=store_id, role='user').order_by(UserModel.username).all()
     forms = Document.query.filter_by(store_id=store_id).order_by(Document.original_filename).all()
+    store_training_videos = training_videos_for_store_detail(store_id)
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -10953,7 +11177,7 @@ def store_detail(store_id):
     <body>
         <div class="header">
             <h1>🏪 {{ store.name }}{% if store.code %} ({{ store.code }}){% endif %}</h1>
-            <a href="{{ url_for('manage_stores') }}" class="back-btn">← All stores</a>
+            <div class="header-actions"><a href="{{ url_for('manage_stores') }}" class="back-btn">← All stores</a></div>
         </div>
         <div class="container">
             <div class="card">
@@ -11020,10 +11244,32 @@ def store_detail(store_id):
                 <p class="empty">No forms scoped only to this store. Forms set to "All stores" are visible to everyone. Use the link above to add or edit forms.</p>
                 {% endif %}
             </div>
+            <div class="card">
+                <h2>Training videos for this store</h2>
+                <p class="sub">Videos scoped to this store. Set store visibility when uploading or editing in Manage Training.</p>
+                <p class="sub" style="margin-bottom: 12px;"><a href="{{ url_for('manage_training', staff_console='admin') }}" class="btn btn-secondary" style="text-decoration: none;">→ Change which training videos this store can see (Manage Training)</a></p>
+                {% if store_training_videos %}
+                <table>
+                    <thead><tr><th>Title</th><th>Description</th><th>Status</th><th></th></tr></thead>
+                    <tbody>
+                        {% for video in store_training_videos %}
+                        <tr>
+                            <td><strong>{{ video.title }}</strong></td>
+                            <td>{{ video.description[:80] if video.description else '-' }}{% if video.description and video.description|length > 80 %}...{% endif %}</td>
+                            <td>{{ 'Active' if video.is_active else 'Hidden' }}</td>
+                            <td><a href="{{ url_for('manage_training', staff_console='admin') }}" class="btn btn-secondary">Edit in Manage Training</a></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="empty">No training videos scoped only to this store. Videos set to "All stores" are visible to everyone. Use the link above to assign videos.</p>
+                {% endif %}
+            </div>
         </div>
     </body>
     </html>
-    ''', store=store, managers=managers, users=users, forms=forms)
+    ''', store=store, managers=managers, users=users, forms=forms, store_training_videos=store_training_videos)
 
 
 @app.route('/admin/users')
@@ -11333,6 +11579,17 @@ def manage_users():
                 background: rgba(255, 255, 255, 0.05) !important;
                 color: #9aa5b8 !important;
             }
+            body.manage-users-page .modal-content select,
+            body.manage-users-page .modal-content select option,
+            body.manage-users-page .modal-content select optgroup {
+                background: #121a26 !important;
+                color: #f2f5fb !important;
+            }
+            body.manage-users-page .modal-content select option:checked,
+            body.manage-users-page .modal-content select option:hover {
+                background: #1e2a3d !important;
+                color: #ffffff !important;
+            }
             body.manage-users-page .you-label {
                 color: #9aa5b8;
                 font-size: 0.9em;
@@ -11346,7 +11603,7 @@ def manage_users():
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
             <div class="header-right">
-                <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+                <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
                 <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('manageUsersUserDropdown').classList.toggle('show');">
                     <div class="user-icon">{{ (admin_name or 'A')[0].upper() }}</div>
                     <div class="dropdown-menu" id="manageUsersUserDropdown">
@@ -11745,7 +12002,7 @@ def manage_roles():
     <body>
         <div class="header">
             <h1>🎭 Manage Position/Title</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         <div class="container">
             <div class="panel">
@@ -11885,7 +12142,7 @@ def manage_departments():
     <body>
         <div class="header">
             <h1>Manage Departments</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         <div class="container">
             <div class="panel">
@@ -12074,7 +12331,7 @@ def admin_test_form():
     <body class="test-form-wizard-page">
         <div class="header">
             <h1>Test Form Wizard</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         <div class="container">
             <div class="panel">
@@ -12661,7 +12918,7 @@ def admin_test_form_review():
     <body class="test-form-wizard-page">
         <div class="header">
             <h1>Completed form review</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Dashboard</a>
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Dashboard</a></div>
         </div>
         <div class="container">
             <div class="panel">
@@ -12853,7 +13110,7 @@ def role_default_documents(role_id):
     <body>
         <div class="header">
             <h1>Default documents: {{ role.name }}</h1>
-            <a href="{{ url_for('manage_roles') }}" class="back-btn">← Back to Position/Titles</a>
+            <div class="header-actions"><a href="{{ url_for('manage_roles') }}" class="back-btn">← Back to Position/Titles</a></div>
         </div>
         <div class="container">
             <div class="panel">
@@ -13060,7 +13317,7 @@ def manage_admins():
     <body>
         <div class="header">
             <h1>🛡️ Manage Admins</h1>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -13366,14 +13623,15 @@ def manage_documents():
     """Manage documents - upload and manage new hire paperwork. Admin or manager with manage_documents permission. Managers see only forms for their store, view/download only."""
     if not current_user.is_admin() and not manager_has_permission('manage_documents'):
         abort(403)
-    is_manager_only = current_user.is_manager() and not current_user.is_admin()
-    is_manager_view = is_manager_only
+    is_manager_view = uses_manager_console_scope()
     try:
         store_id = get_current_user_store_id()
-        if is_manager_only and store_id is not None:
+        if is_manager_view and store_id is not None:
             # Only documents visible to this store (is_visible and assigned to this store or all stores)
             q = documents_visible_to_store_query(store_id).order_by(Document.created_at.desc())
             documents = q.all()
+        elif is_manager_view:
+            documents = []
         else:
             documents = Document.query.order_by(Document.created_at.desc()).all()
     except Exception as e:
@@ -13388,9 +13646,11 @@ def manage_documents():
                 db.session.rollback()
                 flash('Database update needed. Run this SQL on your database: ALTER TABLE documents ADD display_name NVARCHAR(255) NULL;', 'error')
                 return redirect(staff_console_home_url())
-            if is_manager_only and get_current_user_store_id() is not None:
+            if is_manager_view and get_current_user_store_id() is not None:
                 sid = get_current_user_store_id()
                 documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
+            elif is_manager_view:
+                documents = []
             else:
                 documents = Document.query.order_by(Document.created_at.desc()).all()
         else:
@@ -13432,9 +13692,11 @@ def manage_documents():
                 doc.signed_users_count = 0
     except Exception as e:
         # If anything fails, provide default values
-        if is_manager_only and get_current_user_store_id() is not None:
+        if is_manager_view and get_current_user_store_id() is not None:
             sid = get_current_user_store_id()
             documents = documents_visible_to_store_query(sid).order_by(Document.created_at.desc()).all()
+        elif is_manager_view:
+            documents = []
         else:
             documents = Document.query.order_by(Document.created_at.desc()).all()
         for doc in documents:
@@ -14038,7 +14300,7 @@ def manage_documents():
             <div class="header-content">
                 <h1>📄 Manage Documents</h1>
             </div>
-            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -14516,7 +14778,8 @@ def upload_document():
     """Upload a new document. Admin or manager with manage_documents permission."""
     if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         abort(403)
-    is_manager_only = current_user.is_manager() and not current_user.is_admin()
+    if uses_manager_console_scope():
+        abort(403)
     if 'file' not in request.files:
         flash('No file selected.', 'error')
         return redirect(url_for('manage_documents'))
@@ -14554,7 +14817,7 @@ def upload_document():
         if store_id_raw and store_id_raw.isdigit():
             sid = int(store_id_raw)
             if Store.query.get(sid):
-                if is_manager_only:
+                if document_manage_requires_store_scope():
                     my_sid = get_current_user_store_id()
                     if my_sid is not None and sid != my_sid:
                         sid = my_sid  # managers can only assign their store or all
@@ -14692,16 +14955,19 @@ def document_update_stores(doc_id):
     """Update which stores can see this document. Form: all=1 for all stores, or store_ids list."""
     if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         abort(403)
-    is_manager_only = current_user.is_manager() and not current_user.is_admin()
+    is_manager_scoped = document_manage_requires_store_scope()
     document = Document.query.get(doc_id)
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('manage_documents'))
-    if is_manager_only:
+    if is_manager_scoped:
         my_sid = get_current_user_store_id()
         if my_sid is None:
             flash('You must be assigned to a store to change document library settings.', 'error')
             return redirect(url_for('manage_documents'))
+        _attach_document_store_lists([document])
+        if not document_visible_to_store(document, my_sid):
+            abort(403)
     try:
         _ensure_stores_and_store_id()
         db.session.execute(
@@ -14717,7 +14983,7 @@ def document_update_stores(doc_id):
                     continue
                 if sid in seen:
                     continue
-                if is_manager_only and sid != my_sid:
+                if is_manager_scoped and sid != my_sid:
                     continue
                 if Store.query.get(sid):
                     seen.add(sid)
@@ -14909,15 +15175,15 @@ def rename_document(doc_id):
     """Rename a document and set store visibility. Admin or manager with manage_documents."""
     if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         abort(403)
-    is_manager_only = current_user.is_manager() and not current_user.is_admin()
+    is_manager_scoped = document_manage_requires_store_scope()
     document = Document.query.get(doc_id)
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('manage_documents'))
-    # Managers can only edit documents they can see (all stores or their store)
-    if is_manager_only:
+    if is_manager_scoped:
         sid = get_current_user_store_id()
-        if document.store_id is not None and (sid is None or document.store_id != sid):
+        _attach_document_store_lists([document])
+        if sid is None or not document_visible_to_store(document, sid):
             abort(403)
     current_name = document.display_name or document.original_filename or ''
     stores = Store.query.order_by(Store.name).all()
@@ -14936,7 +15202,7 @@ def rename_document(doc_id):
                     document.store_id = None
                 else:
                     sid = int(store_id_raw)
-                    if is_manager_only:
+                    if is_manager_scoped:
                         my_sid = get_current_user_store_id()
                         if my_sid is not None and sid != my_sid:
                             document.store_id = my_sid
@@ -15018,7 +15284,7 @@ def rename_document(doc_id):
     <body>
         <div class="header">
             <div class="header-content"><h1>✏️ Rename Document</h1></div>
-            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a>
+            <div class="header-actions"><a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a></div>
         </div>
         <div class="container">
             <div class="panel">
@@ -15622,7 +15888,7 @@ def set_signature_fields(doc_id):
             <div class="header-content">
                 <h1>✍️ Set Signature Fields - {{ document.name_for_users }}</h1>
             </div>
-            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a>
+            <div class="header-actions"><a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a></div>
         </div>
         
         <div class="container">
@@ -17798,7 +18064,7 @@ def assign_document(doc_id):
             <div class="header-content">
                 <h1>👤 Assign Document - {{ document.original_filename }}</h1>
             </div>
-            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a>
+            <div class="header-actions"><a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a></div>
         </div>
         
         <div class="container">
@@ -18637,18 +18903,18 @@ def view_document_embed(doc_id, username=None):
         return "Document not found.", 404
     
     # Check permissions: admin can view all; manager with manage_documents can view store-visible docs; others need assignment
-    if not current_user.is_admin():
-        if current_user.is_manager() and manager_has_permission('manage_documents'):
-            user_store_id = get_current_user_store_id()
-            if not document_visible_to_store(document, user_store_id):
-                return "This document is not available.", 403
-        else:
-            assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
-            if not assignment:
-                return "This document has not been assigned to you.", 403
-            user_store_id = get_current_user_store_id()
-            if not document_visible_to_store(document, user_store_id):
-                return "This document is not available.", 403
+    if document_manage_requires_store_scope():
+        user_store_id = get_current_user_store_id()
+        _attach_document_store_lists([document])
+        if not document_visible_to_store(document, user_store_id):
+            return "This document is not available.", 403
+    elif not current_user.is_admin():
+        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+        if not assignment:
+            return "This document has not been assigned to you.", 403
+        user_store_id = get_current_user_store_id()
+        if not document_visible_to_store(document, user_store_id):
+            return "This document is not available.", 403
 
     file_path = resolve_document_file_path(document)
     if not file_path:
@@ -21932,21 +22198,21 @@ def download_document(doc_id):
         return redirect(url_for('dashboard'))
     
     # Check permissions: admin can download all; manager with manage_documents can download store-visible docs; others need assignment
-    if not current_user.is_admin():
-        if current_user.is_manager() and manager_has_permission('manage_documents'):
-            user_store_id = get_current_user_store_id()
-            if not document_visible_to_store(document, user_store_id):
-                flash('This document is not available.', 'error')
-                return redirect(url_for('manage_documents'))
-        else:
-            assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
-            if not assignment:
-                flash('This document has not been assigned to you.', 'error')
-                return redirect(url_for('dashboard'))
-            user_store_id = get_current_user_store_id()
-            if not document_visible_to_store(document, user_store_id):
-                flash('This document is not available.', 'error')
-                return redirect(url_for('dashboard'))
+    if document_manage_requires_store_scope():
+        user_store_id = get_current_user_store_id()
+        _attach_document_store_lists([document])
+        if not document_visible_to_store(document, user_store_id):
+            flash('This document is not available.', 'error')
+            return redirect(url_for('manage_documents'))
+    elif not current_user.is_admin():
+        assignment = DocumentAssignment.query.filter_by(document_id=doc_id, username=current_user.username).first()
+        if not assignment:
+            flash('This document has not been assigned to you.', 'error')
+            return redirect(url_for('dashboard'))
+        user_store_id = get_current_user_store_id()
+        if not document_visible_to_store(document, user_store_id):
+            flash('This document is not available.', 'error')
+            return redirect(url_for('dashboard'))
     
     # Check if file exists
     if not os.path.exists(document.file_path):
@@ -21954,7 +22220,8 @@ def download_document(doc_id):
         return redirect(url_for('dashboard'))
     
     # For regular users, generate and download their signed version; for admins and managers (viewing from forms page), download original
-    if not current_user.is_admin() and not (current_user.is_manager() and manager_has_permission('manage_documents')):
+    admin_full_doc_access = current_user.is_admin() and not document_manage_requires_store_scope()
+    if not admin_full_doc_access and not (current_user.is_manager() and manager_has_permission('manage_documents')):
         # Generate signed PDF for this user
         try:
             # Get user's signatures for this document
@@ -22368,7 +22635,7 @@ def view_signed_documents(doc_id):
             <div class="header-content">
                 <h1>📥 Signed Copies - {{ document.name_for_users }}</h1>
             </div>
-            <a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a>
+            <div class="header-actions"><a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a></div>
         </div>
         
         <div class="container">
@@ -22798,7 +23065,7 @@ def view_form_signatures(doc_id):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -23644,7 +23911,7 @@ def view_new_hire_details(username):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -24103,7 +24370,7 @@ def admin_assign_task():
     <body class="assign-task-page">
         <div class="header">
             <h1>Assign task to user</h1>
-            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         <div class="container">
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -24742,7 +25009,7 @@ def manage_checklist():
             <div class="header-content">
                 <h1>✅ Manage New Hire Checklist</h1>
             </div>
-            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -24984,7 +25251,7 @@ def edit_checklist_item(item_id):
             <div class="header-content">
                 <h1>Edit Checklist Item</h1>
             </div>
-            <a href="{{ url_for('manage_checklist') }}" class="back-btn">← Back to Checklist</a>
+            <div class="header-actions"><a href="{{ url_for('manage_checklist') }}" class="back-btn">← Back to Checklist</a></div>
         </div>
         
         <div class="container">
@@ -25336,7 +25603,7 @@ def view_checklist():
             <div class="header-content">
                 <h1>✅ New Hire Checklist</h1>
             </div>
-            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -25736,7 +26003,7 @@ def view_user_checklists():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -26044,7 +26311,7 @@ def view_user_checklist(username):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('view_user_checklists') }}" class="back-btn">← Back to User List</a>
+            <div class="header-actions"><a href="{{ url_for('view_user_checklists') }}" class="back-btn">← Back to User List</a></div>
         </div>
         
         <div class="container">
@@ -26629,7 +26896,7 @@ def manage_external_links():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -27283,7 +27550,7 @@ def edit_external_link(link_id):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('manage_external_links') }}" class="back-btn">← Back to Links</a>
+            <div class="header-actions"><a href="{{ url_for('manage_external_links') }}" class="back-btn">← Back to Links</a></div>
         </div>
         
         <div class="container">
@@ -28374,7 +28641,7 @@ def admin_reports():
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -28777,11 +29044,21 @@ def manage_training():
     """Manage harassment training videos and quizzes. Admin: full edit. Manager: view only, watch videos, see who watched and scores."""
     if not current_user.is_admin() and not manager_has_permission('manage_training'):
         abort(403)
-    videos = TrainingVideo.query.order_by(TrainingVideo.created_at.desc()).all()
-    is_manager_view = current_user.is_manager() and not current_user.is_admin()
+    _ensure_stores_and_store_id()
+    stores = Store.query.order_by(Store.name).all()
+    is_manager_view = uses_manager_console_scope()
+    manager_store_id = get_current_user_store_id() if is_manager_view else None
+    if is_manager_view:
+        videos = training_videos_visible_to_store_query(
+            manager_store_id,
+            base_filter=(TrainingVideo.is_active == True),
+        ).order_by(TrainingVideo.created_at.desc()).all()
+    else:
+        videos = TrainingVideo.query.order_by(TrainingVideo.created_at.desc()).all()
+        _attach_training_video_store_lists(videos)
     videos_with_progress = []  # used for manager view only
     if is_manager_view:
-        store_id = get_current_user_store_id()
+        store_id = manager_store_id
         store_usernames = None
         if store_id is not None:
             store_usernames = set(nh.username for nh in NewHire.query.filter_by(store_id=store_id).all())
@@ -28956,6 +29233,29 @@ def manage_training():
             .badge-active {
                 background: #28a745;
             }
+            .store-dropdown { position: relative; }
+            .store-cell { min-width: 140px; }
+            .store-check-row {
+                display: block;
+                padding: 6px 0;
+                cursor: pointer;
+                font-size: 0.9em;
+            }
+            .flash {
+                padding: 12px 16px;
+                border-radius: 0.5rem;
+                margin-bottom: 16px;
+            }
+            .flash-success {
+                background: rgba(52, 160, 90, 0.22);
+                color: #d4f5e2;
+                border: 1px solid rgba(80, 200, 130, 0.45);
+            }
+            .flash-error {
+                background: rgba(200, 70, 70, 0.28);
+                color: #ffecec;
+                border: 1px solid rgba(255, 120, 120, 0.45);
+            }
         {{ global_theme_css|safe }}
         </style>
     </head>
@@ -28964,10 +29264,17 @@ def manage_training():
             <div class="header-content">
                 <h1>🎓 Training Management</h1>
             </div>
-            <a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a>
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash flash-{{ category }}">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
             {% if not is_manager_view %}
             <div class="admin-panel">
                 <h2>Upload Training Video</h2>
@@ -29045,6 +29352,7 @@ def manage_training():
                 {% endif %}
                 {% else %}
                 {% if videos %}
+                <p style="color: #b7c1d3; font-size: 0.9em; margin-bottom: 12px; max-width: 720px;">Use <strong>Stores</strong> to limit which locations see each video. Leave as <strong>All stores</strong> for company-wide training.</p>
                 <table>
                     <thead>
                         <tr>
@@ -29053,6 +29361,7 @@ def manage_training():
                             <th>Questions</th>
                             <th>Passing Score</th>
                             <th>Status</th>
+                            <th>Stores</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -29068,15 +29377,35 @@ def manage_training():
                                     {{ 'Active' if video.is_active else 'Inactive' }}
                                 </span>
                             </td>
+                            <td class="store-cell">
+                                <div class="store-dropdown">
+                                    <button type="button" class="store-dropdown-btn" onclick="toggleTrainingStoreDropdown({{ video.id }})" title="Which stores can see this training video">
+                                        <span class="store-dropdown-label" id="training-store-label-{{ video.id }}">{% if not video.store_ids %}All stores{% else %}{{ video.store_ids|length }} store(s){% endif %}</span> ▾
+                                    </button>
+                                    <div class="store-dropdown-panel" id="training-store-panel-{{ video.id }}" style="display: none;">
+                                        <form method="POST" action="{{ url_for('training_video_update_stores', video_id=video.id) }}" class="store-form training-store-update-form" data-video-id="{{ video.id }}">
+                                            <label class="store-check-row"><input type="checkbox" name="all" value="1" {% if not video.store_ids %}checked{% endif %} onchange="toggleTrainingAllStores({{ video.id }})"> <strong>All stores</strong></label>
+                                            {% for store in stores %}
+                                            <label class="store-check-row"><input type="checkbox" name="store_ids" value="{{ store.id }}" class="training-store-cb-{{ video.id }}" {% if store.id in (video.store_ids|map(attribute='id')|list) %}checked{% endif %}> {{ store.name }} ({{ store.code }})</label>
+                                            {% endfor %}
+                                            <button type="submit" class="btn btn-primary btn-small" style="margin-top: 8px;">Save</button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </td>
                             <td>
                                 <a href="{{ url_for('manage_video_quiz', video_id=video.id) }}" class="btn btn-primary btn-small">Manage Quiz</a>
                                 <a href="{{ url_for('view_training_video', video_id=video.id) }}" class="btn btn-primary btn-small">View/Test</a>
-                                <form method="POST" action="{{ url_for('delete_training_video') }}" style="display: inline;">
+                                <form method="POST" action="{{ url_for('toggle_training_video_active') }}" style="display: inline;">
                                     <input type="hidden" name="video_id" value="{{ video.id }}">
-                                    <button type="submit" class="btn btn-danger btn-small" 
-                                            onclick="return confirm('Delete this training video?')">
-                                        Delete
+                                    <button type="submit" class="btn btn-secondary btn-small">
+                                        {{ 'Hide' if video.is_active else 'Show' }}
                                     </button>
+                                </form>
+                                <form method="POST" action="{{ url_for('delete_training_video') }}" style="display: inline;"
+                                      onsubmit="return confirm('Permanently delete this training video? This removes the video, quiz, and all user progress.');">
+                                    <input type="hidden" name="video_id" value="{{ video.id }}">
+                                    <button type="submit" class="btn btn-danger btn-small">Delete</button>
                                 </form>
                             </td>
                         </tr>
@@ -29089,9 +29418,62 @@ def manage_training():
                 {% endif %}
             </div>
         </div>
+        <script>
+            function toggleTrainingAllStores(videoId) {
+                var form = document.querySelector('#training-store-panel-' + videoId + ' form');
+                if (!form) return;
+                var allCb = form.querySelector('input[name="all"]');
+                form.querySelectorAll('.training-store-cb-' + videoId).forEach(function(cb) {
+                    cb.checked = false;
+                    cb.disabled = allCb && allCb.checked;
+                });
+            }
+            function toggleTrainingStoreDropdown(videoId) {
+                var panel = document.getElementById('training-store-panel-' + videoId);
+                if (!panel) return;
+                var isHidden = panel.style.display === 'none';
+                document.querySelectorAll('.store-dropdown-panel').forEach(function(p) {
+                    p.style.display = 'none';
+                });
+                panel.style.display = isHidden ? 'block' : 'none';
+            }
+            document.querySelectorAll('.training-store-update-form').forEach(function(form) {
+                form.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    var videoId = form.getAttribute('data-video-id');
+                    fetch(form.getAttribute('action'), {
+                        method: 'POST',
+                        body: new FormData(form),
+                        credentials: 'same-origin',
+                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                    }).then(function(res) {
+                        if (res.redirected || res.ok) {
+                            var allCb = form.querySelector('input[name="all"]');
+                            var labelEl = document.getElementById('training-store-label-' + videoId);
+                            if (labelEl) {
+                                if (allCb && allCb.checked) {
+                                    labelEl.textContent = 'All stores';
+                                } else {
+                                    labelEl.textContent = form.querySelectorAll('input[name="store_ids"]:checked').length + ' store(s)';
+                                }
+                            }
+                            var panel = document.getElementById('training-store-panel-' + videoId);
+                            if (panel) panel.style.display = 'none';
+                        }
+                    }).catch(function() { form.submit(); });
+                });
+            });
+            document.addEventListener('click', function(event) {
+                if (!event.target.closest('.store-dropdown')) {
+                    document.querySelectorAll('.store-dropdown-panel').forEach(function(p) {
+                        p.style.display = 'none';
+                    });
+                }
+            });
+        </script>
     </body>
     </html>
-    ''', videos=videos, is_manager_view=is_manager_view, videos_with_progress=videos_with_progress)
+    ''', videos=videos, is_manager_view=is_manager_view, videos_with_progress=videos_with_progress, stores=stores)
 
 
 @app.route('/admin/training/upload', methods=['POST'])
@@ -29450,7 +29832,7 @@ def manage_video_quiz(video_id):
             <div class="header-content">
                 <h1>📝 Manage Quiz: {{ video.title }}</h1>
             </div>
-            <a href="{{ url_for('manage_training') }}" class="back-btn">← Back to Training</a>
+            <div class="header-actions"><a href="{{ url_for('manage_training') }}" class="back-btn">← Back to Training</a></div>
         </div>
         
         <div class="container">
@@ -29649,6 +30031,131 @@ def delete_quiz_question(question_id):
     return redirect(url_for('manage_video_quiz', video_id=video_id))
 
 
+def _purge_training_video_dependencies(video_id):
+    """Remove related rows so a training video can be deleted."""
+    video_id = int(video_id)
+    video = TrainingVideo.query.get(video_id)
+    if not video:
+        return
+
+    question_ids = [
+        row[0] for row in db.session.query(QuizQuestion.id).filter_by(video_id=video_id).all()
+    ]
+    progress_ids = [
+        row[0] for row in db.session.query(UserTrainingProgress.id).filter_by(video_id=video_id).all()
+    ]
+    answer_ids = []
+    if question_ids:
+        answer_ids = [
+            row[0] for row in db.session.query(QuizAnswer.id).filter(
+                QuizAnswer.question_id.in_(question_ids)
+            ).all()
+        ]
+
+    response_filters = []
+    if question_ids:
+        response_filters.append(UserQuizResponse.question_id.in_(question_ids))
+    if progress_ids:
+        response_filters.append(UserQuizResponse.progress_id.in_(progress_ids))
+    if answer_ids:
+        response_filters.append(UserQuizResponse.answer_id.in_(answer_ids))
+    if response_filters:
+        db.session.query(UserQuizResponse).filter(or_(*response_filters)).delete(
+            synchronize_session=False
+        )
+    db.session.flush()
+
+    UserTrainingProgress.query.filter_by(video_id=video_id).delete(synchronize_session=False)
+
+    if answer_ids:
+        QuizAnswer.query.filter(QuizAnswer.id.in_(answer_ids)).delete(synchronize_session=False)
+    QuizQuestion.query.filter_by(video_id=video_id).delete(synchronize_session=False)
+    db.session.flush()
+
+    db.session.execute(
+        new_hire_required_training.delete().where(
+            new_hire_required_training.c.video_id == video_id
+        )
+    )
+    db.session.execute(
+        training_video_stores.delete().where(
+            training_video_stores.c.video_id == video_id
+        )
+    )
+    UserTask.query.filter(
+        UserTask.task_type == 'training',
+        UserTask.notes.like(f'video_id:{video_id}%'),
+    ).delete(synchronize_session=False)
+    UserNotification.query.filter_by(
+        notification_type='training',
+        notification_id=str(video_id),
+    ).delete(synchronize_session=False)
+
+
+@app.route('/admin/training/<int:video_id>/update-stores', methods=['POST'])
+@admin_required
+def training_video_update_stores(video_id):
+    """Update which stores can see a training video. Form: all=1 for all stores, or store_ids list."""
+    video = TrainingVideo.query.get(video_id)
+    if not video:
+        flash('Training video not found.', 'error')
+        return redirect(url_for('manage_training'))
+    try:
+        _ensure_stores_and_store_id()
+        db.session.execute(
+            training_video_stores.delete().where(training_video_stores.c.video_id == video_id)
+        )
+        if request.form.get('all') != '1':
+            ids_raw = request.form.getlist('store_ids')
+            seen = set()
+            for sid in ids_raw:
+                try:
+                    sid = int(sid)
+                except (ValueError, TypeError):
+                    continue
+                if sid in seen:
+                    continue
+                if Store.query.get(sid):
+                    seen.add(sid)
+                    db.session.execute(
+                        training_video_stores.insert().values(video_id=video_id, store_id=sid)
+                    )
+        db.session.commit()
+        flash(f'Store visibility updated for "{video.title}".', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating store visibility: {str(e)}', 'error')
+    return redirect(url_for('manage_training'))
+
+
+@app.route('/admin/training/toggle-active', methods=['POST'])
+@admin_required
+def toggle_training_video_active():
+    """Hide or show a training video for users without deleting it."""
+    video_id = request.form.get('video_id')
+    if not video_id:
+        flash('Video ID is required.', 'error')
+        return redirect(url_for('manage_training'))
+
+    video = TrainingVideo.query.get(video_id)
+    if not video:
+        flash('Training video not found.', 'error')
+        return redirect(url_for('manage_training'))
+
+    try:
+        video.is_active = not video.is_active
+        db.session.commit()
+        if video.is_active:
+            flash(f'"{video.title}" is now visible to users.', 'success')
+        else:
+            flash(f'"{video.title}" is hidden from users. You can show it again anytime.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error updating video status: {str(e)}', 'error')
+
+    return redirect(url_for('manage_training'))
+
+
 @app.route('/admin/training/delete', methods=['POST'])
 @admin_required
 def delete_training_video():
@@ -29666,23 +30173,18 @@ def delete_training_video():
         return redirect(url_for('manage_training'))
     
     try:
-        # Delete file
-        if os.path.exists(video.file_path):
-            os.remove(video.file_path)
-        
-        # Delete questions and answers
-        for question in video.questions:
-            QuizAnswer.query.filter_by(question_id=question.id).delete()
-        QuizQuestion.query.filter_by(video_id=video_id).delete()
-        
-        # Delete user progress
-        UserTrainingProgress.query.filter_by(video_id=video_id).delete()
-        
-        # Delete video
+        title = video.title
+        file_path = video.file_path
+
+        _purge_training_video_dependencies(video_id)
+
         db.session.delete(video)
         db.session.commit()
+
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
         
-        flash(f'Training video "{video.title}" deleted successfully.', 'success')
+        flash(f'Training video "{title}" deleted successfully.', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error deleting video: {str(e)}', 'error')
@@ -29703,6 +30205,11 @@ def view_training_video(video_id):
     if not video.is_active:
         flash('This training video is not active.', 'error')
         return redirect(url_for('dashboard'))
+
+    user_store_id = get_current_user_store_id()
+    if not training_video_visible_to_store(video, user_store_id):
+        flash('This training video is not available for your store.', 'error')
+        return redirect(url_for('list_training_videos'))
     
     # Get or create user progress
     progress = UserTrainingProgress.query.filter_by(
@@ -30511,6 +31018,10 @@ def serve_training_video(video_id):
     # Check permissions
     if not video.is_active:
         return "Video not available", 403
+
+    user_store_id = get_current_user_store_id()
+    if not training_video_visible_to_store(video, user_store_id):
+        return "Video not available for your store", 403
     
     if not os.path.exists(video.file_path):
         return "Video file not found", 404
@@ -30846,7 +31357,11 @@ def list_training_videos():
     user_full_name = (current_user.username if current_user else 'User') or 'User'
 
     try:
-        videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.created_at.desc()).all()
+        user_store_id = get_current_user_store_id()
+        videos = training_videos_visible_to_store_query(
+            user_store_id,
+            base_filter=(TrainingVideo.is_active == True),
+        ).order_by(TrainingVideo.created_at.desc()).all()
 
         # Get user progress for each video
         for video in videos:
@@ -31092,23 +31607,6 @@ def list_training_videos():
                 margin-bottom: 15px;
                 font-size: 0.9em;
             }
-            .badge {
-                padding: 3px 8px;
-                border-radius: 12px;
-                font-size: 0.8em;
-                background: #6c757d;
-                color: white;
-            }
-            .badge-passed {
-                background: #28a745;
-            }
-            .badge-failed {
-                background: #FE0100;
-            }
-            .badge-in-progress {
-                background: #ffc107;
-                color: #000;
-            }
             .mobile-menu-toggle {
                 display: none;
                 background: none;
@@ -31222,16 +31720,12 @@ def list_training_videos():
                     {% if progress %}
                         <div class="progress-info">
                             {% if progress.is_completed %}
-                                <p><strong>Status:</strong> 
-                                    <span class="badge badge-{{ 'passed' if progress.is_passed else 'failed' }}">
-                                        {{ 'Passed' if progress.is_passed else 'Failed' }}
-                                    </span>
-                                </p>
+                                <p><strong>Status:</strong> {{ 'Passed' if progress.is_passed else 'Failed' }}</p>
                                 <p><strong>Score:</strong> {{ "%.0f"|format(progress.score or 0) }}%</p>
                                 <p><strong>Attempt:</strong> {{ progress.attempt_number }}</p>
                                 <p><strong>Time Watched:</strong> {{ "%.0f"|format(progress.time_watched or 0) }} seconds</p>
                             {% else %}
-                                <p><strong>Status:</strong> <span class="badge badge-in-progress">In Progress</span></p>
+                                <p><strong>Status:</strong> In Progress</p>
                                 <p><strong>Attempt:</strong> {{ progress.attempt_number }}</p>
                             {% endif %}
                         </div>

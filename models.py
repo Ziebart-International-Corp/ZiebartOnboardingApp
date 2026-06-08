@@ -60,6 +60,12 @@ new_hire_required_training = db.Table('new_hire_required_training',
     db.Column('video_id', db.Integer, db.ForeignKey('training_videos.id'), primary_key=True)
 )
 
+# Training video visibility per store (empty = all stores)
+training_video_stores = db.Table('training_video_stores',
+    db.Column('video_id', db.Integer, db.ForeignKey('training_videos.id'), primary_key=True),
+    db.Column('store_id', db.Integer, db.ForeignKey('stores.id'), primary_key=True)
+)
+
 
 class NewHire(db.Model):
     """New Hire model for tracking new employees"""
