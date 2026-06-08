@@ -44,7 +44,8 @@ from datetime import datetime
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import generate_password_hash, check_password_hash
-from markupsafe import Markup
+from markupsafe import Markup, escape
+from urllib.parse import unquote
 from io import BytesIO
 import base64
 import re
@@ -2144,6 +2145,227 @@ def _ensure_admin_settings_table():
         # Do not set migrated=True so we retry on next request
 
 
+DEFAULT_WELCOME_HEADLINE = 'Welcome to Ziebart International Corporation! Congratulations on your new role!'
+DEFAULT_WELCOME_BODY = (
+    'We are honored to have you join the team and are committed to supporting your success from day one.'
+)
+DEFAULT_FINALE_MESSAGE = (
+    'Congratulations on completing all of your onboarding tasks! '
+    'Your team appreciates your effort getting through everything. '
+    'If you have any questions, reach out to your manager.'
+)
+DEFAULT_ALL_TASKS_EMAIL_SUBJECT = 'Congratulations — you completed all onboarding tasks'
+DEFAULT_ALL_TASKS_EMAIL_BODY = (
+    'Hello,\n\n'
+    'Congratulations! You have completed all of your assigned onboarding tasks, '
+    'including any required training.\n\n'
+    'You can sign in anytime to review your work or any messages from your team:\n'
+    '[link:portal:dashboard|Go to your dashboard]\n\n'
+    'Thank you,\n'
+    'Onboarding Team'
+)
+
+ONBOARDING_LINK_TOKEN_RE = re.compile(
+    r'\[link:([^:\]|]+):([^|\]]+)\|([^\]]+)\]'
+)
+
+ONBOARDING_PORTAL_PAGES = [
+    ('dashboard', 'Dashboard'),
+    ('tasks', 'Tasks'),
+    ('documents', 'Documents'),
+    ('videos', 'Videos'),
+    ('profile', 'Profile'),
+    ('login', 'Login'),
+]
+
+PORTAL_PAGE_ENDPOINTS = {
+    'dashboard': 'dashboard',
+    'tasks': 'user_tasks',
+    'documents': 'view_documents',
+    'videos': 'list_training_videos',
+    'profile': 'profile',
+}
+
+
+def get_admin_setting(key, default=''):
+    """Read a value from admin_settings (returns default if missing)."""
+    _ensure_admin_settings_table()
+    try:
+        row = db.session.execute(
+            text('SELECT value FROM admin_settings WHERE key = :k'),
+            {'k': key},
+        ).fetchone()
+        if row is not None and row[0] is not None:
+            return str(row[0])
+    except Exception:
+        db.session.rollback()
+    return default
+
+
+def set_admin_setting(key, value):
+    """Upsert a value in admin_settings."""
+    _ensure_admin_settings_table()
+    value = '' if value is None else str(value)
+    existing = db.session.execute(
+        text('SELECT key FROM admin_settings WHERE key = :k'),
+        {'k': key},
+    ).fetchone()
+    if existing:
+        db.session.execute(
+            text('UPDATE admin_settings SET value = :v WHERE key = :k'),
+            {'v': value, 'k': key},
+        )
+    else:
+        db.session.execute(
+            text('INSERT INTO admin_settings (key, value) VALUES (:k, :v)'),
+            {'k': key, 'v': value},
+        )
+
+
+def apply_message_template(template, **replacements):
+    """Replace {placeholder} tokens in a message template."""
+    result = template or ''
+    for key, val in replacements.items():
+        result = result.replace('{' + key + '}', str(val if val is not None else ''))
+    return result
+
+
+def onboarding_portal_page_url(page_key, external=False):
+    """Resolve a portal page key to a URL (relative in-app or absolute for email)."""
+    if page_key == 'login':
+        return onboarding_login_url()
+    endpoint = PORTAL_PAGE_ENDPOINTS.get(page_key)
+    if not endpoint:
+        path = '/dashboard'
+        return (onboarding_base_url() + path) if external else url_for('dashboard')
+    if external:
+        return url_for(endpoint, _external=True)
+    return url_for(endpoint)
+
+
+def resolve_onboarding_link_href(link_type, link_key):
+    """Return href for a stored link token, or None if invalid."""
+    link_type = (link_type or '').lower()
+    if link_type == 'portal':
+        return onboarding_portal_page_url(link_key, external=True)
+    if link_type == 'external':
+        try:
+            link = ExternalLink.query.get(int(link_key))
+            if link and link.url:
+                return link.url
+        except (TypeError, ValueError):
+            pass
+        return None
+    if link_type == 'custom':
+        url = unquote(link_key or '')
+        if url.lower().startswith(('http://', 'https://')):
+            return url
+        return None
+    return None
+
+
+def normalize_legacy_onboarding_message(text):
+    """Convert old {dashboard_link} placeholders to link tokens for editing/display."""
+    if not text:
+        return ''
+    return text.replace('{dashboard_link}', '[link:portal:dashboard|Go to your dashboard]')
+
+
+def _escape_message_text_with_breaks(text):
+    return Markup(escape(text or '').replace('\n', '<br>'))
+
+
+def render_onboarding_message_html(text, for_email=False):
+    """Turn stored message text (with link tokens) into safe HTML."""
+    text = normalize_legacy_onboarding_message(text or '')
+    parts = []
+    last = 0
+    for match in ONBOARDING_LINK_TOKEN_RE.finditer(text):
+        if match.start() > last:
+            parts.append(_escape_message_text_with_breaks(text[last:match.start()]))
+        link_type, link_key, label = match.group(1), match.group(2), match.group(3)
+        if link_type == 'portal' and not for_email:
+            try:
+                href = onboarding_portal_page_url(link_key, external=False)
+            except RuntimeError:
+                href = onboarding_portal_page_url(link_key, external=True)
+        else:
+            href = resolve_onboarding_link_href(link_type, link_key)
+        if href:
+            parts.append(Markup(f'<a href="{escape(href)}">{escape(label)}</a>'))
+        else:
+            parts.append(escape(label))
+        last = match.end()
+    if last < len(text):
+        parts.append(_escape_message_text_with_breaks(text[last:]))
+    return Markup(''.join(str(part) for part in parts))
+
+
+def render_onboarding_message_plain(text):
+    """Plain-text version of a message (for email text alternative)."""
+    text = normalize_legacy_onboarding_message(text or '')
+
+    def _repl(match):
+        link_type, link_key, label = match.group(1), match.group(2), match.group(3)
+        href = resolve_onboarding_link_href(link_type, link_key)
+        if link_type == 'portal' and href:
+            href = onboarding_portal_page_url(link_key, external=True)
+        if href:
+            return f'{label} ({href})'
+        return label
+
+    return ONBOARDING_LINK_TOKEN_RE.sub(_repl, text)
+
+
+def build_welcome_headline(headline, full_name, include_name):
+    """Build welcome headline; optionally insert the employee name before the first !."""
+    headline = (headline or '').replace('{name}', '').strip()
+    if include_name and full_name:
+        if '!' in headline:
+            idx = headline.index('!')
+            return headline[:idx] + f', {full_name}' + headline[idx:]
+        return f'{headline}, {full_name}'
+    return headline
+
+
+def get_welcome_messages(full_name=''):
+    """Headline and body for the post-login welcome screen."""
+    headline_tpl = get_admin_setting('welcome_headline', DEFAULT_WELCOME_HEADLINE)
+    body = get_admin_setting('welcome_body', DEFAULT_WELCOME_BODY)
+    include_name = get_admin_setting('welcome_include_name', '1') == '1'
+    if '{name}' in headline_tpl:
+        include_name = True
+        headline_tpl = headline_tpl.replace('{name}', '')
+    headline = build_welcome_headline(headline_tpl, full_name, include_name)
+    return headline, body
+
+
+def maybe_apply_default_finale_message(username):
+    """When onboarding is complete, apply the configured default finale message once."""
+    _ensure_new_hires_finale_columns()
+    if not user_onboarding_is_fully_complete(username):
+        return False
+    new_hire = NewHire.query.filter_by(username=username).first()
+    if not new_hire:
+        return False
+    if getattr(new_hire, 'finale_message_sent_at', None):
+        return False
+    message = get_admin_setting('default_finale_message', DEFAULT_FINALE_MESSAGE).strip()
+    if not message:
+        return False
+    doc_id_raw = get_admin_setting('default_finale_document_id', '').strip()
+    new_hire.finale_message = message
+    new_hire.finale_message_sent_at = datetime.utcnow()
+    new_hire.finale_document_id = int(doc_id_raw) if doc_id_raw.isdigit() else None
+    new_hire.finale_message_dismissed_at = None
+    try:
+        db.session.commit()
+        return True
+    except Exception:
+        db.session.rollback()
+        return False
+
+
 _stores_migrated = False
 
 
@@ -2635,6 +2857,7 @@ def user_onboarding_is_fully_complete(username):
 
 def maybe_send_all_tasks_completed_email(username):
     """Send one congratulatory email when the user finishes all onboarding tasks (once per new hire)."""
+    maybe_apply_default_finale_message(username)
     if not MAIL_AVAILABLE:
         return False
     _ensure_new_hires_finale_columns()
@@ -2647,22 +2870,14 @@ def maybe_send_all_tasks_completed_email(username):
     if not to_email:
         return False
     dashboard_link = onboarding_tasks_url().replace('/tasks', '/dashboard')
-    subject = 'Congratulations — you completed all onboarding tasks'
-    body_html = f"""
-    <p>Hello,</p>
-    <p>Congratulations! You have completed <strong>all</strong> of your assigned onboarding tasks, including any required training.</p>
-    <p>You can sign in anytime to review your work or any messages from your team:</p>
-    <p><a href="{dashboard_link}">Open your onboarding dashboard</a></p>
-    <p>Thank you,<br>Onboarding Team</p>
-    """
-    body_text = (
-        "Hello,\n\n"
-        "Congratulations! You have completed all of your assigned onboarding tasks, "
-        "including any required training.\n\n"
-        f"Open your dashboard: {dashboard_link}\n\n"
-        "Thank you,\n"
-        "Onboarding Team"
-    )
+    subject = get_admin_setting('all_tasks_completed_email_subject', DEFAULT_ALL_TASKS_EMAIL_SUBJECT).strip()
+    body_template = get_admin_setting('all_tasks_completed_email_body', DEFAULT_ALL_TASKS_EMAIL_BODY)
+    body_text = render_onboarding_message_plain(body_template).strip()
+    if '{dashboard_link}' in body_text:
+        body_text = apply_message_template(body_text, dashboard_link=dashboard_link).strip()
+    body_html = f'<div style="font-family: Arial, sans-serif; line-height: 1.6;">{render_onboarding_message_html(body_template, for_email=True)}</div>'
+    if not subject:
+        subject = DEFAULT_ALL_TASKS_EMAIL_SUBJECT
     if not send_email(to_email, subject, body_html, body_text=body_text):
         return False
     if new_hire:
@@ -3697,6 +3912,8 @@ def welcome():
     user_record = UserModel.query.filter_by(username=current_user.username).first()
     if user_record and getattr(user_record, 'full_name', None) and (not full_name or full_name == current_user.username):
         full_name = (user_record.full_name or '').strip() or full_name
+    welcome_headline, welcome_body = get_welcome_messages(full_name)
+    welcome_body_html = render_onboarding_message_html(welcome_body)
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -3769,7 +3986,8 @@ def welcome():
                 line-height: 1.35;
                 letter-spacing: 0.01em;
             }
-            .welcome-card p {
+            .welcome-card p,
+            .welcome-card .welcome-body {
                 position: relative;
                 z-index: 1;
                 font-size: 1.1em;
@@ -3799,6 +4017,15 @@ def welcome():
                 box-shadow: 0 10px 24px rgba(254,1,0,0.35), inset 0 1px 0 rgba(255,255,255,0.4);
                 transform: translateY(-1px);
             }
+            .welcome-card p a,
+            .welcome-card .welcome-body a {
+                color: #ff6b6b;
+                text-decoration: underline;
+            }
+            .welcome-card p a:hover,
+            .welcome-card .welcome-body a:hover {
+                color: #ff9999;
+            }
             .welcome-card .welcome-logo {
                 position: relative;
                 z-index: 1;
@@ -3815,7 +4042,8 @@ def welcome():
                     width: 96%;
                 }
                 .welcome-card h1 { font-size: 1.6em; }
-                .welcome-card p { font-size: 1em; }
+                .welcome-card p,
+                .welcome-card .welcome-body { font-size: 1em; }
             }
         {{ global_theme_css|safe }}
             /* Manage Documents: keep Upload panel dark like the rest of admin pages */
@@ -3842,13 +4070,13 @@ def welcome():
     <body>
         <div class="welcome-card">
             <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart" class="welcome-logo">
-            <h1>Welcome to Ziebart International Corporation{{ ', ' + full_name if full_name else '' }}! Congratulations on your new role!</h1>
-            <p>We are honored to have you join the team and are committed to supporting your success from day one.</p>
+            <h1>{{ welcome_headline }}</h1>
+            <div class="welcome-body">{{ welcome_body_html|safe }}</div>
             <a href="{{ next_url }}" class="btn">Continue</a>
         </div>
     </body>
     </html>
-    ''', full_name=full_name, next_url=next_url)
+    ''', full_name=full_name, next_url=next_url, welcome_headline=welcome_headline, welcome_body_html=welcome_body_html)
 
 
 @app.route('/dashboard')
@@ -4067,14 +4295,22 @@ def dashboard():
         # Finale message from admin (only when all work is done; tasks panel otherwise)
         show_finale = False
         finale_message = ''
+        finale_message_html = Markup('')
         finale_document = None
         has_new_assigned_work = False
+        if user_new_hire and all_tasks_completed:
+            maybe_apply_default_finale_message(current_user.username)
+            try:
+                db.session.refresh(user_new_hire)
+            except Exception:
+                pass
         if user_new_hire:
             msg = getattr(user_new_hire, 'finale_message', None)
             sent_at = getattr(user_new_hire, 'finale_message_sent_at', None)
             dismissed_at = getattr(user_new_hire, 'finale_message_dismissed_at', None)
             if msg and sent_at:
                 finale_message = msg
+                finale_message_html = render_onboarding_message_html(msg)
                 doc_id = getattr(user_new_hire, 'finale_document_id', None)
                 if doc_id:
                     try:
@@ -5000,6 +5236,13 @@ def dashboard():
                 color: rgba(242, 245, 251, 0.92);
                 margin-bottom: 28px;
             }
+            .finale-message a {
+                color: #ff6b6b;
+                text-decoration: underline;
+            }
+            .finale-message a:hover {
+                color: #ff9999;
+            }
             .finale-doc-btn {
                 display: inline-flex;
                 align-items: center;
@@ -5179,7 +5422,7 @@ def dashboard():
                             <p class="finale-kicker">Welcome to Ziebart</p>
                             <h2 class="finale-headline"><span class="finale-head-emoji" aria-hidden="true">🎉</span><span>Message for you</span></h2>
                             <div class="finale-divider" aria-hidden="true"></div>
-                            <div class="finale-message">{{ finale_message }}</div>
+                            <div class="finale-message">{{ finale_message_html|safe }}</div>
                             {% if finale_document %}
                             <p style="margin-bottom: 0;">
                                 <a href="{{ url_for('view_document_embed', doc_id=finale_document.id) }}" target="_blank" rel="noopener noreferrer" class="finale-doc-btn"><span aria-hidden="true">📄</span><span>{{ finale_document.name_for_users or finale_document.original_filename }}</span></a>
@@ -5450,7 +5693,7 @@ def dashboard():
          user_tasks=user_tasks, total_tasks=total_tasks, completed_tasks=completed_tasks,
          pending_count=pending_count, notifications=notifications, external_links=external_links,
          hero_media_url=hero_media_url, hero_media_type=hero_media_type,
-         show_finale=show_finale, finale_message=finale_message, finale_document=finale_document,
+         show_finale=show_finale, finale_message=finale_message, finale_message_html=finale_message_html, finale_document=finale_document,
          has_new_assigned_work=has_new_assigned_work)
     except Exception as e:
         # Log the error for debugging
@@ -10583,6 +10826,11 @@ def _admin_dashboard_impl():
                         <a href="{{ url_for('manage_external_links') }}" class="quick-link-item" style="text-decoration: none;">
                             <span class="quick-link-icon">🔗</span>
                             <span class="quick-link-text">External Links</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
+                        <a href="{{ url_for('manage_onboarding_messages') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">💬</span>
+                            <span class="quick-link-text">Onboarding Messages</span>
                             <span class="quick-link-count">→</span>
                         </a>
                     </div>
@@ -26467,21 +26715,8 @@ def view_user_checklist(username):
     documents = Document.query.order_by(Document.original_filename).all()
 
     # Default finale message (and optional document) for pre-filling the modal
-    default_finale_message = ''
-    default_finale_document_id = ''
-    try:
-        _ensure_admin_settings_table()
-        r = db.session.execute(text("SELECT value FROM admin_settings WHERE key = 'default_finale_message'")).fetchone()
-        if r is not None and r[0] is not None:
-            default_finale_message = (str(r[0]) or '').strip()
-        r = db.session.execute(text("SELECT value FROM admin_settings WHERE key = 'default_finale_document_id'")).fetchone()
-        if r is not None and r[0] is not None:
-            v = str(r[0]).strip()
-            if v.isdigit():
-                default_finale_document_id = v
-    except Exception:
-        db.session.rollback()
-        pass
+    default_finale_message = get_admin_setting('default_finale_message', DEFAULT_FINALE_MESSAGE).strip()
+    default_finale_document_id = get_admin_setting('default_finale_document_id', '').strip()
 
     return render_template_string('''
     <!DOCTYPE html>
@@ -26893,14 +27128,9 @@ def send_finale_message(username):
     # Optionally save as default for future finale messages (after commit so message send is not rolled back)
     if request.form.get('save_as_default'):
         try:
-            _ensure_admin_settings_table()
             doc_val = doc_id if doc_id and doc_id.isdigit() else ''
-            for key, value in [('default_finale_message', message), ('default_finale_document_id', doc_val)]:
-                existing = db.session.execute(text("SELECT key FROM admin_settings WHERE key = :k"), {"k": key}).fetchone()
-                if existing:
-                    db.session.execute(text("UPDATE admin_settings SET value = :v WHERE key = :k"), {"v": value, "k": key})
-                else:
-                    db.session.execute(text("INSERT INTO admin_settings (key, value) VALUES (:k, :v)"), {"k": key, "v": value})
+            set_admin_setting('default_finale_message', message)
+            set_admin_setting('default_finale_document_id', doc_val)
             db.session.commit()
         except Exception:
             db.session.rollback()
@@ -26977,6 +27207,411 @@ def update_user_checklist(username):
         flash(f'Error updating checklist: {str(e)}', 'error')
     
     return redirect(url_for('view_user_checklist', username=username))
+
+
+@app.route('/admin/onboarding-messages', methods=['GET', 'POST'])
+@admin_required
+def manage_onboarding_messages():
+    """Configure welcome screen and all-tasks-completed messages for new hires."""
+    documents = Document.query.order_by(Document.original_filename).all()
+    try:
+        external_links = ExternalLink.query.filter_by(is_active=True).order_by(
+            ExternalLink.order, ExternalLink.created_at
+        ).all()
+    except Exception:
+        external_links = []
+    if request.method == 'POST':
+        section = (request.form.get('section') or '').strip().lower()
+        try:
+            if section == 'welcome':
+                welcome_headline = (request.form.get('welcome_headline') or '').strip().replace('{name}', '')
+                welcome_include_name = '1' if request.form.get('welcome_include_name') else '0'
+                welcome_body = (request.form.get('welcome_body') or '').strip()
+                if not welcome_headline or not welcome_body:
+                    flash('Welcome headline and body are required.', 'error')
+                    return redirect(url_for('manage_onboarding_messages'))
+                set_admin_setting('welcome_headline', welcome_headline)
+                set_admin_setting('welcome_include_name', welcome_include_name)
+                set_admin_setting('welcome_body', welcome_body)
+                db.session.commit()
+                flash('Welcome message saved.', 'success')
+            elif section == 'finale':
+                default_finale_message = (request.form.get('default_finale_message') or '').strip()
+                default_finale_document_id = (request.form.get('default_finale_document_id') or '').strip()
+                if not default_finale_message:
+                    flash('Completion dashboard message is required.', 'error')
+                    return redirect(url_for('manage_onboarding_messages'))
+                if default_finale_document_id and not default_finale_document_id.isdigit():
+                    flash('Invalid document selection.', 'error')
+                    return redirect(url_for('manage_onboarding_messages'))
+                set_admin_setting('default_finale_message', default_finale_message)
+                set_admin_setting(
+                    'default_finale_document_id',
+                    default_finale_document_id if default_finale_document_id.isdigit() else '',
+                )
+                db.session.commit()
+                flash('Dashboard message saved.', 'success')
+            elif section == 'email':
+                email_subject = (request.form.get('all_tasks_completed_email_subject') or '').strip()
+                email_body = (request.form.get('all_tasks_completed_email_body') or '').strip()
+                if not email_subject or not email_body:
+                    flash('Completion email subject and body are required.', 'error')
+                    return redirect(url_for('manage_onboarding_messages'))
+                set_admin_setting('all_tasks_completed_email_subject', email_subject)
+                set_admin_setting('all_tasks_completed_email_body', email_body)
+                db.session.commit()
+                flash('Completion email saved.', 'success')
+            else:
+                flash('Could not save — unknown section.', 'error')
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Could not save messages: {str(e)}', 'error')
+        return redirect(url_for('manage_onboarding_messages'))
+
+    welcome_headline_raw = get_admin_setting('welcome_headline', DEFAULT_WELCOME_HEADLINE)
+    welcome_include_name = get_admin_setting('welcome_include_name', '1') == '1'
+    if '{name}' in welcome_headline_raw:
+        welcome_include_name = True
+        welcome_headline_raw = welcome_headline_raw.replace('{name}', '')
+    settings = {
+        'welcome_headline': welcome_headline_raw,
+        'welcome_include_name': welcome_include_name,
+        'welcome_body': normalize_legacy_onboarding_message(
+            get_admin_setting('welcome_body', DEFAULT_WELCOME_BODY)
+        ),
+        'default_finale_message': normalize_legacy_onboarding_message(
+            get_admin_setting('default_finale_message', DEFAULT_FINALE_MESSAGE)
+        ),
+        'default_finale_document_id': get_admin_setting('default_finale_document_id', ''),
+        'all_tasks_completed_email_subject': get_admin_setting(
+            'all_tasks_completed_email_subject', DEFAULT_ALL_TASKS_EMAIL_SUBJECT
+        ),
+        'all_tasks_completed_email_body': normalize_legacy_onboarding_message(
+            get_admin_setting('all_tasks_completed_email_body', DEFAULT_ALL_TASKS_EMAIL_BODY)
+        ),
+    }
+    portal_links = [
+        {'key': key, 'label': label, 'token': f'[link:portal:{key}|{label}]'}
+        for key, label in ONBOARDING_PORTAL_PAGES
+    ]
+    external_link_items = [
+        {
+            'id': link.id,
+            'label': link.title,
+            'token': f'[link:external:{link.id}|{link.title}]',
+        }
+        for link in external_links
+    ]
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Onboarding Messages - Onboarding App</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+        {{ global_theme_css|safe }}
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            .header { background: linear-gradient(160deg, #121821 0%, #090d14 100%); color: var(--text-primary); padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; border-bottom: 1px solid var(--border-soft); box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; color: var(--text-primary) !important; }
+            .back-btn { background: rgba(255,255,255,0.1); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.22); }
+            .back-btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
+            .header-right { display: flex; align-items: center; gap: 16px; }
+            .user-dropdown { cursor: pointer; position: relative; }
+            .user-icon { width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em; }
+            .dropdown-menu { display: none; position: absolute; top: 100%; right: 0; margin-top: 8px; min-width: 180px; border-radius: 8px; z-index: 1000; padding: 8px 0; }
+            .dropdown-menu.show { display: block; }
+            .dropdown-item { display: block; padding: 10px 16px; text-decoration: none; font-size: 0.95em; }
+            .container { max-width: 1120px; margin: 24px auto; padding: 0 20px; }
+            .messages-layout { display: flex; gap: 24px; align-items: flex-start; }
+            .messages-main { flex: 1; min-width: 0; }
+            .card { border-radius: 0.5rem; padding: 24px; margin-bottom: 24px; }
+            .card h2 { font-size: 1.2em; margin-bottom: 8px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.18) !important; color: var(--text-primary) !important; }
+            .card p.hint { color: var(--text-muted) !important; font-size: 0.9em; margin-bottom: 16px; line-height: 1.5; }
+            .form-group { margin-bottom: 16px; }
+            .form-group label { display: block; font-size: 0.9em; font-weight: 600; margin-bottom: 6px; color: var(--text-primary) !important; }
+            .form-group input[type="text"], .form-group textarea, .form-group select { width: 100%; padding: 10px 12px; border-radius: 0.35rem; font-size: 1em; font-family: inherit; }
+            .form-group textarea { min-height: 110px; resize: vertical; }
+            .form-group textarea.message-field { transition: border-color 0.15s, box-shadow 0.15s; }
+            .form-group textarea.message-field:focus, .form-group textarea.message-field.is-active { border-color: rgba(254,1,0,0.75) !important; box-shadow: 0 0 0 3px rgba(254,1,0,0.18) !important; outline: none; }
+            .form-group textarea.message-field.drag-over { border-color: rgba(120, 170, 255, 0.85) !important; box-shadow: 0 0 0 3px rgba(120, 170, 255, 0.2) !important; background: rgba(120, 170, 255, 0.08) !important; }
+            .form-group small { display: block; margin-top: 6px; color: var(--text-muted) !important; font-size: 0.85em; }
+            .checkbox-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+            .checkbox-row input { width: auto; margin: 0; accent-color: #fe0100; }
+            .checkbox-row label { margin: 0; font-weight: 500; cursor: pointer; color: var(--text-primary) !important; }
+            .btn-primary { background: linear-gradient(180deg, #ff2928 0%, var(--accent-red) 62%, #b30000 100%) !important; color: #fff !important; border: 1px solid rgba(255,255,255,0.22) !important; }
+            .btn-primary:hover { background: linear-gradient(180deg, #ff3a39 0%, #d20000 62%, #980000 100%) !important; }
+            .btn-secondary { background: rgba(255,255,255,0.1) !important; color: #fff !important; font-size: 0.9em; padding: 8px 14px; border: 1px solid rgba(255,255,255,0.22) !important; }
+            .btn-secondary:hover { background: rgba(255,255,255,0.18) !important; }
+            .link-panel { width: 280px; flex-shrink: 0; background: var(--bg-panel) !important; border: 1px solid var(--border-soft) !important; border-radius: 0.5rem; box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.12) !important; padding: 18px; position: sticky; top: 20px; color: var(--text-primary) !important; }
+            .link-panel h3 { font-size: 1em; margin-bottom: 6px; color: var(--text-primary) !important; }
+            .link-panel .panel-hint { color: var(--text-muted) !important; font-size: 0.85em; line-height: 1.45; margin-bottom: 14px; }
+            .link-section { margin-bottom: 16px; }
+            .link-section-title { font-size: 0.78em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted) !important; margin-bottom: 8px; }
+            .link-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+            .link-chip { display: inline-flex; align-items: center; gap: 6px; padding: 7px 11px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.08); color: var(--text-primary) !important; font-size: 0.85em; cursor: grab; user-select: none; }
+            .link-chip:hover { background: rgba(254,1,0,0.18); border-color: rgba(254,1,0,0.45); color: #fff !important; }
+            .link-chip:active { cursor: grabbing; }
+            .link-chip .chip-icon { opacity: 0.75; font-size: 0.9em; }
+            .custom-link-form { display: grid; gap: 8px; margin-top: 8px; }
+            .custom-link-form input { width: 100%; padding: 8px 10px; border-radius: 0.35rem; font-size: 0.9em; }
+            .empty-links { color: var(--text-muted) !important; font-size: 0.85em; line-height: 1.4; }
+            .empty-links a { color: #ff8a8a !important; }
+            .empty-links a:hover { color: #ffb3b3 !important; }
+            .message-preview { margin-top: 8px; padding: 10px 12px; background: rgba(255,255,255,0.05); border: 1px dashed rgba(255,255,255,0.2); border-radius: 0.35rem; font-size: 0.9em; line-height: 1.55; color: var(--text-primary) !important; min-height: 42px; }
+            .message-preview-label { font-size: 0.78em; font-weight: 600; color: var(--text-muted) !important; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.03em; }
+            .message-preview .preview-link { display: inline-block; padding: 1px 8px; border-radius: 999px; background: rgba(254,1,0,0.2); color: #ffb3b3 !important; text-decoration: underline; border: 1px solid rgba(254,1,0,0.35); }
+            .message-preview-empty { color: #8a94a8 !important; font-style: italic; }
+            .flash-success { padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: rgba(40, 167, 69, 0.18) !important; color: #b8f0c8 !important; border: 1px solid rgba(40, 167, 69, 0.35); }
+            .flash-error { padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: rgba(220, 53, 69, 0.18) !important; color: #ffb8bf !important; border: 1px solid rgba(220, 53, 69, 0.35); }
+            .section-save { margin-top: 4px; }
+            .message-section-form { margin-bottom: 0; }
+            @media (max-width: 960px) {
+                .messages-layout { flex-direction: column; }
+                .link-panel { width: 100%; position: static; }
+            }
+        </style>
+    </head>
+    <body class="onboarding-messages-page">
+        <div class="header">
+            <h1>💬 Onboarding Messages</h1>
+            <div class="header-right">
+                <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
+                <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('messagesUserDropdown').classList.toggle('show');">
+                    <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
+                    <div class="dropdown-menu" id="messagesUserDropdown">
+                        {{ staff_console_dropdown_links }}
+                    </div>
+                </div>
+            </div>
+        </div>
+        <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('messagesUserDropdown').classList.remove('show'); });</script>
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <div style="margin-bottom: 20px;">
+                {% for category, msg in messages %}
+                <div class="{% if category == 'error' %}flash-error{% else %}flash-success{% endif %}">{{ msg }}</div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% endwith %}
+            <div class="messages-layout">
+                <div class="messages-main">
+                <form method="POST" action="{{ url_for('manage_onboarding_messages') }}" class="message-section-form">
+                    <input type="hidden" name="section" value="welcome">
+                <div class="card">
+                    <h2>Welcome message</h2>
+                    <p class="hint">Shown after a new hire logs in, before they reach the dashboard. Click a message box, then click or drag a link from the panel on the right.</p>
+                    <div class="form-group">
+                        <label for="welcome_headline">Welcome headline</label>
+                        <input type="text" name="welcome_headline" id="welcome_headline" value="{{ settings.welcome_headline }}" required>
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" name="welcome_include_name" id="welcome_include_name" value="1" {% if settings.welcome_include_name %}checked{% endif %}>
+                        <label for="welcome_include_name">Include the employee&apos;s name in the welcome headline</label>
+                    </div>
+                    <div class="form-group">
+                        <label for="welcome_body">Welcome body</label>
+                        <textarea name="welcome_body" id="welcome_body" class="message-field" required>{{ settings.welcome_body }}</textarea>
+                        <div class="message-preview-label">Preview</div>
+                        <div class="message-preview" data-preview-for="welcome_body"></div>
+                        <small>Links appear as clickable text for new hires.</small>
+                    </div>
+                    <button type="submit" class="btn btn-primary section-save">Save welcome message</button>
+                </div>
+                </form>
+                <form method="POST" action="{{ url_for('manage_onboarding_messages') }}" class="message-section-form">
+                    <input type="hidden" name="section" value="finale">
+                <div class="card">
+                    <h2>All tasks completed — dashboard message</h2>
+                    <p class="hint">Shown on the user dashboard when they finish every assigned task. Applied automatically; managers can still send a custom message from a user&apos;s checklist.</p>
+                    <div class="form-group">
+                        <label for="default_finale_message">Dashboard message</label>
+                        <textarea name="default_finale_message" id="default_finale_message" class="message-field" required>{{ settings.default_finale_message }}</textarea>
+                        <div class="message-preview-label">Preview</div>
+                        <div class="message-preview" data-preview-for="default_finale_message"></div>
+                    </div>
+                    <div class="form-group">
+                        <label for="default_finale_document_id">Optional attached document</label>
+                        <select name="default_finale_document_id" id="default_finale_document_id">
+                            <option value="">— None —</option>
+                            {% for doc in documents %}
+                            <option value="{{ doc.id }}" {% if settings.default_finale_document_id and doc.id == settings.default_finale_document_id|int %}selected{% endif %}>{{ doc.name_for_users or doc.original_filename }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary section-save">Save dashboard message</button>
+                </div>
+                </form>
+                <form method="POST" action="{{ url_for('manage_onboarding_messages') }}" class="message-section-form">
+                    <input type="hidden" name="section" value="email">
+                <div class="card">
+                    <h2>All tasks completed — email</h2>
+                    <p class="hint">Sent once when a user completes all onboarding tasks.</p>
+                    <div class="form-group">
+                        <label for="all_tasks_completed_email_subject">Email subject</label>
+                        <input type="text" name="all_tasks_completed_email_subject" id="all_tasks_completed_email_subject" value="{{ settings.all_tasks_completed_email_subject }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="all_tasks_completed_email_body">Email body</label>
+                        <textarea name="all_tasks_completed_email_body" id="all_tasks_completed_email_body" class="message-field" required>{{ settings.all_tasks_completed_email_body }}</textarea>
+                        <div class="message-preview-label">Preview</div>
+                        <div class="message-preview" data-preview-for="all_tasks_completed_email_body"></div>
+                    </div>
+                    <button type="submit" class="btn btn-primary section-save">Save email</button>
+                </div>
+                </form>
+                </div>
+                <aside class="link-panel" aria-label="Insert links">
+                    <h3>Insert a link</h3>
+                    <p class="panel-hint">Click inside a message box first, then click or drag a link below into that message.</p>
+                    <div class="link-section">
+                        <div class="link-section-title">Onboarding portal</div>
+                        <div class="link-chips">
+                            {% for item in portal_links %}
+                            <button type="button" class="link-chip" draggable="true" data-token="{{ item.token }}" title="Insert {{ item.label }}">
+                                <span class="chip-icon">🔗</span>{{ item.label }}
+                            </button>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div class="link-section">
+                        <div class="link-section-title">Other websites</div>
+                        {% if external_link_items %}
+                        <div class="link-chips">
+                            {% for item in external_link_items %}
+                            <button type="button" class="link-chip" draggable="true" data-token="{{ item.token }}" title="Insert {{ item.label }}">
+                                <span class="chip-icon">🌐</span>{{ item.label }}
+                            </button>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <p class="empty-links">No website links yet. Add them under <a href="{{ url_for('manage_external_links') }}">External Links</a>.</p>
+                        {% endif %}
+                    </div>
+                    <div class="link-section">
+                        <div class="link-section-title">Custom website</div>
+                        <div class="custom-link-form">
+                            <input type="url" id="customLinkUrl" placeholder="https://example.com">
+                            <input type="text" id="customLinkLabel" placeholder="Link text (e.g. Employee handbook)">
+                            <button type="button" class="btn btn-secondary" id="insertCustomLinkBtn">Add link to message</button>
+                        </div>
+                    </div>
+                </aside>
+            </div>
+        </div>
+        <script>
+        (function() {
+            var activeField = null;
+            var fields = document.querySelectorAll('.message-field');
+            fields.forEach(function(field) {
+                field.addEventListener('focus', function() {
+                    fields.forEach(function(f) { f.classList.remove('is-active'); });
+                    field.classList.add('is-active');
+                    activeField = field;
+                });
+                field.addEventListener('dragover', function(e) {
+                    e.preventDefault();
+                    field.classList.add('drag-over');
+                });
+                field.addEventListener('dragleave', function() {
+                    field.classList.remove('drag-over');
+                });
+                field.addEventListener('drop', function(e) {
+                    e.preventDefault();
+                    field.classList.remove('drag-over');
+                    var token = e.dataTransfer.getData('text/plain');
+                    if (token) insertAtCursor(field, token);
+                });
+            });
+            if (fields.length) {
+                fields[0].classList.add('is-active');
+                activeField = fields[0];
+            }
+            function escapeHtml(str) {
+                return String(str || '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;');
+            }
+            function renderMessagePreview(text) {
+                if (!text || !String(text).trim()) {
+                    return '<span class="message-preview-empty">Nothing to preview yet.</span>';
+                }
+                var html = escapeHtml(text);
+                html = html.replace(/\\[link:[^:\\]|]+:[^|\\]]+\\|([^\\]]+)\\]/g, '<span class="preview-link">$1</span>');
+                html = html.replace(/\\n/g, '<br>');
+                return html;
+            }
+            function updatePreviewForField(field) {
+                var preview = document.querySelector('.message-preview[data-preview-for="' + field.id + '"]');
+                if (preview) {
+                    preview.innerHTML = renderMessagePreview(field.value);
+                }
+            }
+            function updateAllPreviews() {
+                fields.forEach(updatePreviewForField);
+            }
+            fields.forEach(function(field) {
+                field.addEventListener('input', function() { updatePreviewForField(field); });
+            });
+            updateAllPreviews();
+            function insertAtCursor(textarea, text) {
+                var start = textarea.selectionStart || 0;
+                var end = textarea.selectionEnd || 0;
+                var val = textarea.value || '';
+                textarea.value = val.substring(0, start) + text + val.substring(end);
+                var pos = start + text.length;
+                textarea.selectionStart = textarea.selectionEnd = pos;
+                textarea.focus();
+                activeField = textarea;
+                fields.forEach(function(f) { f.classList.remove('is-active'); });
+                textarea.classList.add('is-active');
+                updatePreviewForField(textarea);
+            }
+            document.querySelectorAll('.link-chip').forEach(function(chip) {
+                chip.addEventListener('click', function() {
+                    if (!activeField) {
+                        alert('Click inside a message box first, then choose a link.');
+                        return;
+                    }
+                    insertAtCursor(activeField, chip.getAttribute('data-token'));
+                });
+                chip.addEventListener('dragstart', function(e) {
+                    e.dataTransfer.setData('text/plain', chip.getAttribute('data-token'));
+                });
+            });
+            document.getElementById('insertCustomLinkBtn').addEventListener('click', function() {
+                if (!activeField) {
+                    alert('Click inside a message box first, then add your link.');
+                    return;
+                }
+                var urlInput = document.getElementById('customLinkUrl');
+                var labelInput = document.getElementById('customLinkLabel');
+                var url = (urlInput.value || '').trim();
+                var label = (labelInput.value || '').trim();
+                if (!url) {
+                    alert('Please enter a website address.');
+                    urlInput.focus();
+                    return;
+                }
+                if (!/^https?:\\/\\//i.test(url)) {
+                    url = 'https://' + url;
+                }
+                if (!label) {
+                    label = url.replace(/^https?:\\/\\//i, '');
+                }
+                var token = '[link:custom:' + encodeURIComponent(url) + '|' + label + ']';
+                insertAtCursor(activeField, token);
+                urlInput.value = '';
+                labelInput.value = '';
+            });
+        })();
+        </script>
+    </body>
+    </html>
+    ''', settings=settings, documents=documents, portal_links=portal_links, external_link_items=external_link_items)
 
 
 @app.route('/admin/external-links')
