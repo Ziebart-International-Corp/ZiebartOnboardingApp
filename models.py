@@ -47,6 +47,7 @@ class User(db.Model):
     saved_signature_image = db.Column(db.Text, nullable=True)  # Base64 encoded PNG (default reusable signature)
     saved_signature_kind = db.Column(db.String(20), nullable=True)  # 'drawn' or 'typed'
     saved_signature_updated_at = db.Column(db.DateTime, nullable=True)
+    must_change_password = db.Column(db.Boolean, default=False, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_login = db.Column(db.DateTime)
     

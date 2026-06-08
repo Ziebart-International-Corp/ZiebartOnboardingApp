@@ -43,11 +43,13 @@ from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTION
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
-from werkzeug.security import generate_password_hash
+from werkzeug.security import generate_password_hash, check_password_hash
 from markupsafe import Markup
 from io import BytesIO
 import base64
 import re
+import secrets
+import string
 try:
     from graphql_schema import schema as graphql_schema
 except ImportError:
@@ -263,8 +265,8 @@ def user_sign_document_url(doc_id):
     return url_for('view_documents', sign=doc_id)
 
 
-def onboarding_tasks_url():
-    """Public URL for the user tasks page, used in outbound emails."""
+def onboarding_base_url():
+    """Public base URL for onboarding links in outbound emails."""
     base = (
         os.getenv('ONBOARDING_BASE_URL')
         or os.getenv('APP_BASE_URL')
@@ -276,7 +278,17 @@ def onboarding_tasks_url():
         base = 'https://ziebartonboarding.com'
     if not base.lower().startswith(('http://', 'https://')):
         base = 'https://' + base
-    return base.rstrip('/') + '/tasks'
+    return base.rstrip('/')
+
+
+def onboarding_tasks_url():
+    """Public URL for the user tasks page, used in outbound emails."""
+    return onboarding_base_url() + '/tasks'
+
+
+def onboarding_login_url():
+    """Public URL for the login page, used in outbound emails."""
+    return onboarding_base_url() + '/login'
 
 
 # Flask-Mail configuration: support both MAIL_* and EMAIL_* from .env
@@ -1777,6 +1789,52 @@ def _html_to_plain_fallback(body_html):
     return '\n'.join(cleaned).strip() + '\n'
 
 
+def generate_temporary_password(length=12):
+    """Generate a random temporary password for email reset flows."""
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(max(8, length)))
+
+
+def user_must_change_password(username):
+    """True when the user must set a new password before using the app."""
+    _ensure_users_must_change_password_column()
+    user = UserModel.query.filter_by(username=username).first()
+    return bool(user and getattr(user, 'must_change_password', False))
+
+
+def send_password_reset_email(user, temporary_password):
+    """Email a temporary password and login instructions to the user."""
+    to_email = normalize_email(getattr(user, 'email', None))
+    if not to_email:
+        return False
+    login_url = onboarding_login_url()
+    display_name = (getattr(user, 'full_name', None) or getattr(user, 'username', None) or '').strip() or 'there'
+    subject = 'Your Ziebart Onboarding temporary password'
+    body_html = f'''
+    <p>Hello {display_name},</p>
+    <p>An administrator sent you a temporary password for the Ziebart Onboarding portal.</p>
+    <p><strong>Email:</strong> {to_email}<br>
+    <strong>Temporary password:</strong> {temporary_password}</p>
+    <p>Log in with the temporary password, then you will be prompted to choose a new password.</p>
+    <p><a href="{login_url}">Log in to Ziebart Onboarding</a></p>
+    <p>If the button does not work, copy and paste this link into your browser:<br>{login_url}</p>
+    <p>If you did not expect this email, contact your manager or onboarding administrator.</p>
+    <p>Thank you,<br>Onboarding Team</p>
+    '''
+    body_text = (
+        f"Hello {display_name},\n\n"
+        "An administrator sent you a temporary password for the Ziebart Onboarding portal.\n\n"
+        f"Email: {to_email}\n"
+        f"Temporary password: {temporary_password}\n\n"
+        "Log in with the temporary password, then you will be prompted to choose a new password.\n\n"
+        f"Log in here:\n{login_url}\n\n"
+        "If you did not expect this email, contact your manager or onboarding administrator.\n\n"
+        "Thank you,\n"
+        "Onboarding Team"
+    )
+    return send_email(to_email, subject, body_html, body_text=body_text)
+
+
 def send_email_with_attachment(to_email, subject, body_html, attachment_filename, attachment_bytes, body_text=None):
     """Send email with a single PDF (or other) attachment. Uses same config as send_email."""
     if not MAIL_AVAILABLE or not to_email or not to_email.strip():
@@ -1926,6 +1984,24 @@ def _ensure_users_last_login_column():
 
 
 _users_saved_signature_migrated = False
+_users_must_change_password_migrated = False
+
+
+def _ensure_users_must_change_password_column():
+    """Ensure users.must_change_password exists for forced password change after reset email."""
+    global _users_must_change_password_migrated
+    if _users_must_change_password_migrated:
+        return
+    try:
+        db.session.execute(text("SELECT TOP 1 must_change_password FROM users"))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text("ALTER TABLE users ADD must_change_password BIT NULL"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    _users_must_change_password_migrated = True
 
 
 def _ensure_users_saved_signature_columns():
@@ -2241,12 +2317,29 @@ def _run_users_migration_if_needed():
         _ensure_users_domain_column()
         _ensure_users_last_login_column()
         _ensure_users_saved_signature_columns()
+        _ensure_users_must_change_password_column()
         _ensure_document_signatures_savedflag_column()
         _ensure_new_hires_finale_columns()
         _ensure_admin_settings_table()
         _ensure_stores_and_store_id()
         _ensure_departments_table()
         _ensure_signature_audit_logs_table()
+    except Exception:
+        pass
+
+
+@app.before_request
+def _force_password_change_if_required():
+    """Users with a temporary password must set a new one before using the app."""
+    if request.path.startswith('/static'):
+        return
+    try:
+        if not current_user.is_authenticated:
+            return
+        if request.endpoint in ('change_password', 'logout', 'login'):
+            return
+        if user_must_change_password(current_user.username):
+            return redirect(url_for('change_password'))
     except Exception:
         pass
 
@@ -3019,6 +3112,8 @@ def login():
             if user:
                 login_user(user, remember=True)
                 update_last_login(user.username)
+                if user_must_change_password(user.username):
+                    return redirect(url_for('change_password'))
                 next_after = request.form.get('next') or request.args.get('next') or url_for('dashboard')
                 return redirect(url_for('welcome', next=next_after))
             flash('Invalid email or password. Please try again.', 'error')
@@ -3268,6 +3363,160 @@ def login():
     </body>
     </html>
     ''')
+
+
+@app.route('/change-password', methods=['GET', 'POST'])
+@login_required
+def change_password():
+    """Let users set a new password after logging in with a temporary password."""
+    _ensure_users_must_change_password_column()
+    user_record = UserModel.query.filter_by(username=current_user.username).first()
+    if not user_record:
+        flash('User profile not found.', 'error')
+        return redirect(url_for('logout'))
+    forced = user_must_change_password(current_user.username)
+    if request.method == 'POST':
+        current_pw = request.form.get('current_password') or ''
+        new_pw = (request.form.get('new_password') or '').strip()
+        confirm_pw = (request.form.get('confirm_password') or '').strip()
+        if not user_record.password_hash or not check_password_hash(user_record.password_hash, current_pw):
+            flash('Current password is incorrect.', 'error')
+            return redirect(url_for('change_password'))
+        if new_pw != confirm_pw:
+            flash('New passwords do not match.', 'error')
+            return redirect(url_for('change_password'))
+        if len(new_pw) < 6:
+            flash('Password must be at least 6 characters.', 'error')
+            return redirect(url_for('change_password'))
+        if check_password_hash(user_record.password_hash, new_pw):
+            flash('Choose a password that is different from your temporary password.', 'error')
+            return redirect(url_for('change_password'))
+        user_record.password_hash = generate_password_hash(new_pw)
+        user_record.must_change_password = False
+        try:
+            db.session.commit()
+            flash('Your password has been updated.', 'success')
+            return redirect(url_for('dashboard'))
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Could not update password: {str(e)}', 'error')
+            return redirect(url_for('change_password'))
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Change Password - Ziebart Onboarding</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            :root {
+                --bg-panel: linear-gradient(155deg, #1a1f2b 0%, #0f141d 62%, #090d14 100%);
+                --text-primary: #f4f7fc;
+                --text-muted: #a7b0c0;
+                --border-soft: rgba(255,255,255,0.2);
+            }
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: 'URW Form', Arial, sans-serif;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: linear-gradient(135deg, #0a0d12 0%, #111722 55%, #090d14 100%);
+                color: var(--text-primary);
+                padding: 22px;
+            }
+            .panel {
+                width: 100%;
+                max-width: 430px;
+                padding: 36px 30px;
+                border-radius: 16px;
+                background: var(--bg-panel);
+                border: 1px solid var(--border-soft);
+                box-shadow: 0 20px 55px rgba(0,0,0,0.5);
+            }
+            h1 { font-size: 1.5em; margin-bottom: 8px; }
+            .subtitle { color: var(--text-muted); margin-bottom: 22px; line-height: 1.5; }
+            .flash { padding: 12px 14px; border-radius: 8px; margin-bottom: 16px; }
+            .flash.error { background: rgba(200, 70, 70, 0.28); color: #ffecec; border: 1px solid rgba(255, 120, 120, 0.45); }
+            .flash.success { background: rgba(52, 160, 90, 0.22); color: #d4f5e2; border: 1px solid rgba(80, 200, 130, 0.45); }
+            .form-group { margin-bottom: 16px; }
+            label { display: block; margin-bottom: 6px; font-weight: 600; }
+            input[type="password"] {
+                width: 100%;
+                padding: 12px 14px;
+                border-radius: 8px;
+                border: 1px solid rgba(255,255,255,0.24);
+                background: rgba(255,255,255,0.08);
+                color: var(--text-primary);
+                font-size: 16px;
+            }
+            .btn {
+                width: 100%;
+                margin-top: 8px;
+                padding: 12px 18px;
+                border: none;
+                border-radius: 8px;
+                background: #fe0100;
+                color: #fff;
+                font-size: 1em;
+                font-weight: 700;
+                cursor: pointer;
+            }
+            .logout-link {
+                display: inline-block;
+                margin-top: 16px;
+                color: var(--text-muted);
+                text-decoration: none;
+                font-size: 0.92em;
+            }
+            .logout-link:hover { color: #fff; }
+        </style>
+    </head>
+    <body>
+        <div class="panel">
+            <h1>Change your password</h1>
+            {% if forced %}
+            <p class="subtitle">You signed in with a temporary password. Choose a new password to continue.</p>
+            {% else %}
+            <p class="subtitle">Enter your current password and choose a new one.</p>
+            {% endif %}
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="flash {{ category }}">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
+            <form method="POST" action="{{ url_for('change_password') }}">
+                <div class="form-group">
+                    <label for="current_password">Current password</label>
+                    <input type="password" id="current_password" name="current_password" required autocomplete="current-password">
+                </div>
+                <div class="form-group">
+                    <label for="new_password">New password</label>
+                    <input type="password" id="new_password" name="new_password" required minlength="6" autocomplete="new-password">
+                </div>
+                <div class="form-group">
+                    <label for="confirm_password">Confirm new password</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required minlength="6" autocomplete="new-password">
+                </div>
+                <button type="submit" class="btn">Update password</button>
+            </form>
+            <a href="{{ url_for('logout') }}" class="logout-link">Log out</a>
+        </div>
+        <script>
+            document.querySelector('form').addEventListener('submit', function(e) {
+                var a = document.getElementById('new_password').value;
+                var b = document.getElementById('confirm_password').value;
+                if (a !== b) {
+                    e.preventDefault();
+                    alert('New passwords do not match.');
+                }
+            });
+        </script>
+    </body>
+    </html>
+    ''', forced=forced)
 
 
 @app.route('/logout')
@@ -11452,7 +11701,7 @@ def manage_users():
                 word-break: break-word;
             }
             .users-table td.col-actions {
-                min-width: 280px;
+                min-width: 420px;
             }
             .actions-cell {
                 display: flex;
@@ -11664,6 +11913,11 @@ def manage_users():
                                 <div class="actions-cell">
                                 <button type="button" class="btn btn-secondary btn-edit-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}" data-email="{{ (user.email or '')|e }}" data-full-name="{{ (user.full_name or '')|e }}" data-store-id="{{ user.store_id or '' }}" data-role="{{ user.role or 'user' }}" data-permissions="{{ user_manager_permissions.get(user.id, [])|join(',') }}">Edit</button>
                                 <button type="button" class="btn btn-secondary btn-password-user" data-id="{{ user.id }}" data-username="{{ user.username|e }}">Reset Password</button>
+                                {% if user.email %}
+                                <form method="POST" action="{{ url_for('users_send_password_reset_email', user_id=user.id) }}" onsubmit="return confirm('Send a temporary password email to {{ user.email|e }}?');">
+                                    <button type="submit" class="btn btn-secondary">Send reset email</button>
+                                </form>
+                                {% endif %}
                                 {% if user.username != current_user.username and not user.is_revoked %}
                                     <form method="POST" action="{{ url_for('users_revoke', user_id=user.id) }}" onsubmit="return confirm('Remove {{ user.username }}? This will delete their account and they will no longer be able to log in.');">
                                         <button type="submit" class="btn btn-danger">Revoke</button>
@@ -11882,12 +12136,42 @@ def users_reset_password(user_id):
         flash('Password must be at least 6 characters.', 'error')
         return redirect(url_for('manage_users'))
     user.password_hash = generate_password_hash(new_password)
+    user.must_change_password = False
     try:
         db.session.commit()
         flash(f'Password updated for "{user.username}".', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error updating password: {str(e)}', 'error')
+    return redirect(url_for('manage_users'))
+
+
+@app.route('/admin/users/<int:user_id>/send-password-reset-email', methods=['POST'])
+@admin_required
+def users_send_password_reset_email(user_id):
+    """Generate a temporary password, email it to the user, and require password change on next login."""
+    _ensure_users_must_change_password_column()
+    user = UserModel.query.get(user_id)
+    if not user:
+        flash('User not found.', 'error')
+        return redirect(url_for('manage_users'))
+    to_email = normalize_email(getattr(user, 'email', None))
+    if not to_email:
+        flash(f'User "{user.username}" has no email address.', 'error')
+        return redirect(url_for('manage_users'))
+    temporary_password = generate_temporary_password()
+    user.password_hash = generate_password_hash(temporary_password)
+    user.must_change_password = True
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Could not update password: {str(e)}', 'error')
+        return redirect(url_for('manage_users'))
+    if send_password_reset_email(user, temporary_password):
+        flash(f'Password reset email sent to {to_email}.', 'success')
+    else:
+        flash('Temporary password was set, but the email could not be sent. Check mail configuration.', 'error')
     return redirect(url_for('manage_users'))
 
 
@@ -23903,9 +24187,104 @@ def view_new_hire_details(username):
                 }
             }
         {{ global_theme_css|safe }}
+            /* New hire details: video/document cards were light (#f8f9fa) while global theme uses light text */
+            body.new-hire-details-page {
+                background: #0a0e14 !important;
+                color: #f2f5fb !important;
+            }
+            body.new-hire-details-page .section-title {
+                color: #f2f5fb !important;
+            }
+            body.new-hire-details-page .video-item,
+            body.new-hire-details-page .document-item {
+                background: rgba(255, 255, 255, 0.06) !important;
+                border: 1px solid rgba(255, 255, 255, 0.14) !important;
+                border-left-width: 4px !important;
+                color: #f2f5fb !important;
+            }
+            body.new-hire-details-page .video-item.completed {
+                border-left-color: #34c86a !important;
+            }
+            body.new-hire-details-page .video-item.failed {
+                border-left-color: #fe0100 !important;
+            }
+            body.new-hire-details-page .video-item.in-progress {
+                border-left-color: #6ea8fe !important;
+            }
+            body.new-hire-details-page .video-item.not-started {
+                border-left-color: rgba(255, 255, 255, 0.35) !important;
+            }
+            body.new-hire-details-page .video-title,
+            body.new-hire-details-page .document-item h3 {
+                color: #f2f5fb !important;
+            }
+            body.new-hire-details-page .video-item p,
+            body.new-hire-details-page .video-progress-meta p,
+            body.new-hire-details-page .document-item p,
+            body.new-hire-details-page .section > p {
+                color: #b7c1d3 !important;
+            }
+            body.new-hire-details-page .video-item strong,
+            body.new-hire-details-page .document-item strong {
+                color: #f2f5fb !important;
+            }
+            body.new-hire-details-page .video-progress-meta {
+                margin-bottom: 10px;
+            }
+            body.new-hire-details-page .badge-completed {
+                background: rgba(52, 200, 106, 0.22) !important;
+                color: #8ee4a8 !important;
+                border: 1px solid rgba(90, 200, 120, 0.45) !important;
+            }
+            body.new-hire-details-page .badge-failed {
+                background: rgba(254, 1, 0, 0.22) !important;
+                color: #ffb4b3 !important;
+                border: 1px solid rgba(254, 80, 78, 0.45) !important;
+            }
+            body.new-hire-details-page .badge-in-progress {
+                background: rgba(110, 168, 254, 0.2) !important;
+                color: #dce9ff !important;
+                border: 1px solid rgba(110, 168, 254, 0.42) !important;
+            }
+            body.new-hire-details-page .badge-not-started {
+                background: rgba(255, 255, 255, 0.1) !important;
+                color: #b7c1d3 !important;
+                border: 1px solid rgba(255, 255, 255, 0.2) !important;
+            }
+            body.new-hire-details-page .quiz-results {
+                border-top-color: rgba(255, 255, 255, 0.12) !important;
+            }
+            body.new-hire-details-page .quiz-question {
+                background: rgba(255, 255, 255, 0.08) !important;
+                border-left-color: #6ea8fe !important;
+                color: #f2f5fb !important;
+            }
+            body.new-hire-details-page .question-text {
+                color: #f2f5fb !important;
+            }
+            body.new-hire-details-page .answer-item.selected {
+                background: rgba(110, 168, 254, 0.18) !important;
+            }
+            body.new-hire-details-page .answer-item.correct {
+                background: rgba(52, 200, 106, 0.18) !important;
+            }
+            body.new-hire-details-page .answer-item.incorrect {
+                background: rgba(254, 1, 0, 0.15) !important;
+            }
+            body.new-hire-details-page .signature-preview img {
+                background: #ffffff !important;
+                border-color: rgba(255, 255, 255, 0.25) !important;
+            }
+            body.new-hire-details-page .user-info-table input[readonly] {
+                background: rgba(0, 0, 0, 0.25) !important;
+                color: rgba(255, 255, 255, 0.75) !important;
+            }
+            body.new-hire-details-page .user-info-table small {
+                color: rgba(255, 255, 255, 0.72) !important;
+            }
         </style>
     </head>
-    <body>
+    <body class="new-hire-details-page">
         <div class="top-header">
             <div class="logo-section">
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
@@ -24046,7 +24425,7 @@ def view_new_hire_details(username):
                             </div>
                         </div>
                         {% if item.progress %}
-                            <div style="color: #666; margin-bottom: 10px;">
+                            <div class="video-progress-meta">
                                 <p><strong>Score:</strong> {{ "%.0f"|format(item.progress.score or 0) }}%</p>
                                 <p><strong>Time Watched:</strong> {{ "%.0f"|format(item.progress.time_watched or 0) }} seconds</p>
                                 <p><strong>Completed:</strong> {{ item.progress.completed_at.strftime('%B %d, %Y at %I:%M %p') if item.progress.completed_at else 'Not completed' }}</p>
