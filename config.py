@@ -101,3 +101,11 @@ AUTH_USER_HEADER = 'HTTP_X_FORWARDED_USER'  # IIS may use this
 LOGON_USER_HEADER = 'HTTP_X_REMOTE_USER'  # Alternative header
 AUTH_TYPE_HEADER = 'HTTP_X_AUTH_TYPE'
 
+# Asana feedback (OAuth — client id/secret from developer.asana.com → My apps)
+ASANA_CLIENT_ID = _env_value('ASANA_CLIENT_ID') or os.environ.get('ASANA_CLIENT_ID', '')
+ASANA_CLIENT_SECRET = _env_value('ASANA_CLIENT_SECRET') or os.environ.get('ASANA_CLIENT_SECRET', '')
+# Must match a redirect URL registered on your Asana app (leave blank to use /admin/asana/callback)
+ASANA_REDIRECT_URI = _env_value('ASANA_REDIRECT_URI') or os.environ.get('ASANA_REDIRECT_URI', '')
+# Project where feedback tasks are created (numeric GID from project URL in Asana)
+ASANA_FEEDBACK_PROJECT_GID = _env_value('ASANA_FEEDBACK_PROJECT_GID') or os.environ.get('ASANA_FEEDBACK_PROJECT_GID', '')
+

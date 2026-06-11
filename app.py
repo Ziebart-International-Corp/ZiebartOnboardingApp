@@ -39,7 +39,7 @@ from models import (db, NewHire, User as UserModel, Document, ChecklistItem, New
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
                     DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, Department, ManagerPermission, SignatureAuditLog, document_stores, role_documents, new_hire_required_training, training_video_stores)
 from membership import get_token_groups, get_local_groups
-from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR
+from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, ASANA_CLIENT_ID, ASANA_CLIENT_SECRET, ASANA_REDIRECT_URI, ASANA_FEEDBACK_PROJECT_GID
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -51,6 +51,16 @@ import base64
 import re
 import secrets
 import string
+from asana_feedback import (
+    AsanaError,
+    build_authorization_url,
+    connected_user_label,
+    create_feedback_task,
+    exchange_authorization_code,
+    generate_pkce_pair,
+    refresh_access_token,
+    token_expires_at,
+)
 try:
     from graphql_schema import schema as graphql_schema
 except ImportError:
@@ -89,6 +99,13 @@ app.config['VIDEO_UPLOAD_FOLDER'] = BASE_DIR / 'uploads' / 'videos'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size (for videos)
 app.config['ALLOWED_EXTENSIONS'] = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'svg'}
 app.config['ALLOWED_VIDEO_EXTENSIONS'] = {'mp4', 'webm', 'ogg', 'mov', 'avi'}
+app.config['FEEDBACK_UPLOAD_FOLDER'] = BASE_DIR / 'uploads' / 'feedback'
+app.config['FEEDBACK_ALLOWED_IMAGE_EXTENSIONS'] = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
+FEEDBACK_TYPES = (
+    ('comment', 'General comment'),
+    ('issue', 'Report an issue'),
+    ('suggestion', 'Suggest an improvement'),
+)
 
 # HTTPS/Security Configuration
 # Enable secure cookies when HTTPS is available (detected via request headers)
@@ -492,6 +509,136 @@ input[type="button"]:hover {
 .dropdown-item:focus-visible {
     background: rgba(255, 255, 255, 0.1) !important;
     color: #ffffff !important;
+}
+.feedback-header-btn {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    padding: 7px 12px !important;
+    border-radius: 999px !important;
+    font-size: 0.82em !important;
+    font-weight: 600 !important;
+    line-height: 1.2 !important;
+    text-decoration: none !important;
+    color: #f2f5fb !important;
+    background: rgba(255, 255, 255, 0.08) !important;
+    border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    white-space: nowrap !important;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease !important;
+    flex-shrink: 0;
+}
+.feedback-header-btn:hover {
+    background: rgba(254, 1, 0, 0.18) !important;
+    border-color: rgba(254, 1, 0, 0.45) !important;
+    color: #ffffff !important;
+}
+.feedback-header-btn .feedback-header-svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+.feedback-header-btn.is-active {
+    background: rgba(254, 1, 0, 0.22) !important;
+    border-color: rgba(254, 1, 0, 0.55) !important;
+    color: #ffffff !important;
+}
+@media (max-width: 768px) {
+    .feedback-header-btn .feedback-header-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    .feedback-header-btn {
+        padding: 8px !important;
+        min-width: 36px;
+        min-height: 36px;
+    }
+}
+.feedback-page-panel {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 28px 24px 32px;
+    border-radius: 1rem;
+}
+.feedback-page-panel h1 {
+    margin-bottom: 8px;
+}
+.feedback-page-panel .feedback-intro {
+    margin-bottom: 24px;
+    line-height: 1.55;
+}
+.feedback-form .form-row {
+    margin-bottom: 18px;
+}
+.feedback-form label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 6px;
+    font-size: 0.92em;
+}
+.feedback-form .field-hint {
+    display: block;
+    margin-top: 6px;
+    font-size: 0.85em;
+    line-height: 1.45;
+}
+.feedback-form select,
+.feedback-form input[type="text"],
+.feedback-form textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 11px 12px;
+    border-radius: 8px;
+    font-size: 1rem;
+}
+.feedback-form textarea {
+    min-height: 140px;
+    resize: vertical;
+}
+.feedback-photo-preview {
+    margin-top: 10px;
+    max-width: 100%;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    display: none;
+}
+.feedback-form-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-top: 8px;
+}
+.feedback-submit-btn {
+    background: linear-gradient(180deg, #ff2624 0%, #d50000 65%, #9e0000 100%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.28) !important;
+    color: #ffffff !important;
+    padding: 12px 22px !important;
+    font-weight: 600 !important;
+}
+.feedback-flash {
+    padding: 12px 14px;
+    border-radius: 8px;
+    margin-bottom: 18px;
+    font-size: 0.95em;
+    line-height: 1.45;
+}
+.feedback-flash.success {
+    background: rgba(52, 160, 90, 0.18);
+    border: 1px solid rgba(62, 207, 106, 0.45);
+    color: #d7ffe3;
+}
+.feedback-flash.error {
+    background: rgba(254, 1, 0, 0.14);
+    border: 1px solid rgba(254, 1, 0, 0.45);
+    color: #ffd6d6;
 }
 table, .table, .table-container {
     background: var(--bg-panel) !important;
@@ -1632,6 +1779,232 @@ def inject_global_theme_css():
     }
 
 
+def _feedback_header_button_html(is_active=False):
+    active_cls = ' is-active' if is_active else ''
+    return (
+        f'<a href="{url_for("feedback")}" id="app-feedback-header-btn" '
+        f'class="feedback-header-btn{active_cls}" title="Send feedback">'
+        '<svg class="feedback-header-svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+        '<path d="M4 6.5A2.5 2.5 0 016.5 4h11A2.5 2.5 0 0120 6.5v7A2.5 2.5 0 0117.5 16H11l-4.5 4v-4H6.5A2.5 2.5 0 014 13.5v-7z" '
+        'stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>'
+        '<path d="M8.5 9h7M8.5 12.5h4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'
+        '</svg>'
+        '<span class="feedback-header-label">Feedback</span></a>'
+    )
+
+
+def feedback_global_inject_markup():
+    """Inject feedback header button on every authenticated HTML page."""
+    try:
+        if not current_user.is_authenticated:
+            return Markup('')
+    except Exception:
+        return Markup('')
+    is_active = getattr(request, 'endpoint', None) == 'feedback'
+    active_cls = ' is-active' if is_active else ''
+    feedback_url = url_for('feedback')
+    svg = (
+        '<svg class="feedback-header-svg" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+        '<path d="M4 6.5A2.5 2.5 0 016.5 4h11A2.5 2.5 0 0120 6.5v7A2.5 2.5 0 0117.5 16H11l-4.5 4v-4H6.5A2.5 2.5 0 014 13.5v-7z" '
+        'stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>'
+        '<path d="M8.5 9h7M8.5 12.5h4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'
+        '</svg><span class="feedback-header-label">Feedback</span>'
+    )
+    script = (
+        '<script>(function(){'
+        'if(document.getElementById("app-feedback-header-btn"))return;'
+        'var target=document.querySelector(".top-header .user-section")'
+        '||document.querySelector(".top-header .header-right");'
+        'if(!target)return;'
+        'var a=document.createElement("a");'
+        'a.id="app-feedback-header-btn";'
+        f'var base={feedback_url!r};'
+        'a.href=base+"?from="+encodeURIComponent(window.location.pathname+window.location.search);'
+        f'a.className="feedback-header-btn{active_cls}";'
+        'a.title="Send feedback";'
+        f'a.innerHTML={svg!r};'
+        'target.insertBefore(a,target.firstChild);'
+        '})();</script>'
+    )
+    return Markup(script)
+
+
+@app.after_request
+def inject_feedback_header_button(response):
+    """Append feedback button injector before </body> on HTML responses."""
+    try:
+        if response.status_code != 200:
+            return response
+        content_type = response.content_type or ''
+        if 'text/html' not in content_type:
+            return response
+        try:
+            if not current_user.is_authenticated:
+                return response
+        except Exception:
+            return response
+        data = response.get_data(as_text=True)
+        if '</body>' not in data or 'app-feedback-header-btn' in data:
+            return response
+        snippet = str(feedback_global_inject_markup())
+        response.set_data(data.replace('</body>', snippet + '</body>', 1))
+    except Exception:
+        pass
+    return response
+
+
+def _feedback_allowed_image(filename):
+    if not filename or '.' not in filename:
+        return False
+    ext = filename.rsplit('.', 1)[1].lower()
+    return ext in app.config['FEEDBACK_ALLOWED_IMAGE_EXTENSIONS']
+
+
+def _feedback_user_display_context():
+    """Name and email for feedback submissions."""
+    username = current_user.username if current_user.is_authenticated else ''
+    full_name = username
+    email = ''
+    try:
+        user_record = UserModel.query.filter_by(username=username).first()
+        if user_record:
+            full_name = (user_record.full_name or '').strip() or username
+            email = (user_record.email or '').strip()
+        new_hire = NewHire.query.filter_by(username=username).first()
+        if new_hire:
+            _fn = (new_hire.first_name or '').strip()
+            _ln = (new_hire.last_name or '').strip()
+            nh_name = f'{_fn} {_ln}'.strip()
+            if nh_name:
+                full_name = nh_name
+            if not email:
+                email = (new_hire.email or '').strip()
+    except Exception:
+        pass
+    return {
+        'username': username,
+        'full_name': full_name or username,
+        'email': email,
+    }
+
+
+def _asana_redirect_uri():
+    if ASANA_REDIRECT_URI:
+        return ASANA_REDIRECT_URI.strip()
+    return url_for('asana_oauth_callback', _external=True)
+
+
+def _asana_oauth_configured():
+    return bool(ASANA_CLIENT_ID and ASANA_CLIENT_SECRET)
+
+
+def _asana_store_tokens(token_payload):
+    access = token_payload.get('access_token') or ''
+    refresh = token_payload.get('refresh_token') or ''
+    expires_in = int(token_payload.get('expires_in') or 3600)
+    set_admin_setting('asana_access_token', access)
+    if refresh:
+        set_admin_setting('asana_refresh_token', refresh)
+    set_admin_setting('asana_token_expires_at', token_expires_at(expires_in))
+    set_admin_setting('asana_connected_user', connected_user_label(token_payload))
+    db.session.commit()
+
+
+def _asana_get_access_token():
+    """Return a valid Asana access token, refreshing if needed."""
+    if not _asana_oauth_configured():
+        return None
+    access = get_admin_setting('asana_access_token')
+    expires_raw = get_admin_setting('asana_token_expires_at')
+    if access and expires_raw:
+        try:
+            expires_dt = datetime.fromisoformat(expires_raw.replace('Z', '+00:00'))
+            if datetime.utcnow().replace(tzinfo=expires_dt.tzinfo) < expires_dt:
+                return access
+        except Exception:
+            if access:
+                return access
+    refresh = get_admin_setting('asana_refresh_token')
+    if not refresh:
+        return None
+    try:
+        payload = refresh_access_token(ASANA_CLIENT_ID, ASANA_CLIENT_SECRET, refresh)
+    except AsanaError:
+        return None
+    _asana_store_tokens(payload)
+    return payload.get('access_token') or None
+
+
+def _asana_is_connected():
+    return bool(get_admin_setting('asana_refresh_token') or get_admin_setting('asana_access_token'))
+
+
+def _asana_clear_tokens():
+    for key in (
+        'asana_access_token',
+        'asana_refresh_token',
+        'asana_token_expires_at',
+        'asana_connected_user',
+    ):
+        set_admin_setting(key, '')
+    db.session.commit()
+
+
+def _create_asana_feedback_task(form_data, photo_path=None, photo_filename=None):
+    if not _asana_oauth_configured() or not ASANA_FEEDBACK_PROJECT_GID:
+        return None
+    access_token = _asana_get_access_token()
+    if not access_token:
+        return None
+    return create_feedback_task(
+        access_token,
+        ASANA_FEEDBACK_PROJECT_GID,
+        form_data,
+        photo_path=photo_path,
+        photo_filename=photo_filename,
+    )
+
+
+def _save_feedback_submission(form_data, photo_file=None):
+    """Persist feedback locally and create an Asana task when connected."""
+    import json
+    upload_dir = app.config['FEEDBACK_UPLOAD_FOLDER']
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    safe_user = re.sub(r'[^a-zA-Z0-9_-]+', '_', form_data.get('username') or 'user')[:40]
+    base_name = f'{ts}_{safe_user}'
+    photo_filename = None
+    photo_path = None
+    if photo_file and photo_file.filename:
+        if not _feedback_allowed_image(photo_file.filename):
+            raise ValueError('Photo must be a JPG, PNG, GIF, or WebP image.')
+        ext = photo_file.filename.rsplit('.', 1)[1].lower()
+        photo_filename = secure_filename(f'{base_name}.{ext}')
+        photo_path = upload_dir / photo_filename
+        photo_file.save(photo_path)
+    asana_task_id = None
+    asana_error = None
+    try:
+        asana_task_id = _create_asana_feedback_task(form_data, photo_path=photo_path, photo_filename=photo_filename)
+    except AsanaError as exc:
+        asana_error = str(exc)
+        app.logger.warning('Asana feedback task failed: %s', exc)
+    except Exception as exc:
+        asana_error = str(exc)
+        _log_exception_to_file(exc)
+    payload = {
+        'submitted_at': datetime.utcnow().isoformat() + 'Z',
+        **form_data,
+        'photo_filename': photo_filename,
+        'asana_task_id': asana_task_id,
+        'asana_error': asana_error,
+    }
+    json_path = upload_dir / f'{base_name}.json'
+    with open(json_path, 'w', encoding='utf-8') as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+    return json_path, asana_task_id, asana_error
+
+
 def _log_exception_to_file(exc):
     """Write exception traceback to logs/error.log."""
     try:
@@ -2128,14 +2501,14 @@ def _ensure_admin_settings_table():
     if _admin_settings_table_migrated:
         return
     try:
-        db.session.execute(text("SELECT TOP 1 key FROM admin_settings"))
+        db.session.execute(text("SELECT TOP 1 [key] FROM admin_settings"))
         _admin_settings_table_migrated = True
         return
     except Exception:
         db.session.rollback()
     try:
         db.session.execute(text(
-            "CREATE TABLE admin_settings (key NVARCHAR(100) PRIMARY KEY, value NVARCHAR(MAX) NULL)"
+            "CREATE TABLE admin_settings ([key] NVARCHAR(100) PRIMARY KEY, value NVARCHAR(MAX) NULL)"
         ))
         db.session.commit()
         _admin_settings_table_migrated = True
@@ -2192,7 +2565,7 @@ def get_admin_setting(key, default=''):
     _ensure_admin_settings_table()
     try:
         row = db.session.execute(
-            text('SELECT value FROM admin_settings WHERE key = :k'),
+            text('SELECT value FROM admin_settings WHERE [key] = :k'),
             {'k': key},
         ).fetchone()
         if row is not None and row[0] is not None:
@@ -2207,17 +2580,17 @@ def set_admin_setting(key, value):
     _ensure_admin_settings_table()
     value = '' if value is None else str(value)
     existing = db.session.execute(
-        text('SELECT key FROM admin_settings WHERE key = :k'),
+        text('SELECT [key] FROM admin_settings WHERE [key] = :k'),
         {'k': key},
     ).fetchone()
     if existing:
         db.session.execute(
-            text('UPDATE admin_settings SET value = :v WHERE key = :k'),
+            text('UPDATE admin_settings SET value = :v WHERE [key] = :k'),
             {'v': value, 'k': key},
         )
     else:
         db.session.execute(
-            text('INSERT INTO admin_settings (key, value) VALUES (:k, :v)'),
+            text('INSERT INTO admin_settings ([key], value) VALUES (:k, :v)'),
             {'k': key, 'v': value},
         )
 
@@ -6946,6 +7319,292 @@ def get_user_domain_groups(username, domain=None):
     return sorted(list(user_groups))
 
 
+@app.route('/feedback', methods=['GET', 'POST'])
+@login_required
+def feedback():
+    """Collect app feedback (Asana task creation will be wired up later)."""
+    user_ctx = _feedback_user_display_context()
+    is_admin = current_user.is_admin() if current_user else False
+    user_first_name = (user_ctx['full_name'].split()[0] if user_ctx['full_name'] else 'U') or 'U'
+    user_full_name = user_ctx['full_name']
+    default_page_url = (request.form.get('page_url') or request.args.get('from') or request.referrer or '').strip()
+    if default_page_url and default_page_url.startswith('http') and request.host not in default_page_url:
+        default_page_url = ''
+    if default_page_url and default_page_url.startswith('/') and request.host:
+        default_page_url = request.url_root.rstrip('/') + default_page_url
+
+    form_values = {
+        'feedback_type': 'comment',
+        'title': '',
+        'description': '',
+        'page_url': default_page_url,
+    }
+
+    if request.method == 'POST':
+        form_values['feedback_type'] = (request.form.get('feedback_type') or 'comment').strip()
+        form_values['title'] = (request.form.get('title') or '').strip()
+        form_values['description'] = (request.form.get('description') or '').strip()
+        form_values['page_url'] = (request.form.get('page_url') or '').strip()
+
+        valid_types = {t[0] for t in FEEDBACK_TYPES}
+        if form_values['feedback_type'] not in valid_types:
+            form_values['feedback_type'] = 'comment'
+        if not form_values['description']:
+            flash('Please enter a comment or description.', 'error')
+        else:
+            photo = request.files.get('photo')
+            try:
+                _path, asana_task_id, asana_error = _save_feedback_submission(
+                    {
+                        'feedback_type': form_values['feedback_type'],
+                        'title': form_values['title'],
+                        'description': form_values['description'],
+                        'page_url': form_values['page_url'],
+                        'username': user_ctx['username'],
+                        'full_name': user_ctx['full_name'],
+                        'email': user_ctx['email'],
+                    },
+                    photo_file=photo if photo and photo.filename else None,
+                )
+                if asana_task_id:
+                    flash('Thanks for your feedback! A task was created in Asana for the team to review.', 'success')
+                elif asana_error:
+                    flash('Thanks — we saved your feedback, but could not create the Asana task. An admin may need to reconnect Asana.', 'success')
+                else:
+                    flash('Thanks for your feedback! We received it and will review it soon.', 'success')
+                return redirect(url_for('feedback'))
+            except ValueError as exc:
+                flash(str(exc), 'error')
+            except Exception as exc:
+                _log_exception_to_file(exc)
+                flash('Something went wrong while sending your feedback. Please try again.', 'error')
+
+    feedback_type_options = FEEDBACK_TYPES
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Feedback - Onboarding App</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; color: #000; }
+            .top-header {
+                background: #000;
+                padding: 12px 30px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                min-height: 60px;
+                position: relative;
+                z-index: 100;
+            }
+            .logo-section {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                font-size: 1.4em;
+                font-weight: 800;
+                color: #fff;
+            }
+            .logo-section img {
+                height: 80px;
+                width: auto;
+                align-self: flex-end;
+                margin-bottom: -40px;
+            }
+            .nav-links { display: flex; gap: 8px; align-items: center; }
+            .nav-links a {
+                color: #fff;
+                text-decoration: none;
+                font-size: 0.95em;
+                font-weight: 600;
+                padding: 8px 14px;
+                border-radius: 999px;
+            }
+            .user-section {
+                display: flex;
+                align-items: center;
+                gap: 15px;
+                position: relative;
+            }
+            .user-dropdown {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                cursor: pointer;
+                padding: 5px 10px;
+                border-radius: 20px;
+                color: #fff;
+            }
+            .user-dropdown:hover { background: rgba(255,255,255,0.1); }
+            .user-icon {
+                width: 32px;
+                height: 32px;
+                border-radius: 50%;
+                background: #FE0100;
+                color: #fff;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: bold;
+            }
+            .dropdown-menu {
+                display: none;
+                position: absolute;
+                right: 0;
+                top: 100%;
+                background: #fff;
+                min-width: 200px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                border-radius: 0.5rem;
+                margin-top: 10px;
+                z-index: 1000;
+            }
+            .dropdown-menu.show { display: block; }
+            .dropdown-item {
+                padding: 12px 20px;
+                color: #000;
+                text-decoration: none;
+                display: block;
+            }
+            .dropdown-item:hover { background: #f5f5f5; }
+            .main-content {
+                max-width: 960px;
+                margin: 0 auto;
+                padding: 24px 20px 48px;
+            }
+            @media (max-width: 768px) {
+                .top-header { padding: 10px 14px; flex-wrap: wrap; gap: 10px; }
+                .logo-section img { height: 42px; margin-bottom: 0; align-self: center; }
+                .nav-links { display: none; }
+                .user-dropdown-label, .user-dropdown-caret { display: none; }
+            }
+        {{ global_theme_css|safe }}
+        </style>
+    </head>
+    <body class="user-app-shell">
+        <div class="top-header">
+            <div class="logo-section">
+                <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+                <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+                <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
+            </div>
+            <div class="nav-links">
+                <a href="{{ url_for('dashboard') }}">Home</a>
+                <a href="{{ url_for('user_tasks') }}">Tasks</a>
+                <a href="{{ url_for('view_documents') }}">Files</a>
+                <a href="{{ url_for('list_training_videos') }}">Videos</a>
+                <a href="{{ url_for('profile') }}">Profile</a>
+            </div>
+            <div class="user-section">
+                {{ feedback_header_button|safe }}
+                <div class="user-dropdown" onclick="toggleUserDropdown()">
+                    <div class="user-icon">{{ user_first_name[0].upper() if user_first_name else 'U' }}</div>
+                    <span class="user-dropdown-label">{{ user_full_name }}</span>
+                    <span class="user-dropdown-caret" aria-hidden="true">▼</span>
+                </div>
+                <div class="dropdown-menu" id="userDropdown">
+                    {{ staff_console_dropdown_links }}
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <section class="feedback-page-panel section">
+                <h1 class="page-title">Send feedback</h1>
+                <p class="feedback-intro page-subtitle">
+                    Share a comment, report a problem, or suggest an improvement. You can attach a screenshot or photo if it helps explain the issue.
+                </p>
+
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                    <div class="feedback-flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+                {% endwith %}
+
+                <form class="feedback-form" method="post" enctype="multipart/form-data" action="{{ url_for('feedback') }}">
+                    <div class="form-row">
+                        <label for="feedback_type">Type</label>
+                        <select id="feedback_type" name="feedback_type" required>
+                            {% for value, label in feedback_type_options %}
+                            <option value="{{ value }}" {% if form_values.feedback_type == value %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label for="title">Subject <span style="font-weight:400;color:#9ea8b8;">(optional)</span></label>
+                        <input type="text" id="title" name="title" maxlength="200" value="{{ form_values.title }}" placeholder="Short summary">
+                    </div>
+                    <div class="form-row">
+                        <label for="description">Details</label>
+                        <textarea id="description" name="description" required maxlength="5000" placeholder="What happened? What would you like to see improved?">{{ form_values.description }}</textarea>
+                    </div>
+                    <div class="form-row">
+                        <label for="page_url">Page <span style="font-weight:400;color:#9ea8b8;">(optional)</span></label>
+                        <input type="url" id="page_url" name="page_url" maxlength="500" value="{{ form_values.page_url }}" placeholder="https://...">
+                        <span class="field-hint">We pre-fill this when you open feedback from another page.</span>
+                    </div>
+                    <div class="form-row">
+                        <label for="photo">Photo <span style="font-weight:400;color:#9ea8b8;">(optional)</span></label>
+                        <input type="file" id="photo" name="photo" accept="image/jpeg,image/png,image/gif,image/webp">
+                        <span class="field-hint">JPG, PNG, GIF, or WebP. Max upload size follows the app limit.</span>
+                        <img id="photoPreview" class="feedback-photo-preview" alt="Selected photo preview">
+                    </div>
+                    <div class="feedback-form-actions">
+                        <button type="submit" class="feedback-submit-btn">Submit feedback</button>
+                        <a href="{{ url_for('dashboard') }}" class="btn" style="text-decoration:none;">Cancel</a>
+                    </div>
+                </form>
+            </section>
+        </div>
+
+        <script>
+            function toggleUserDropdown() {
+                var dropdown = document.getElementById('userDropdown');
+                if (dropdown) dropdown.classList.toggle('show');
+            }
+            window.onclick = function(event) {
+                if (!event.target.closest('.user-dropdown')) {
+                    var dropdown = document.getElementById('userDropdown');
+                    if (dropdown && dropdown.classList.contains('show')) dropdown.classList.remove('show');
+                }
+            };
+            (function() {
+                var input = document.getElementById('photo');
+                var preview = document.getElementById('photoPreview');
+                if (!input || !preview) return;
+                input.addEventListener('change', function() {
+                    var file = input.files && input.files[0];
+                    if (!file) {
+                        preview.style.display = 'none';
+                        preview.removeAttribute('src');
+                        return;
+                    }
+                    var reader = new FileReader();
+                    reader.onload = function(e) {
+                        preview.src = e.target.result;
+                        preview.style.display = 'block';
+                    };
+                    reader.readAsDataURL(file);
+                });
+            })();
+        </script>
+    </body>
+    </html>
+    ''',
+        is_admin=is_admin,
+        user_first_name=user_first_name,
+        user_full_name=user_full_name,
+        feedback_type_options=feedback_type_options,
+        form_values=form_values,
+        feedback_header_button=_feedback_header_button_html(is_active=True),
+    )
+
+
 @app.route('/profile')
 @login_required
 def profile():
@@ -10833,6 +11492,11 @@ def _admin_dashboard_impl():
                             <span class="quick-link-text">Onboarding Messages</span>
                             <span class="quick-link-count">→</span>
                         </a>
+                        <a href="{{ url_for('admin_asana_feedback') }}" class="quick-link-item" style="text-decoration: none;">
+                            <span class="quick-link-icon">📋</span>
+                            <span class="quick-link-text">Asana Feedback</span>
+                            <span class="quick-link-count">→</span>
+                        </a>
                     </div>
                 </div>
             </div>
@@ -11349,6 +12013,153 @@ def manager_dashboard():
     ''', store_id=store_id, store_name=store_name, new_hires_count=new_hires_count, documents_count=documents_count,
          manager_name=manager_name, can_start=can_start, can_documents=can_documents,
          can_training=can_training, can_checklist=can_checklist, can_user_checklists=can_user_checklists)
+
+
+@app.route('/admin/asana/feedback')
+@admin_required
+def admin_asana_feedback():
+    """Configure and connect Asana OAuth for feedback tasks."""
+    connected = _asana_is_connected()
+    connected_user = get_admin_setting('asana_connected_user')
+    redirect_uri = _asana_redirect_uri()
+    configured = _asana_oauth_configured()
+    project_gid = ASANA_FEEDBACK_PROJECT_GID
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Asana Feedback - Admin</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #f5f5f5; }
+            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
+            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+            .container { max-width: 720px; margin: 24px auto; padding: 0 20px 48px; }
+            .card { background: white; border-radius: 0.75rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 20px; }
+            .card h2 { font-size: 1.15em; margin-bottom: 12px; }
+            .card p, .card li { line-height: 1.55; margin-bottom: 10px; color: #444; }
+            .status-ok { color: #155724; font-weight: 600; }
+            .status-warn { color: #856404; font-weight: 600; }
+            .mono { font-family: Consolas, monospace; font-size: 0.9em; word-break: break-all; }
+            .btn { display: inline-block; padding: 10px 18px; border-radius: 0.5rem; border: none; cursor: pointer; font-size: 0.95em; text-decoration: none; font-weight: 600; }
+            .btn-primary { background: #FE0100; color: #fff; }
+            .btn-secondary { background: #6c757d; color: #fff; margin-left: 8px; }
+            ol { padding-left: 1.25rem; }
+        {{ global_theme_css|safe }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>Asana Feedback</h1>
+            <a href="{{ url_for('admin_dashboard', staff_console='admin') }}" class="back-btn">← Admin Dashboard</a>
+        </div>
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            {% for category, msg in messages %}
+            <div class="card" style="margin-bottom:16px;background:{% if category == 'error' %}#f8d7da{% else %}#d4edda{% endif %};">
+                <p style="margin:0;color:{% if category == 'error' %}#721c24{% else %}#155724{% endif %};">{{ msg }}</p>
+            </div>
+            {% endfor %}
+            {% endif %}
+            {% endwith %}
+
+            <div class="card">
+                <h2>Connection status</h2>
+                {% if connected %}
+                <p class="status-ok">Connected{% if connected_user %} as {{ connected_user }}{% endif %}.</p>
+                <p>User feedback submissions will create tasks in your Asana project.</p>
+                <form method="post" action="{{ url_for('asana_oauth_disconnect') }}" style="margin-top:16px;" onsubmit="return confirm('Disconnect Asana? New feedback will be saved locally only until you connect again.');">
+                    <button type="submit" class="btn btn-secondary">Disconnect Asana</button>
+                </form>
+                {% elif configured %}
+                <p class="status-warn">Not connected yet.</p>
+                <p>An admin needs to authorize this app with Asana once. After that, feedback form submissions create tasks automatically.</p>
+                <a href="{{ url_for('asana_oauth_connect') }}" class="btn btn-primary" style="margin-top:12px;">Connect to Asana</a>
+                {% else %}
+                <p class="status-warn">Asana is not configured.</p>
+                <p>Add <span class="mono">ASANA_CLIENT_ID</span> and <span class="mono">ASANA_CLIENT_SECRET</span> to your <span class="mono">.env</span> file (from the Asana Developer Console).</p>
+                {% endif %}
+            </div>
+
+            <div class="card">
+                <h2>Setup checklist</h2>
+                <ol>
+                    <li>In <a href="https://app.asana.com/0/my-apps" target="_blank" rel="noopener noreferrer">Asana Developer Console</a>, create an app and copy the <strong>Client ID</strong> and <strong>Client secret</strong> into <span class="mono">.env</span>.</li>
+                    <li>Under OAuth → Permission scopes, enable at least <span class="mono">tasks:write</span>, <span class="mono">attachments:write</span>, and <span class="mono">projects:read</span> (or Full permissions).</li>
+                    <li>Add this redirect URL to your Asana app: <span class="mono">{{ redirect_uri }}</span></li>
+                    <li>Set <span class="mono">ASANA_FEEDBACK_PROJECT_GID</span> in <span class="mono">.env</span> to the project where tasks should go{% if project_gid %} (currently <span class="mono">{{ project_gid }}</span>){% else %} — <strong>not set yet</strong>{% endif %}.</li>
+                    <li>Click <strong>Connect to Asana</strong> above and approve access.</li>
+                </ol>
+            </div>
+        </div>
+    </body>
+    </html>
+    ''',
+        connected=connected,
+        connected_user=connected_user,
+        redirect_uri=redirect_uri,
+        configured=configured,
+        project_gid=project_gid,
+    )
+
+
+@app.route('/admin/asana/connect')
+@admin_required
+def asana_oauth_connect():
+    if not _asana_oauth_configured():
+        flash('Set ASANA_CLIENT_ID and ASANA_CLIENT_SECRET in .env first.', 'error')
+        return redirect(url_for('admin_asana_feedback'))
+    verifier, challenge = generate_pkce_pair()
+    state = secrets.token_urlsafe(24)
+    session['asana_oauth_state'] = state
+    session['asana_oauth_code_verifier'] = verifier
+    auth_url = build_authorization_url(
+        ASANA_CLIENT_ID,
+        _asana_redirect_uri(),
+        state,
+        challenge,
+    )
+    return redirect(auth_url)
+
+
+@app.route('/admin/asana/callback')
+@admin_required
+def asana_oauth_callback():
+    error = request.args.get('error')
+    if error:
+        flash(f'Asana authorization was denied or failed ({error}).', 'error')
+        return redirect(url_for('admin_asana_feedback'))
+    state = request.args.get('state') or ''
+    code = request.args.get('code') or ''
+    expected_state = session.pop('asana_oauth_state', None)
+    code_verifier = session.pop('asana_oauth_code_verifier', None)
+    if not code or not code_verifier or not expected_state or state != expected_state:
+        flash('Invalid Asana OAuth response. Please try connecting again.', 'error')
+        return redirect(url_for('admin_asana_feedback'))
+    try:
+        token_payload = exchange_authorization_code(
+            ASANA_CLIENT_ID,
+            ASANA_CLIENT_SECRET,
+            _asana_redirect_uri(),
+            code,
+            code_verifier,
+        )
+        _asana_store_tokens(token_payload)
+        flash('Asana connected successfully. Feedback will now create tasks in your project.', 'success')
+    except AsanaError as exc:
+        flash(f'Could not complete Asana authorization: {exc}', 'error')
+    return redirect(url_for('admin_asana_feedback'))
+
+
+@app.route('/admin/asana/disconnect', methods=['POST'])
+@admin_required
+def asana_oauth_disconnect():
+    _asana_clear_tokens()
+    flash('Asana disconnected.', 'success')
+    return redirect(url_for('admin_asana_feedback'))
 
 
 @app.route('/admin/settings')
