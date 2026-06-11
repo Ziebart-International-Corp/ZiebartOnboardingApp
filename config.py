@@ -101,11 +101,25 @@ AUTH_USER_HEADER = 'HTTP_X_FORWARDED_USER'  # IIS may use this
 LOGON_USER_HEADER = 'HTTP_X_REMOTE_USER'  # Alternative header
 AUTH_TYPE_HEADER = 'HTTP_X_AUTH_TYPE'
 
-# Asana feedback (OAuth — client id/secret from developer.asana.com → My apps)
+# Asana feedback — set ASANA_ACCESS_TOKEN (PAT or service account token) + project GID in .env.
+# Client id/secret are optional (only needed for OAuth refresh-token flow).
+ASANA_ACCESS_TOKEN = _env_value('ASANA_ACCESS_TOKEN') or os.environ.get('ASANA_ACCESS_TOKEN', '')
 ASANA_CLIENT_ID = _env_value('ASANA_CLIENT_ID') or os.environ.get('ASANA_CLIENT_ID', '')
 ASANA_CLIENT_SECRET = _env_value('ASANA_CLIENT_SECRET') or os.environ.get('ASANA_CLIENT_SECRET', '')
+ASANA_REFRESH_TOKEN = _env_value('ASANA_REFRESH_TOKEN') or os.environ.get('ASANA_REFRESH_TOKEN', '')
 # Must match a redirect URL registered on your Asana app (leave blank to use /admin/asana/callback)
 ASANA_REDIRECT_URI = _env_value('ASANA_REDIRECT_URI') or os.environ.get('ASANA_REDIRECT_URI', '')
 # Project where feedback tasks are created (numeric GID from project URL in Asana)
 ASANA_FEEDBACK_PROJECT_GID = _env_value('ASANA_FEEDBACK_PROJECT_GID') or os.environ.get('ASANA_FEEDBACK_PROJECT_GID', '')
+# Section (list) GIDs within that project — from .../project/PROJECT_GID/list/SECTION_GID
+ASANA_SECTION_GID_COMMENT = _env_value('ASANA_SECTION_GID_COMMENT') or os.environ.get('ASANA_SECTION_GID_COMMENT', '')
+ASANA_SECTION_GID_ISSUE = _env_value('ASANA_SECTION_GID_ISSUE') or os.environ.get('ASANA_SECTION_GID_ISSUE', '')
+ASANA_SECTION_GID_SUGGESTION = _env_value('ASANA_SECTION_GID_SUGGESTION') or os.environ.get('ASANA_SECTION_GID_SUGGESTION', '')
+ASANA_FEEDBACK_SECTION_GIDS = {
+    'comment': ASANA_SECTION_GID_COMMENT,
+    'issue': ASANA_SECTION_GID_ISSUE,
+    'suggestion': ASANA_SECTION_GID_SUGGESTION,
+}
+# User GID for assignee on new feedback tasks (from GET /users/{email} or Asana profile URL)
+ASANA_FEEDBACK_ASSIGNEE_GID = _env_value('ASANA_FEEDBACK_ASSIGNEE_GID') or os.environ.get('ASANA_FEEDBACK_ASSIGNEE_GID', '')
 

@@ -39,7 +39,7 @@ from models import (db, NewHire, User as UserModel, Document, ChecklistItem, New
                     TrainingVideo, QuizQuestion, QuizAnswer, UserTrainingProgress, UserQuizResponse, UserTask,
                     DocumentSignatureField, DocumentSignature, DocumentTypedField, DocumentTypedFieldValue, DocumentAssignment, UserNotification, ExternalLink, Role, AdminSetting, Store, Department, ManagerPermission, SignatureAuditLog, document_stores, role_documents, new_hire_required_training, training_video_stores)
 from membership import get_token_groups, get_local_groups
-from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, ASANA_CLIENT_ID, ASANA_CLIENT_SECRET, ASANA_REDIRECT_URI, ASANA_FEEDBACK_PROJECT_GID
+from config import SECRET_KEY, SQLALCHEMY_DATABASE_URI, SQLALCHEMY_ENGINE_OPTIONS, BASE_DIR, ASANA_ACCESS_TOKEN, ASANA_CLIENT_ID, ASANA_CLIENT_SECRET, ASANA_REFRESH_TOKEN, ASANA_REDIRECT_URI, ASANA_FEEDBACK_PROJECT_GID, ASANA_FEEDBACK_SECTION_GIDS, ASANA_SECTION_GID_COMMENT, ASANA_SECTION_GID_ISSUE, ASANA_SECTION_GID_SUGGESTION, ASANA_FEEDBACK_ASSIGNEE_GID
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -1898,6 +1898,25 @@ def _asana_oauth_configured():
     return bool(ASANA_CLIENT_ID and ASANA_CLIENT_SECRET)
 
 
+def _asana_env_token_configured():
+    return bool((ASANA_ACCESS_TOKEN or '').strip())
+
+
+def _asana_feedback_ready():
+    """True when feedback can create Asana tasks (env token or OAuth tokens + project GID)."""
+    if not ASANA_FEEDBACK_PROJECT_GID:
+        return False
+    if _asana_env_token_configured():
+        return True
+    if not _asana_oauth_configured():
+        return False
+    return bool(
+        (ASANA_REFRESH_TOKEN or '').strip()
+        or get_admin_setting('asana_refresh_token')
+        or get_admin_setting('asana_access_token')
+    )
+
+
 def _asana_store_tokens(token_payload):
     access = token_payload.get('access_token') or ''
     refresh = token_payload.get('refresh_token') or ''
@@ -1911,7 +1930,10 @@ def _asana_store_tokens(token_payload):
 
 
 def _asana_get_access_token():
-    """Return a valid Asana access token, refreshing if needed."""
+    """Return a valid Asana bearer token (.env PAT first, else OAuth refresh)."""
+    env_token = (ASANA_ACCESS_TOKEN or '').strip()
+    if env_token:
+        return env_token
     if not _asana_oauth_configured():
         return None
     access = get_admin_setting('asana_access_token')
@@ -1924,7 +1946,7 @@ def _asana_get_access_token():
         except Exception:
             if access:
                 return access
-    refresh = get_admin_setting('asana_refresh_token')
+    refresh = (ASANA_REFRESH_TOKEN or '').strip() or get_admin_setting('asana_refresh_token')
     if not refresh:
         return None
     try:
@@ -1936,6 +1958,8 @@ def _asana_get_access_token():
 
 
 def _asana_is_connected():
+    if _asana_env_token_configured():
+        return True
     return bool(get_admin_setting('asana_refresh_token') or get_admin_setting('asana_access_token'))
 
 
@@ -1951,17 +1975,22 @@ def _asana_clear_tokens():
 
 
 def _create_asana_feedback_task(form_data, photo_path=None, photo_filename=None):
-    if not _asana_oauth_configured() or not ASANA_FEEDBACK_PROJECT_GID:
-        return None
+    if not ASANA_FEEDBACK_PROJECT_GID:
+        raise AsanaError('ASANA_FEEDBACK_PROJECT_GID is not set in .env.')
     access_token = _asana_get_access_token()
     if not access_token:
-        return None
+        raise AsanaError(
+            'Asana is not configured. Set ASANA_ACCESS_TOKEN in .env '
+            '(personal access token or service account token from Asana).'
+        )
     return create_feedback_task(
         access_token,
         ASANA_FEEDBACK_PROJECT_GID,
         form_data,
         photo_path=photo_path,
         photo_filename=photo_filename,
+        section_gid=ASANA_FEEDBACK_SECTION_GIDS.get(form_data.get('feedback_type') or 'comment'),
+        assignee_gid=ASANA_FEEDBACK_ASSIGNEE_GID,
     )
 
 
@@ -12018,11 +12047,13 @@ def manager_dashboard():
 @app.route('/admin/asana/feedback')
 @admin_required
 def admin_asana_feedback():
-    """Configure and connect Asana OAuth for feedback tasks."""
+    """Asana feedback integration status (.env access token or optional OAuth)."""
     connected = _asana_is_connected()
     connected_user = get_admin_setting('asana_connected_user')
     redirect_uri = _asana_redirect_uri()
-    configured = _asana_oauth_configured()
+    oauth_available = _asana_oauth_configured()
+    env_token = _asana_env_token_configured()
+    feedback_ready = _asana_feedback_ready()
     project_gid = ASANA_FEEDBACK_PROJECT_GID
     return render_template_string('''
     <!DOCTYPE html>
@@ -12068,30 +12099,44 @@ def admin_asana_feedback():
 
             <div class="card">
                 <h2>Connection status</h2>
-                {% if connected %}
-                <p class="status-ok">Connected{% if connected_user %} as {{ connected_user }}{% endif %}.</p>
-                <p>User feedback submissions will create tasks in your Asana project.</p>
-                <form method="post" action="{{ url_for('asana_oauth_disconnect') }}" style="margin-top:16px;" onsubmit="return confirm('Disconnect Asana? New feedback will be saved locally only until you connect again.');">
-                    <button type="submit" class="btn btn-secondary">Disconnect Asana</button>
+                {% if feedback_ready %}
+                <p class="status-ok">Ready — feedback submissions will create tasks in Asana.</p>
+                {% if env_token %}
+                <p>Using <span class="mono">ASANA_ACCESS_TOKEN</span> from <span class="mono">.env</span>.</p>
+                {% elif connected %}
+                <p>Connected via OAuth{% if connected_user %} as {{ connected_user }}{% endif %}.</p>
+                <form method="post" action="{{ url_for('asana_oauth_disconnect') }}" style="margin-top:16px;" onsubmit="return confirm('Disconnect OAuth tokens stored in the database? .env access token is unaffected.');">
+                    <button type="submit" class="btn btn-secondary">Disconnect OAuth</button>
                 </form>
-                {% elif configured %}
-                <p class="status-warn">Not connected yet.</p>
-                <p>An admin needs to authorize this app with Asana once. After that, feedback form submissions create tasks automatically.</p>
-                <a href="{{ url_for('asana_oauth_connect') }}" class="btn btn-primary" style="margin-top:12px;">Connect to Asana</a>
+                {% endif %}
+                {% elif env_token or connected %}
+                <p class="status-warn">Token configured but <span class="mono">ASANA_FEEDBACK_PROJECT_GID</span> is missing in <span class="mono">.env</span>.</p>
                 {% else %}
-                <p class="status-warn">Asana is not configured.</p>
-                <p>Add <span class="mono">ASANA_CLIENT_ID</span> and <span class="mono">ASANA_CLIENT_SECRET</span> to your <span class="mono">.env</span> file (from the Asana Developer Console).</p>
+                <p class="status-warn">Not configured.</p>
+                <p>Add <span class="mono">ASANA_ACCESS_TOKEN</span> and <span class="mono">ASANA_FEEDBACK_PROJECT_GID</span> to <span class="mono">.env</span>. Client ID and secret alone cannot call the Asana API — you need a personal access token or service account token.</p>
+                {% if oauth_available %}
+                <p style="margin-top:12px;">Optional: use OAuth instead by clicking below.</p>
+                <a href="{{ url_for('asana_oauth_connect') }}" class="btn btn-primary" style="margin-top:8px;">Connect to Asana (OAuth)</a>
+                {% endif %}
                 {% endif %}
             </div>
 
             <div class="card">
                 <h2>Setup checklist</h2>
                 <ol>
-                    <li>In <a href="https://app.asana.com/0/my-apps" target="_blank" rel="noopener noreferrer">Asana Developer Console</a>, create an app and copy the <strong>Client ID</strong> and <strong>Client secret</strong> into <span class="mono">.env</span>.</li>
-                    <li>Under OAuth → Permission scopes, enable at least <span class="mono">tasks:write</span>, <span class="mono">attachments:write</span>, and <span class="mono">projects:read</span> (or Full permissions).</li>
-                    <li>Add this redirect URL to your Asana app: <span class="mono">{{ redirect_uri }}</span></li>
-                    <li>Set <span class="mono">ASANA_FEEDBACK_PROJECT_GID</span> in <span class="mono">.env</span> to the project where tasks should go{% if project_gid %} (currently <span class="mono">{{ project_gid }}</span>){% else %} — <strong>not set yet</strong>{% endif %}.</li>
-                    <li>Click <strong>Connect to Asana</strong> above and approve access.</li>
+                    <li>In Asana, create a <strong>personal access token</strong> (My Settings → Apps → Personal access tokens) or a <strong>service account token</strong> (Enterprise).</li>
+                    <li>Set <span class="mono">ASANA_ACCESS_TOKEN</span> in <span class="mono">.env</span> to that token.</li>
+                    <li>Set <span class="mono">ASANA_FEEDBACK_PROJECT_GID</span> in <span class="mono">.env</span>{% if project_gid %} (currently <span class="mono">{{ project_gid }}</span>){% else %} — <strong>not set yet</strong>{% endif %}.</li>
+                    <li>Create three sections in that project (Comments, Issues, Improvements) and set their list GIDs in <span class="mono">.env</span>:
+                        <ul style="margin-top:8px;">
+                            <li><span class="mono">ASANA_SECTION_GID_COMMENT</span>{% if section_gid_comment %} — {{ section_gid_comment }}{% else %} — not set{% endif %}</li>
+                            <li><span class="mono">ASANA_SECTION_GID_ISSUE</span>{% if section_gid_issue %} — {{ section_gid_issue }}{% else %} — not set{% endif %}</li>
+                            <li><span class="mono">ASANA_SECTION_GID_SUGGESTION</span>{% if section_gid_suggestion %} — {{ section_gid_suggestion }}{% else %} — not set{% endif %} (maps to “Suggest an improvement”)</li>
+                        </ul>
+                        GID is the number in the section URL: <span class="mono">.../list/1234567890</span>
+                    </li>
+                    <li>Optional: set <span class="mono">ASANA_FEEDBACK_ASSIGNEE_GID</span> so every feedback task is assigned automatically{% if assignee_gid %} (currently <span class="mono">{{ assignee_gid }}</span>){% endif %}.</li>
+                    <li>Ensure the token’s user/service account has access to that project.</li>
                 </ol>
             </div>
         </div>
@@ -12101,8 +12146,14 @@ def admin_asana_feedback():
         connected=connected,
         connected_user=connected_user,
         redirect_uri=redirect_uri,
-        configured=configured,
+        oauth_available=oauth_available,
+        env_token=env_token,
+        feedback_ready=feedback_ready,
         project_gid=project_gid,
+        section_gid_comment=ASANA_SECTION_GID_COMMENT,
+        section_gid_issue=ASANA_SECTION_GID_ISSUE,
+        section_gid_suggestion=ASANA_SECTION_GID_SUGGESTION,
+        assignee_gid=ASANA_FEEDBACK_ASSIGNEE_GID,
     )
 
 

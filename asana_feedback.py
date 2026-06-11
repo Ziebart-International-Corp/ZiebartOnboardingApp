@@ -208,6 +208,8 @@ def create_feedback_task(
     form_data: dict[str, Any],
     photo_path=None,
     photo_filename: Optional[str] = None,
+    section_gid: Optional[str] = None,
+    assignee_gid: Optional[str] = None,
 ) -> str:
     """Create an Asana task (and optional attachment). Returns task GID."""
     name = build_feedback_task_name(
@@ -216,17 +218,22 @@ def create_feedback_task(
         form_data.get('description') or '',
     )
     notes = build_feedback_task_notes(form_data)
+    task_data: dict[str, Any] = {
+        'name': name,
+        'notes': notes,
+        'projects': [project_gid],
+    }
+    assignee = (assignee_gid or '').strip()
+    if assignee:
+        task_data['assignee'] = assignee
+    section = (section_gid or '').strip()
+    if section:
+        task_data['memberships'] = [{'project': project_gid, 'section': section}]
     response = _api_json(
         'POST',
         '/tasks',
         access_token,
-        {
-            'data': {
-                'name': name,
-                'notes': notes,
-                'projects': [project_gid],
-            },
-        },
+        {'data': task_data},
     )
     task_gid = (response.get('data') or {}).get('gid')
     if not task_gid:
