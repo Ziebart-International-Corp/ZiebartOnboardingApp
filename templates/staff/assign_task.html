@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en" class="assign-task-html">
+<head>
+    <title>Assign task to user</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html.assign-task-html, body.assign-task-page { color-scheme: dark; }
+        body { font-family: 'URW Form', Arial, sans-serif; background: #0a0e14; }
+        .header {
+            background: #000000; color: white; padding: 12px 30px;
+            display: flex; justify-content: space-between; align-items: center; min-height: 60px;
+        }
+        .header h1 { font-weight: 800; font-size: 1.2em; margin: 0; }
+        .back-btn {
+            background: rgba(255,255,255,0.2); color: #FFFFFF; padding: 8px 16px; border-radius: 0.5rem;
+            text-decoration: none; border: 1px solid rgba(255,255,255,0.3);
+        }
+        .container { max-width: 720px; margin: 20px auto; padding: 0 20px; }
+        .admin-panel {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 0.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 25px; margin-bottom: 20px; color: #f2f5fb;
+        }
+        .form-group { margin-bottom: 18px; }
+        .form-group label { display: block; font-weight: 600; margin-bottom: 6px; color: #f2f5fb; }
+        .form-group input[type="text"], .form-group input[type="date"], .form-group select, .form-group textarea {
+            width: 100%; padding: 10px; border: 1px solid rgba(255,255,255,0.24);
+            border-radius: 4px; font-size: 14px; background: #121a26; color: #f2f5fb;
+        }
+        .form-group textarea { min-height: 100px; resize: vertical; }
+        .form-group input::placeholder, .form-group textarea::placeholder { color: #9aa5b8; }
+        .form-group select option, .form-group select optgroup { background: #121a26; color: #f2f5fb; }
+        .help { font-size: 0.85em; color: #b7c1d3; margin-top: 4px; }
+        .btn {
+            display: inline-block; padding: 12px 24px; background: #FE0100; color: white; border: none;
+            border-radius: 5px; cursor: pointer; font-size: 15px; font-weight: 600;
+        }
+        .flash { padding: 12px 16px; margin-bottom: 16px; border-radius: 0.5rem; }
+        .flash.success { background: #d4edda; color: #155724; }
+        .flash.error { background: #f8d7da; color: #721c24; }
+        {{ global_theme_css|safe }}
+        body.assign-task-page .form-group select,
+        body.assign-task-page .form-group select option,
+        body.assign-task-page .form-group select optgroup {
+            background: #121a26 !important; color: #f2f5fb !important;
+        }
+        body.assign-task-page .form-group select option:checked {
+            background: #1f2a3d !important; color: #ffffff !important;
+        }
+    </style>
+</head>
+<body class="assign-task-page">
+    <div class="header">
+        <h1>Assign task to user</h1>
+        <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    <div class="container">
+        {% include 'macros/flashes.html' %}
+        <div class="admin-panel">
+            <p class="help" style="margin-bottom: 16px;">
+                Creates a one-off task on the user’s <strong>Tasks</strong> page. Optionally link the task to a
+                <strong>document</strong> (signing) or a <strong>training video</strong> (watch video and complete
+                the quiz). Leave both blank for a general one-off task.
+            </p>
+            <form method="POST" action="{{ url_for(assign_task_form_endpoint) }}">
+                <input type="hidden" name="staff_console" value="{{ staff_console_redirect }}">
+                <div class="form-group">
+                    <label for="store_filter">Store</label>
+                    {% if store_scope_locked %}
+                    <select id="store_filter" disabled aria-readonly="true">
+                        {% for st in all_stores %}
+                        <option value="{{ st.id }}" selected>{{ st.name }}{% if st.code %} ({{ st.code }}){% endif %}</option>
+                        {% endfor %}
+                    </select>
+                    <input type="hidden" id="store_filter_value" value="{{ prefill_store_id }}">
+                    <div class="help">Users are limited to your store.</div>
+                    {% else %}
+                    <select id="store_filter">
+                        <option value="">— Select store —</option>
+                        {% for st in all_stores %}
+                        <option value="{{ st.id }}" {% if prefill_store_id == st.id|string %}selected{% endif %}>
+                            {{ st.name }}{% if st.code %} ({{ st.code }}){% endif %}
+                        </option>
+                        {% endfor %}
+                        <option value="none" {% if prefill_store_id == 'none' %}selected{% endif %}>No store assigned</option>
+                    </select>
+                    <div class="help">Choose a store to narrow the user list below.</div>
+                    {% endif %}
+                </div>
+                <div class="form-group">
+                    <label for="username">User</label>
+                    <select id="username" name="username" required>
+                        <option value="">— Select store first —</option>
+                        {% for u in all_users %}
+                        <option value="{{ u.username }}"
+                                data-store-id="{{ user_store_ids.get(u.username) if user_store_ids.get(u.username) is not none else 'none' }}"
+                                {% if u.username == prefill_username %}selected{% endif %}
+                                hidden disabled>
+                            {{ user_display_names.get(u.username, u.username) }} ({{ u.username }})
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="document_id">Document to sign (optional)</label>
+                    <select id="document_id" name="document_id">
+                        <option value="">— None —</option>
+                        {% for d in all_documents %}
+                        <option value="{{ d.id }}" {% if prefill_document_id == d.id|string %}selected{% endif %}>
+                            {{ d.name_for_users or d.original_filename }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <div class="help">If selected, the user gets a sign-document task and the document is assigned to them.</div>
+                </div>
+                <div class="form-group">
+                    <label for="video_id">Training video (optional)</label>
+                    <select id="video_id" name="video_id">
+                        <option value="">— None —</option>
+                        {% for v in all_training_videos %}
+                        <option value="{{ v.id }}" {% if prefill_video_id == v.id|string %}selected{% endif %}>{{ v.title }}</option>
+                        {% endfor %}
+                    </select>
+                    <div class="help">Watch video and complete the quiz. Cannot be combined with a document on the same task.</div>
+                </div>
+                <div class="form-group">
+                    <label for="task_title">Task title <span id="task_title_optional" style="display:none; font-weight:400; color:#9aa5b8;">(optional — auto-filled from document or video)</span></label>
+                    <input type="text" id="task_title" name="task_title" maxlength="200" required placeholder="Short title shown in their task list">
+                </div>
+                <div class="form-group">
+                    <label for="task_description">Description (optional)</label>
+                    <textarea id="task_description" name="task_description" placeholder="What they need to do"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="priority">Priority</label>
+                    <select id="priority" name="priority">
+                        <option value="low">Low</option>
+                        <option value="normal" selected>Normal</option>
+                        <option value="high">High</option>
+                        <option value="urgent">Urgent</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="due_date">Due date (optional)</label>
+                    <input type="date" id="due_date" name="due_date">
+                </div>
+                <div class="form-group" id="internal_notes_group">
+                    <label for="notes">Internal notes (optional)</label>
+                    <input type="text" id="notes" name="notes" maxlength="500" placeholder="Visible to admins on task row">
+                    <div class="help" id="internal_notes_help" style="display:none;">Not used when a training video is selected.</div>
+                </div>
+                <button type="submit" class="btn">Assign task</button>
+            </form>
+        </div>
+    </div>
+    <script>
+        (function() {
+            var storeSel = document.getElementById('store_filter');
+            var storeLockedVal = document.getElementById('store_filter_value');
+            var userSel = document.getElementById('username');
+            var prefillUsername = {{ prefill_username|tojson }};
+            var lockedStore = storeLockedVal ? storeLockedVal.value : '';
+
+            function filterUsersByStore() {
+                if (!userSel) return;
+                var storeVal = lockedStore || (storeSel ? storeSel.value : '');
+                var placeholder = userSel.options[0];
+                var selectedUsername = userSel.value;
+                var selectedStillVisible = false;
+                for (var i = 1; i < userSel.options.length; i++) {
+                    var opt = userSel.options[i];
+                    var optStore = opt.getAttribute('data-store-id') || 'none';
+                    var show = !!storeVal && optStore === storeVal;
+                    opt.hidden = !show;
+                    opt.disabled = !show;
+                    if (show && opt.value === selectedUsername) selectedStillVisible = true;
+                }
+                if (!storeVal) {
+                    placeholder.textContent = '— Select store first —';
+                    userSel.value = '';
+                } else {
+                    placeholder.textContent = '— Select user —';
+                    if (!selectedStillVisible) userSel.value = '';
+                    if (prefillUsername) {
+                        for (var j = 1; j < userSel.options.length; j++) {
+                            var prefOpt = userSel.options[j];
+                            if (!prefOpt.hidden && !prefOpt.disabled && prefOpt.value === prefillUsername) {
+                                userSel.value = prefillUsername;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (storeSel) storeSel.addEventListener('change', filterUsersByStore);
+            filterUsersByStore();
+
+            var docSel = document.getElementById('document_id');
+            var videoSel = document.getElementById('video_id');
+            var titleInput = document.getElementById('task_title');
+            var optionalLabel = document.getElementById('task_title_optional');
+            var notesInput = document.getElementById('notes');
+            var notesGroup = document.getElementById('internal_notes_group');
+            var notesHelp = document.getElementById('internal_notes_help');
+            if (!docSel || !videoSel || !titleInput) return;
+
+            function syncLinkedTaskFields() {
+                var hasDoc = !!docSel.value;
+                var hasVideo = !!videoSel.value;
+                var hasLinked = hasDoc || hasVideo;
+                if (hasDoc && hasVideo) {
+                    if (docSel === document.activeElement) { videoSel.value = ''; hasVideo = false; }
+                    else { docSel.value = ''; hasDoc = false; }
+                    hasLinked = hasDoc || hasVideo;
+                }
+                if (hasLinked) {
+                    titleInput.required = false;
+                    if (optionalLabel) optionalLabel.style.display = 'inline';
+                    if (!titleInput.value.trim()) {
+                        if (hasDoc) {
+                            var docLabel = docSel.options[docSel.selectedIndex] ? docSel.options[docSel.selectedIndex].text : '';
+                            titleInput.placeholder = 'Auto: Sign Document: ' + docLabel;
+                        } else if (hasVideo) {
+                            var videoLabel = videoSel.options[videoSel.selectedIndex] ? videoSel.options[videoSel.selectedIndex].text : '';
+                            titleInput.placeholder = 'Auto: Complete Training: ' + videoLabel;
+                        }
+                    }
+                } else {
+                    titleInput.required = true;
+                    if (optionalLabel) optionalLabel.style.display = 'none';
+                    titleInput.placeholder = 'Short title shown in their task list';
+                }
+                if (notesInput && notesGroup) {
+                    var trainingSelected = !!videoSel.value;
+                    notesInput.disabled = trainingSelected;
+                    notesGroup.style.opacity = trainingSelected ? '0.55' : '1';
+                    if (notesHelp) notesHelp.style.display = trainingSelected ? 'block' : 'none';
+                    if (trainingSelected) notesInput.value = '';
+                }
+            }
+            docSel.addEventListener('change', syncLinkedTaskFields);
+            videoSel.addEventListener('change', syncLinkedTaskFields);
+            syncLinkedTaskFields();
+        })();
+    </script>
+</body>
+</html>

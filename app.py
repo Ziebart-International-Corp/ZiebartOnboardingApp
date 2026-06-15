@@ -12,7 +12,7 @@ try:
 except ImportError:
     pass
 
-from flask import Flask, render_template_string, redirect, url_for, request, session, flash, jsonify, send_file, send_from_directory, make_response, abort
+from flask import Flask, render_template, render_template_string, redirect, url_for, request, session, flash, jsonify, send_file, send_from_directory, make_response, abort
 from pdf_form_wizard import (
     ACRO_PLACEHOLDER_PREFIX,
     FITZ_AVAILABLE as PDF_WIZARD_FITZ_AVAILABLE,
@@ -266,6 +266,106 @@ def uses_manager_console_scope(force_manager=False):
 def document_manage_requires_store_scope():
     """True when document list/download should be limited to the user's store (not full admin)."""
     return uses_manager_console_scope()
+
+
+@app.template_global()
+def staff_store_scope_id():
+    """Store ID when staff tools should list store-scoped data; None for org-wide admin console."""
+    return get_current_user_store_id() if uses_manager_console_scope() else None
+
+
+def is_pure_manager():
+    """True for role=manager without admin role (store-scoped staff by default)."""
+    try:
+        if not current_user.is_authenticated:
+            return False
+    except Exception:
+        return False
+    return current_user.is_manager() and not current_user.is_admin()
+
+
+app.template_global()(is_pure_manager)
+
+
+def can_assign_extra_tasks():
+    """Admins and store managers may assign one-off tasks."""
+    try:
+        if not current_user.is_authenticated:
+            return False
+    except Exception:
+        return False
+    return current_user.is_admin() or is_pure_manager()
+
+
+def assign_task_link_context():
+    """Pick assign-task route from active staff console, not role alone."""
+    if uses_manager_console_scope() or is_pure_manager():
+        return 'manager_assign_task', 'manager'
+    return 'admin_assign_task', 'admin'
+
+
+@app.template_global()
+def assign_task_url(**kwargs):
+    """URL for assign-task links (manager console → /manager/assign-task)."""
+    endpoint, sc = assign_task_link_context()
+    kwargs.setdefault('staff_console', sc)
+    return url_for(endpoint, **kwargs)
+
+
+def new_hire_details_link_context(force_manager=False):
+    """Pick new-hire details route from active staff console, not role alone."""
+    if force_manager or uses_manager_console_scope():
+        return 'manager_view_new_hire_details', 'manager'
+    return 'view_new_hire_details', 'admin'
+
+
+@app.template_global()
+def view_new_hire_details_url(username, **kwargs):
+    """URL for new-hire detail links (manager console → /manager/new-hire/.../details)."""
+    endpoint, sc = new_hire_details_link_context()
+    kwargs['username'] = username
+    if endpoint == 'manager_view_new_hire_details':
+        return url_for(endpoint, **kwargs)
+    kwargs.setdefault('staff_console', sc)
+    return url_for(endpoint, **kwargs)
+
+
+@app.template_global()
+def new_hire_details_back_url():
+    """Back link from new-hire details: manager list vs staff dashboard."""
+    if uses_manager_console_scope() or uses_manager_new_hires_home():
+        return manager_new_hires_list_url()
+    return staff_console_home_url()
+
+
+def redirect_new_hire_details(username):
+    """Redirect back to details in the correct console context."""
+    endpoint, sc = new_hire_details_link_context()
+    if endpoint == 'manager_view_new_hire_details':
+        return redirect(url_for(endpoint, username=username))
+    return redirect(url_for(endpoint, username=username, staff_console=sc))
+
+
+def build_user_display_and_store_maps(users=None):
+    """Build display names and store IDs for user pickers."""
+    if users is None:
+        users = UserModel.query.order_by(UserModel.username).all()
+    new_hires_by_username = {nh.username: nh for nh in NewHire.query.all()}
+    user_display_names = {}
+    user_store_ids = {}
+    for u in users:
+        new_hire = new_hires_by_username.get(u.username)
+        if new_hire:
+            user_display_names[u.username] = f"{new_hire.first_name} {new_hire.last_name}".strip() or u.username
+        elif getattr(u, 'full_name', None) and u.full_name.strip():
+            user_display_names[u.username] = u.full_name.strip()
+        else:
+            user_display_names[u.username] = u.username
+        sid = getattr(u, 'store_id', None)
+        if sid is None and new_hire:
+            sid = getattr(new_hire, 'store_id', None)
+        user_store_ids[u.username] = sid
+    return users, user_display_names, user_store_ids
 
 
 @app.template_global()
@@ -3231,6 +3331,54 @@ def get_visible_ordered_user_tasks(task_list):
     return visible_list
 
 
+def training_video_id_from_task(task):
+    """Parse video_id from a training UserTask notes field (video_id:123)."""
+    if getattr(task, 'task_type', None) != 'training':
+        return None
+    notes = getattr(task, 'notes', None) or ''
+    if not notes.startswith('video_id:'):
+        return None
+    try:
+        return int(notes.split(':')[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def training_video_ids_from_user_tasks(task_list):
+    """Video IDs already represented by training UserTask rows."""
+    ids = set()
+    for task in task_list:
+        vid = training_video_id_from_task(task)
+        if vid is not None:
+            ids.add(vid)
+    return ids
+
+
+def attach_training_video_ids_to_tasks(task_list):
+    """Set task.video_id for templates (Watch Training links)."""
+    for task in task_list:
+        task.video_id = training_video_id_from_task(task)
+
+
+def dashboard_onboarding_work(required_videos, all_user_tasks, completed_required_video_ids):
+    """Dedupe required training vs UserTask items for dashboard cards and progress bar."""
+    completed_set = set(completed_required_video_ids or [])
+    covered_video_ids = training_video_ids_from_user_tasks(all_user_tasks)
+    standalone_required = [v for v in (required_videos or []) if v.id not in covered_video_ids]
+    incomplete_standalone_training = [v for v in standalone_required if v.id not in completed_set]
+    total_tasks = len(all_user_tasks) + len(standalone_required)
+    completed_tasks = len([t for t in all_user_tasks if t.status == 'completed']) + len(
+        [v for v in standalone_required if v.id in completed_set]
+    )
+    progress_percentage = int((completed_tasks / total_tasks * 100)) if total_tasks > 0 else 0
+    return {
+        'incomplete_standalone_training': incomplete_standalone_training,
+        'total_tasks': total_tasks,
+        'completed_tasks': completed_tasks,
+        'progress_percentage': progress_percentage,
+    }
+
+
 def user_onboarding_is_fully_complete(username):
     """True when required training and all visible user tasks are done (same rules as dashboard)."""
     user_new_hire = NewHire.query.filter_by(username=username).first()
@@ -3240,7 +3388,11 @@ def user_onboarding_is_fully_complete(username):
             required_videos = list(user_new_hire.required_training_videos)
         except Exception:
             required_videos = []
+    all_user_tasks = UserTask.query.filter_by(username=username).all()
+    covered_video_ids = training_video_ids_from_user_tasks(all_user_tasks)
     for video in required_videos:
+        if video.id in covered_video_ids:
+            continue
         progress = UserTrainingProgress.query.filter_by(
             username=username,
             video_id=video.id,
@@ -3249,7 +3401,6 @@ def user_onboarding_is_fully_complete(username):
         ).first()
         if not progress:
             return False
-    all_user_tasks = UserTask.query.filter_by(username=username).all()
     if not required_videos and not all_user_tasks:
         return False
     visible_ordered = get_visible_ordered_user_tasks(all_user_tasks)
@@ -4531,9 +4682,7 @@ def dashboard():
             except Exception as e:
                 # If there's an error getting videos, use empty list
                 required_videos = []
-        
-        incomplete_training = [v for v in required_videos if v.id not in completed_required_videos]
-        
+
         # Ensure task order/dependency columns exist (for display_order, depends_on_task_id)
         try:
             _ensure_user_task_order_columns()
@@ -4586,21 +4735,16 @@ def dashboard():
         # Only show tasks that are visible (dependency satisfied); then filter to incomplete for display
         visible_ordered = get_visible_ordered_user_tasks(all_user_tasks)
         user_tasks = [t for t in visible_ordered if t.status != 'completed']
-        completed_user_tasks = [t for t in all_user_tasks if t.status == 'completed']
+        attach_training_video_ids_to_tasks(user_tasks)
+
+        work = dashboard_onboarding_work(required_videos, all_user_tasks, completed_required_videos)
+        incomplete_training = work['incomplete_standalone_training']
+        total_tasks = work['total_tasks']
+        completed_tasks = work['completed_tasks']
+        progress_percentage = work['progress_percentage']
         
         # Check if all tasks are completed
         all_tasks_completed = (len(incomplete_training) == 0 and len(user_tasks) == 0) if (required_videos or all_user_tasks) else False
-        
-        # Calculate progress percentage (training videos + user tasks)
-        total_training_tasks = len(required_videos)
-        completed_training_tasks = len(completed_required_videos)
-        total_user_tasks = len(all_user_tasks)
-        completed_user_tasks_count = len(completed_user_tasks)
-        
-        # Total tasks = training videos + user tasks
-        total_tasks = total_training_tasks + total_user_tasks
-        completed_tasks = completed_training_tasks + completed_user_tasks_count
-        progress_percentage = int((completed_tasks / total_tasks * 100)) if total_tasks > 0 else 0
         
         # Build notifications list
         notifications = []
@@ -5871,6 +6015,8 @@ def dashboard():
                             <div class="task-icon">
                                 {% if task.task_type == 'document' %}
                                 ✍️
+                                {% elif task.task_type == 'training' %}
+                                ▶️
                                 {% else %}
                                 📋
                                 {% endif %}
@@ -5881,6 +6027,8 @@ def dashboard():
                             </div>
                             {% if task.task_type == 'document' and task.document_id %}
                             <a href="{{ user_sign_document_url(task.document_id) }}" class="task-btn">Sign Document ></a>
+                            {% elif task.task_type == 'training' and task.video_id %}
+                            <a href="{{ url_for('view_training_video', video_id=task.video_id) }}" class="task-btn">Watch Training ></a>
                             {% else %}
                             <a href="{{ url_for('user_tasks') }}" class="task-btn">View Task ></a>
                             {% endif %}
@@ -8433,7 +8581,7 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
     _sid_user = get_current_user_store_id()
     sp = (request.args.get('store_id') or '').strip()
 
-    if current_user.is_manager() and not current_user.is_admin():
+    if is_pure_manager():
         if _sid_user is not None:
             q = q.filter(NewHire.store_id == _sid_user)
     elif current_user.is_admin():
@@ -8512,7 +8660,7 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
     _nh_list_un = (current_user.username if current_user else '') or ''
     admin_name = staff_header_display_name(_nh_list_un) if _nh_list_un else 'Admin'
     new_hires_list_heading = 'New Hires List'
-    if current_user.is_manager() and not current_user.is_admin():
+    if is_pure_manager():
         _msid = get_current_user_store_id()
         if _msid is not None:
             _mst = Store.query.get(_msid)
@@ -8842,7 +8990,7 @@ def _view_all_new_hires_impl(force_staff_console_manager=False):
                                 data-sort-active="{{ 1 if item.login_active else 0 }}"
                                 data-sort-progress="{{ item.progress }}">
                                 <td class="col-name">
-                                    <a href="{{ url_for('view_new_hire_details', username=item.new_hire.username) }}" title="Open details — onboarding progress {{ item.progress }}%{% if item.total > 0 %} ({{ item.completed }}/{{ item.total }} items){% endif %}">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a>
+                                    <a href="{{ view_new_hire_details_url(item.new_hire.username) }}" title="Open details — onboarding progress {{ item.progress }}%{% if item.total > 0 %} ({{ item.completed }}/{{ item.total }} items){% endif %}">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a>
                                 </td>
                                 <td>{{ item.new_hire.username }}</td>
                                 <td>{{ role_name_by_id.get(item.new_hire.role_id, '') or '—' }}</td>
@@ -8933,13 +9081,12 @@ def add_new_hire():
     """Add a new hire with step-by-step onboarding wizard. Admin or manager with start_onboarding permission."""
     if not current_user.is_admin() and not manager_has_permission('start_onboarding'):
         abort(403)
-    store_id = get_current_user_store_id() if current_user.is_manager() else None
+    store_id = staff_store_scope_id()
     videos = training_videos_visible_to_store_query(
         store_id,
         base_filter=(TrainingVideo.is_active == True),
     ).order_by(TrainingVideo.title).all()
     # Get documents visible to this store (or all visible for admin) that have signature fields
-    store_id = get_current_user_store_id() if current_user.is_manager() else None
     documents = documents_visible_to_store_query(
         store_id,
         base_filter=exists().where(DocumentSignatureField.document_id == Document.id)
@@ -8953,7 +9100,7 @@ def add_new_hire():
         roles = []
         role_default_documents = {}
     stores = Store.query.order_by(Store.name).all()
-    default_store_id = get_current_user_store_id() if current_user.is_manager() else None
+    default_store_id = staff_store_scope_id()
     default_store_code = ''
     if default_store_id:
         store = Store.query.get(default_store_id)
@@ -9480,7 +9627,7 @@ def add_new_hire():
                                 <input type="text" name="username" id="username" required placeholder="e.g., jdoe (without domain)">
                                 <small>Internal ID; new hire logs in with their email and this password</small>
                             </div>
-                            {% if current_user.is_manager() and default_store_id %}
+                            {% if staff_store_scope_id() and default_store_id %}
                             <input type="hidden" name="store_id" value="{{ default_store_id }}">
                             <input type="hidden" id="manager_store_code" value="{{ default_store_code }}">
                             <p class="form-group" style="margin-bottom: 1rem; color: #666; font-size: 0.95em;">New hire will be added to your store. Password will auto-fill as store code + &quot;password&quot; (e.g. il71password). You can change it below.</p>
@@ -12221,7 +12368,6 @@ def settings_page():
 
 
 @app.route('/admin/stores/<int:store_id>/edit', methods=['GET', 'POST'])
-@app.route('/admin/settings/stores/<int:store_id>/edit', methods=['GET', 'POST'])
 @admin_required
 def manage_store_edit(store_id):
     """Edit store name and code."""
@@ -12244,69 +12390,19 @@ def manage_store_edit(store_id):
             db.session.rollback()
             flash(f'Error updating store: {str(e)}', 'error')
         return redirect(url_for('manage_stores'))
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Edit Store - Onboarding App</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
-            body { background: #f5f5f5; }
-            .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
-            .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
-            .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
-            .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
-            .container { max-width: 500px; margin: 24px auto; padding: 0 20px; }
-            .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
-            .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
-            .form-group { margin-bottom: 16px; }
-            .form-group label { display: block; font-size: 0.9em; font-weight: 600; color: #333; margin-bottom: 6px; }
-            .form-group input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.35rem; font-size: 1em; }
-            .btn { display: inline-block; padding: 10px 20px; border-radius: 0.35rem; border: none; cursor: pointer; font-size: 1em; text-decoration: none; }
-            .btn-primary { background: #FE0100; color: white; }
-            .btn-secondary { background: #6c757d; color: white; margin-left: 8px; }
-        {{ global_theme_css|safe }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>✏️ Edit Store</h1>
-            <div class="header-actions"><a href="{{ url_for('manage_stores') }}" class="back-btn">← Back to Manage Stores</a></div>
-        </div>
-        <div class="container">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-            <div style="margin-bottom: 20px;">
-                {% for category, msg in messages %}
-                <div style="padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
-                {% endfor %}
-            </div>
-            {% endif %}
-            {% endwith %}
-            <div class="card">
-                <h2>{{ store.name }}</h2>
-                <form method="POST" action="{{ url_for('manage_store_edit', store_id=store.id) }}">
-                    <div class="form-group">
-                        <label for="name">Store name</label>
-                        <input type="text" name="name" id="name" value="{{ store.name }}" required placeholder="e.g. Downtown">
-                    </div>
-                    <div class="form-group">
-                        <label for="code">Code (optional)</label>
-                        <input type="text" name="code" id="code" value="{{ store.code or '' }}" placeholder="e.g. STORE01">
-                    </div>
-                    <button type="submit" class="btn btn-primary">Save</button>
-                    <a href="{{ url_for('manage_stores') }}" class="btn btn-secondary">Cancel</a>
-                </form>
-            </div>
-        </div>
-    </body>
-    </html>
-    ''', store=store)
+    return render_template('staff/store_edit.html', store=store)
+
+
+@app.route('/admin/settings/stores/<int:store_id>/edit', methods=['GET', 'POST'])
+@admin_required
+def manage_store_edit_legacy(store_id):
+    """Legacy URL alias — canonical path is /admin/stores/<id>/edit."""
+    if request.method == 'GET':
+        return redirect(url_for('manage_store_edit', store_id=store_id), code=301)
+    return manage_store_edit(store_id)
 
 
 @app.route('/admin/stores/add', methods=['POST'])
-@app.route('/admin/settings/stores/add', methods=['POST'])
 @admin_required
 def manage_stores_add():
     name = (request.form.get('name') or '').strip()
@@ -12325,8 +12421,14 @@ def manage_stores_add():
     return redirect(url_for('manage_stores'))
 
 
+@app.route('/admin/settings/stores/add', methods=['POST'])
+@admin_required
+def manage_stores_add_legacy():
+    """Legacy URL alias — canonical path is /admin/stores/add."""
+    return manage_stores_add()
+
+
 @app.route('/admin/stores/<int:store_id>/delete', methods=['POST'])
-@app.route('/admin/settings/stores/<int:store_id>/delete', methods=['POST'])
 @admin_required
 def manage_store_delete(store_id):
     store = Store.query.get(store_id)
@@ -12344,6 +12446,13 @@ def manage_store_delete(store_id):
         db.session.rollback()
         flash(f'Error: {str(e)}', 'error')
     return redirect(url_for('manage_stores'))
+
+
+@app.route('/admin/settings/stores/<int:store_id>/delete', methods=['POST'])
+@admin_required
+def manage_store_delete_legacy(store_id):
+    """Legacy URL alias — canonical path is /admin/stores/<id>/delete."""
+    return manage_store_delete(store_id)
 
 
 @app.route('/admin/stores')
@@ -12931,8 +13040,30 @@ def manage_users():
                 box-shadow: none !important;
             }
             body.manage-users-page .modal-content {
+                display: flex;
+                flex-direction: column;
+                max-height: 90vh;
+                overflow: hidden !important;
                 background: linear-gradient(160deg, #1a202c 0%, #101622 100%) !important;
                 border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            }
+            body.manage-users-page .modal-content form {
+                display: flex;
+                flex-direction: column;
+                flex: 1;
+                min-height: 0;
+            }
+            body.manage-users-page .modal-form-body {
+                overflow-y: auto;
+                flex: 1;
+                min-height: 0;
+            }
+            body.manage-users-page .modal-actions {
+                flex-shrink: 0;
+                margin-top: 16px;
+                padding-top: 16px;
+                border-top: 1px solid rgba(255, 255, 255, 0.12);
+                background: linear-gradient(160deg, #1a202c 0%, #101622 100%);
             }
             body.manage-users-page .modal-content input[readonly] {
                 background: rgba(255, 255, 255, 0.05) !important;
@@ -13053,6 +13184,7 @@ def manage_users():
                 <h3>Edit User</h3>
                 <form method="POST" id="editUserForm">
                     <input type="hidden" name="user_id" id="editUserId">
+                    <div class="modal-form-body">
                     <div class="form-group">
                         <label>Username</label>
                         <input type="text" id="editUsername" readonly>
@@ -13090,6 +13222,7 @@ def manage_users():
                             {% endfor %}
                         </div>
                     </div>
+                    </div>
                     <div class="modal-actions">
                         <button type="button" class="btn btn-secondary" onclick="document.getElementById('editModal').classList.remove('show')">Cancel</button>
                         <button type="submit" class="btn btn-primary">Save</button>
@@ -13101,9 +13234,10 @@ def manage_users():
         <div id="passwordModal" class="modal">
             <div class="modal-content">
                 <h3>Reset Password</h3>
-                <p id="passwordModalUsername" style="margin-bottom: 12px; color: #666;"></p>
                 <form method="POST" id="passwordUserForm">
                     <input type="hidden" name="user_id" id="passwordUserId">
+                    <div class="modal-form-body">
+                    <p id="passwordModalUsername" style="margin-bottom: 12px; color: #666;"></p>
                     <div class="form-group">
                         <label>New password</label>
                         <input type="password" name="new_password" id="userNewPassword" placeholder="••••••••" required minlength="6">
@@ -13111,6 +13245,7 @@ def manage_users():
                     <div class="form-group">
                         <label>Confirm password</label>
                         <input type="password" name="confirm_password" id="userConfirmPassword" placeholder="••••••••" required minlength="6">
+                    </div>
                     </div>
                     <div class="modal-actions">
                         <button type="button" class="btn btn-secondary" onclick="document.getElementById('passwordModal').classList.remove('show')">Cancel</button>
@@ -14452,7 +14587,7 @@ def role_default_documents(role_id):
         flash('Position/Title not found.', 'error')
         return redirect(url_for('manage_roles'))
     # Documents visible to this store (or all visible for admin) that have signature fields
-    store_id = get_current_user_store_id() if current_user.is_manager() else None
+    store_id = staff_store_scope_id()
     documents = documents_visible_to_store_query(
         store_id,
         base_filter=exists().where(DocumentSignatureField.document_id == Document.id)
@@ -24805,19 +24940,35 @@ def download_signed_document(doc_id, username):
         return _error_redirect()
 
 
+@app.route('/manager/new-hire/<username>/details')
+@manager_required
+def manager_view_new_hire_details(username):
+    """New hire details at a manager URL (store-scoped UI, not org-wide admin)."""
+    touch_staff_console_home('manager')
+    return _view_new_hire_details_impl(username, force_manager_console=True)
+
+
 @app.route('/admin/new-hire/<username>/details')
 @login_required
 def view_new_hire_details(username):
-    """View detailed information about a new hire including quiz results and signed forms. Managers can only view new hires at their store."""
+    """View detailed information about a new hire including quiz results and signed forms."""
+    sc = (request.args.get(STAFF_CONSOLE_QUERY_KEY) or '').strip().lower()
+    if sc != 'admin' and uses_manager_console_scope():
+        return redirect(url_for('manager_view_new_hire_details', username=username))
+    return _view_new_hire_details_impl(username, force_manager_console=False)
+
+
+def _view_new_hire_details_impl(username, force_manager_console=False):
+    """Implementation for admin/manager new-hire details pages."""
     if not current_user.is_admin() and not current_user.is_manager():
         abort(403)
+    manager_view = force_manager_console or uses_manager_console_scope()
     try:
         new_hire = NewHire.query.filter_by(username=username).first()
         if not new_hire:
             flash('New hire not found.', 'error')
             return redirect(manager_new_hires_list_url()) if uses_manager_new_hires_home() else redirect(staff_console_home_url())
-        # Managers (non-admin) can only view new hires that appear on their store's list; admins can view all
-        if current_user.is_manager() and not current_user.is_admin():
+        if manager_view or is_pure_manager():
             store_id = get_current_user_store_id()
             if store_id is None:
                 flash('You can only view new hires at your store.', 'error')
@@ -24913,7 +25064,11 @@ def view_new_hire_details(username):
         
         all_stores = []
         try:
-            all_stores = Store.query.order_by(Store.name).all()
+            scope_sid = get_current_user_store_id() if manager_view else None
+            if scope_sid is not None:
+                all_stores = Store.query.filter_by(id=scope_sid).order_by(Store.name).all()
+            else:
+                all_stores = Store.query.order_by(Store.name).all()
         except Exception:
             all_stores = []
         
@@ -24929,6 +25084,9 @@ def view_new_hire_details(username):
             _ensure_departments_table()
             all_departments = Department.query.order_by(Department.name).all()
         
+        can_assign_extra_task = current_user.is_admin() or _manager_can_act_on_new_hire(username)
+        assign_task_endpoint, assign_task_staff_console = assign_task_link_context()
+
         return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -25400,7 +25558,7 @@ def view_new_hire_details(username):
                 <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
                 <span class="logo-text">Ziebart Onboarding</span>
             </div>
-            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
+            <div class="header-actions"><a href="{{ new_hire_details_back_url() }}" class="back-btn">← Back to Dashboard</a></div>
         </div>
         
         <div class="container">
@@ -25463,12 +25621,17 @@ def view_new_hire_details(username):
                         <tr>
                             <td>Store</td>
                             <td>
+                                {% if manager_view %}
+                                <input type="hidden" name="store_id" value="{{ new_hire.store_id or '' }}">
+                                <div class="info-value">{% if all_stores %}{{ all_stores[0].name }}{% elif new_hire.store_id %}Store #{{ new_hire.store_id }}{% else %}— None —{% endif %}</div>
+                                {% else %}
                                 <select name="store_id" aria-label="Store location">
                                     <option value="" {% if not new_hire.store_id %}selected{% endif %}>— None —</option>
                                     {% for store in all_stores %}
                                     <option value="{{ store.id }}" {% if new_hire.store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
                                     {% endfor %}
                                 </select>
+                                {% endif %}
                             </td>
                         </tr>
                         <tr>
@@ -25486,7 +25649,9 @@ def view_new_hire_details(username):
                                     <option value="pending" {% if new_hire.status == 'pending' %}selected{% endif %}>Pending</option>
                                     <option value="active" {% if new_hire.status == 'active' %}selected{% endif %}>Active</option>
                                     <option value="completed" {% if new_hire.status == 'completed' %}selected{% endif %}>Completed</option>
+                                    {% if not manager_view %}
                                     <option value="removed" {% if new_hire.status == 'removed' %}selected{% endif %}>Removed</option>
+                                    {% endif %}
                                 </select>
                             </td>
                         </tr>
@@ -25497,6 +25662,7 @@ def view_new_hire_details(username):
                 </form>
                 <div style="margin-top: 18px; text-align: center;">
                     {% if new_hire.status != 'removed' %}
+                    {% if not manager_view %}
                     {% if user_record and user_record.role != 'admin' %}
                     {% if user_is_revoked %}
                     <form method="POST" action="{{ url_for('new_hire_restore_access', username=username) }}" style="display: inline;" onsubmit="return confirm('Restore access for {{ username }}? They will be able to log in again.');">
@@ -25508,7 +25674,10 @@ def view_new_hire_details(username):
                     </form>
                     {% endif %}
                     {% endif %}
+                    {% endif %}
+                    {% if not manager_view %}
                     <a href="{{ url_for('remove_new_hire_user', username=username) }}" class="btn" style="background: #333; border: 2px solid rgba(255,255,255,0.5); font-size: 0.95em; padding: 10px 20px; margin: 4px; display: inline-block;">Remove user</a>
+                    {% endif %}
                     {% endif %}
                 </div>
             </div>
@@ -25579,8 +25748,8 @@ def view_new_hire_details(username):
             <div class="section">
                 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
                     <h2 class="section-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Assigned Tasks</h2>
-                    {% if current_user.is_admin() %}
-                    <a href="{{ url_for('admin_assign_task', staff_console='admin', username=username) }}" class="btn" style="padding:8px 14px;font-size:0.9em;text-decoration:none;">+ Assign extra task</a>
+                    {% if can_assign_extra_task %}
+                    <a href="{{ url_for(assign_task_endpoint, staff_console=assign_task_staff_console, username=username) }}" class="btn" style="padding:8px 14px;font-size:0.9em;text-decoration:none;">+ Assign extra task</a>
                     {% endif %}
                 </div>
                 {% if user_tasks %}
@@ -25630,7 +25799,9 @@ def view_new_hire_details(username):
     </html>
     ''', new_hire=new_hire, video_progress=video_progress, signed_documents=signed_documents, 
          user_tasks=user_tasks, username=username, user_record=user_record, user_is_revoked=user_is_revoked,
-         all_stores=all_stores, all_roles=all_roles, all_departments=all_departments)
+         all_stores=all_stores, all_roles=all_roles, all_departments=all_departments,
+         can_assign_extra_task=can_assign_extra_task, assign_task_endpoint=assign_task_endpoint,
+         assign_task_staff_console=assign_task_staff_console, manager_view=manager_view)
     except Exception as e:
         # Log the error for debugging
         import traceback
@@ -25661,46 +25832,52 @@ def remove_user_task(task_id):
     return redirect(url_for('view_new_hire_details', username=username))
 
 
-@app.route('/admin/assign-task', methods=['GET', 'POST'])
-@admin_required
-def admin_assign_task():
-    """Assign a one-off UserTask to any user. Optionally link to a Document or TrainingVideo."""
-    all_users = UserModel.query.order_by(UserModel.username).all()
-    new_hires_by_username = {
-        nh.username: nh for nh in NewHire.query.all()
-    }
-    user_display_names = {}
-    user_store_ids = {}
-    for u in all_users:
-        new_hire = new_hires_by_username.get(u.username)
-        if new_hire:
-            user_display_names[u.username] = f"{new_hire.first_name} {new_hire.last_name}".strip() or u.username
-        elif getattr(u, 'full_name', None) and u.full_name.strip():
-            user_display_names[u.username] = u.full_name.strip()
-        else:
-            user_display_names[u.username] = u.username
-        sid = getattr(u, 'store_id', None)
-        if sid is None and new_hire:
-            sid = getattr(new_hire, 'store_id', None)
-        user_store_ids[u.username] = sid
+def _assign_task_redirect(staff_console):
+    endpoint = 'manager_assign_task' if staff_console == 'manager' else 'admin_assign_task'
+    return redirect(url_for(endpoint, staff_console=staff_console))
+
+
+def _assign_task_impl(force_manager=False):
+    """Assign a one-off UserTask. Admins: any user; managers: store-scoped users only."""
+    if not can_assign_extra_tasks():
+        abort(403)
+
+    scope_store_id = staff_store_scope_id() if (force_manager or uses_manager_console_scope()) else None
+    if force_manager and scope_store_id is None and is_pure_manager():
+        scope_store_id = get_current_user_store_id()
+
+    all_users, user_display_names, user_store_ids = build_user_display_and_store_maps()
+    if scope_store_id is not None:
+        all_users = [u for u in all_users if user_store_ids.get(u.username) == scope_store_id]
 
     try:
-        all_stores = Store.query.order_by(Store.name).all()
+        if scope_store_id is not None:
+            all_stores = Store.query.filter_by(id=scope_store_id).order_by(Store.name).all()
+        else:
+            all_stores = Store.query.order_by(Store.name).all()
     except Exception:
         all_stores = []
 
     try:
-        all_documents = Document.query.order_by(Document.original_filename).all()
+        if scope_store_id is not None:
+            all_documents = documents_visible_to_store_query(scope_store_id).order_by(Document.original_filename).all()
+        else:
+            all_documents = Document.query.order_by(Document.original_filename).all()
     except Exception:
         all_documents = []
 
     try:
-        all_training_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.title).all()
+        all_training_videos = training_videos_visible_to_store_query(
+            scope_store_id,
+            base_filter=(TrainingVideo.is_active == True),
+        ).order_by(TrainingVideo.title).all()
     except Exception:
         all_training_videos = []
 
+    default_sc = 'manager' if force_manager or uses_manager_console_scope() else 'admin'
+
     if request.method == 'POST':
-        sc = (request.form.get('staff_console') or request.args.get('staff_console') or 'admin').strip()
+        sc = (request.form.get('staff_console') or request.args.get('staff_console') or default_sc).strip()
         username = (request.form.get('username') or '').strip()
         task_title = (request.form.get('task_title') or '').strip()
         task_description = (request.form.get('task_description') or '').strip() or None
@@ -25715,7 +25892,11 @@ def admin_assign_task():
 
         if not username:
             flash('Please select a user.', 'error')
-            return redirect(url_for('admin_assign_task', staff_console=sc))
+            return _assign_task_redirect(sc)
+
+        if not current_user.is_admin() and not _manager_can_act_on_new_hire(username):
+            flash('You can only assign tasks to new hires at your store.', 'error')
+            return _assign_task_redirect(sc)
 
         document_id = None
         document = None
@@ -25723,7 +25904,7 @@ def admin_assign_task():
             document = Document.query.get(int(document_id_str))
             if not document:
                 flash('Selected document was not found.', 'error')
-                return redirect(url_for('admin_assign_task', staff_console=sc))
+                return _assign_task_redirect(sc)
             document_id = document.id
 
         video = None
@@ -25732,16 +25913,16 @@ def admin_assign_task():
             video = TrainingVideo.query.get(int(video_id_str))
             if not video or not video.is_active:
                 flash('Selected training video was not found or is inactive.', 'error')
-                return redirect(url_for('admin_assign_task', staff_console=sc))
+                return _assign_task_redirect(sc)
             video_id = video.id
 
         if document and video:
             flash('Please select either a document or a training video, not both.', 'error')
-            return redirect(url_for('admin_assign_task', staff_console=sc))
+            return _assign_task_redirect(sc)
 
         if not task_title and not document and not video:
             flash('Please enter a task title or select a document or training video.', 'error')
-            return redirect(url_for('admin_assign_task', staff_console=sc))
+            return _assign_task_redirect(sc)
         if not task_title and document:
             task_title = f"Sign Document: {document.name_for_users}"
         if not task_title and video:
@@ -25752,7 +25933,7 @@ def admin_assign_task():
         assignee = UserModel.query.filter_by(username=username).first()
         if not assignee:
             flash('Selected user was not found.', 'error')
-            return redirect(url_for('admin_assign_task', staff_console=sc))
+            return _assign_task_redirect(sc)
 
         due_date = None
         if due_date_str:
@@ -25798,7 +25979,7 @@ def admin_assign_task():
                         f'{display_name} already has a pending training task for "{video.title}".',
                         'error',
                     )
-                    return redirect(url_for('admin_assign_task', staff_console=sc))
+                    return _assign_task_redirect(sc)
 
                 if not task_description:
                     task_description = f"Please watch and complete the training video: {video.title}"
@@ -25845,304 +26026,60 @@ def admin_assign_task():
             app.logger.exception('admin_assign_task failed')
             flash(f'Could not assign task: {str(e)}', 'error')
 
-        return redirect(url_for('admin_assign_task', staff_console=sc))
+        return _assign_task_redirect(sc)
 
     prefill_username = (request.args.get('username') or '').strip()
-    staff_console_redirect = (request.args.get('staff_console') or 'admin').strip()
+    staff_console_redirect = (request.args.get('staff_console') or default_sc).strip()
     prefill_document_id = (request.args.get('document_id') or '').strip()
     prefill_video_id = (request.args.get('video_id') or '').strip()
-    prefill_store_id = ''
-    if prefill_username in user_store_ids:
+    store_scope_locked = scope_store_id is not None
+    prefill_store_id = str(scope_store_id) if scope_store_id is not None else ''
+    if not prefill_store_id and prefill_username in user_store_ids:
         sid = user_store_ids[prefill_username]
         prefill_store_id = str(sid) if sid is not None else 'none'
 
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html lang="en" class="assign-task-html">
-    <head>
-        <title>Assign task to user</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="color-scheme" content="dark">
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            html.assign-task-html, body.assign-task-page {
-                color-scheme: dark;
-            }
-            body { font-family: 'URW Form', Arial, sans-serif; background: #0a0e14; }
-            .header {
-                background: #000000; color: white; padding: 12px 30px;
-                display: flex; justify-content: space-between; align-items: center; min-height: 60px;
-            }
-            .header h1 { font-weight: 800; font-size: 1.2em; margin: 0; }
-            .back-btn {
-                background: rgba(255,255,255,0.2); color: #FFFFFF; padding: 8px 16px; border-radius: 0.5rem;
-                text-decoration: none; border: 1px solid rgba(255,255,255,0.3);
-            }
-            .container { max-width: 720px; margin: 20px auto; padding: 0 20px; }
-            .admin-panel {
-                background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
-                border: 1px solid rgba(255,255,255,0.14);
-                border-radius: 0.5rem;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                padding: 25px; margin-bottom: 20px;
-                color: #f2f5fb;
-            }
-            .form-group { margin-bottom: 18px; }
-            .form-group label { display: block; font-weight: 600; margin-bottom: 6px; color: #f2f5fb; }
-            .form-group input[type="text"], .form-group input[type="date"], .form-group select, .form-group textarea {
-                width: 100%; padding: 10px;
-                border: 1px solid rgba(255,255,255,0.24);
-                border-radius: 4px; font-size: 14px;
-                background: #121a26;
-                color: #f2f5fb;
-            }
-            .form-group textarea { min-height: 100px; resize: vertical; }
-            .form-group input::placeholder, .form-group textarea::placeholder { color: #9aa5b8; }
-            .form-group select option, .form-group select optgroup {
-                background: #121a26;
-                color: #f2f5fb;
-            }
-            .help { font-size: 0.85em; color: #b7c1d3; margin-top: 4px; }
-            .btn { display: inline-block; padding: 12px 24px; background: #FE0100; color: white; border: none;
-                border-radius: 5px; cursor: pointer; font-size: 15px; font-weight: 600; }
-            .flash { padding: 12px 16px; margin-bottom: 16px; border-radius: 0.5rem; }
-            .flash.success { background: #d4edda; color: #155724; }
-            .flash.error { background: #f8d7da; color: #721c24; }
-        {{ global_theme_css|safe }}
-            /* Assign task: keep native <select> dropdown dark in Chromium/Edge */
-            body.assign-task-page .form-group select,
-            body.assign-task-page .form-group select option,
-            body.assign-task-page .form-group select optgroup {
-                background: #121a26 !important;
-                color: #f2f5fb !important;
-            }
-            body.assign-task-page .form-group select option:checked {
-                background: #1f2a3d !important;
-                color: #ffffff !important;
-            }
-        </style>
-    </head>
-    <body class="assign-task-page">
-        <div class="header">
-            <h1>Assign task to user</h1>
-            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
-        </div>
-        <div class="container">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, msg in messages %}
-                <div class="flash {{ category }}">{{ msg }}</div>
-                {% endfor %}
-            {% endif %}
-            {% endwith %}
-            <div class="admin-panel">
-                <p class="help" style="margin-bottom: 16px;">
-                    Creates a one-off task on the user’s <strong>Tasks</strong> page. Optionally link the task to a
-                    <strong>document</strong> (signing) or a <strong>training video</strong> (watch video and complete
-                    the quiz). Leave both blank for a general one-off task.
-                </p>
-                <form method="POST" action="{{ url_for('admin_assign_task') }}">
-                    <input type="hidden" name="staff_console" value="{{ staff_console_redirect }}">
-                    <div class="form-group">
-                        <label for="store_filter">Store</label>
-                        <select id="store_filter">
-                            <option value="">— Select store —</option>
-                            {% for st in all_stores %}
-                            <option value="{{ st.id }}" {% if prefill_store_id == st.id|string %}selected{% endif %}>
-                                {{ st.name }}{% if st.code %} ({{ st.code }}){% endif %}
-                            </option>
-                            {% endfor %}
-                            <option value="none" {% if prefill_store_id == 'none' %}selected{% endif %}>No store assigned</option>
-                        </select>
-                        <div class="help">Choose a store to narrow the user list below.</div>
-                    </div>
-                    <div class="form-group">
-                        <label for="username">User</label>
-                        <select id="username" name="username" required>
-                            <option value="">— Select store first —</option>
-                            {% for u in all_users %}
-                            <option value="{{ u.username }}"
-                                    data-store-id="{{ user_store_ids.get(u.username) if user_store_ids.get(u.username) is not none else 'none' }}"
-                                    {% if u.username == prefill_username %}selected{% endif %}
-                                    hidden disabled>
-                                {{ user_display_names.get(u.username, u.username) }} ({{ u.username }})
-                            </option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="document_id">Document to sign (optional)</label>
-                        <select id="document_id" name="document_id">
-                            <option value="">— None —</option>
-                            {% for d in all_documents %}
-                            <option value="{{ d.id }}" {% if prefill_document_id == d.id|string %}selected{% endif %}>
-                                {{ d.name_for_users or d.original_filename }}
-                            </option>
-                            {% endfor %}
-                        </select>
-                        <div class="help">
-                            If selected, the user gets a sign-document task and the document is assigned to them.
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label for="video_id">Training video (optional)</label>
-                        <select id="video_id" name="video_id">
-                            <option value="">— None —</option>
-                            {% for v in all_training_videos %}
-                            <option value="{{ v.id }}" {% if prefill_video_id == v.id|string %}selected{% endif %}>
-                                {{ v.title }}
-                            </option>
-                            {% endfor %}
-                        </select>
-                        <div class="help">
-                            If selected, the user gets a training task to watch the video and complete the quiz at the end.
-                            Cannot be combined with a document on the same task.
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label for="task_title">Task title <span id="task_title_optional" style="display:none; font-weight:400; color:#9aa5b8;">(optional — auto-filled from document or video)</span></label>
-                        <input type="text" id="task_title" name="task_title" maxlength="200" required placeholder="Short title shown in their task list">
-                    </div>
-                    <div class="form-group">
-                        <label for="task_description">Description (optional)</label>
-                        <textarea id="task_description" name="task_description" placeholder="What they need to do"></textarea>
-                    </div>
-                    <div class="form-group">
-                        <label for="priority">Priority</label>
-                        <select id="priority" name="priority">
-                            <option value="low">Low</option>
-                            <option value="normal" selected>Normal</option>
-                            <option value="high">High</option>
-                            <option value="urgent">Urgent</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="due_date">Due date (optional)</label>
-                        <input type="date" id="due_date" name="due_date">
-                    </div>
-                    <div class="form-group" id="internal_notes_group">
-                        <label for="notes">Internal notes (optional)</label>
-                        <input type="text" id="notes" name="notes" maxlength="500" placeholder="Visible to admins on task row">
-                        <div class="help" id="internal_notes_help" style="display:none;">Not used when a training video is selected.</div>
-                    </div>
-                    <button type="submit" class="btn">Assign task</button>
-                </form>
-            </div>
-        </div>
-        <script>
-            (function() {
-                var storeSel = document.getElementById('store_filter');
-                var userSel = document.getElementById('username');
-                var prefillUsername = {{ prefill_username|tojson }};
-                function filterUsersByStore() {
-                    if (!storeSel || !userSel) return;
-                    var storeVal = storeSel.value;
-                    var placeholder = userSel.options[0];
-                    var selectedUsername = userSel.value;
-                    var selectedStillVisible = false;
-                    for (var i = 1; i < userSel.options.length; i++) {
-                        var opt = userSel.options[i];
-                        var optStore = opt.getAttribute('data-store-id') || 'none';
-                        var show = !!storeVal && optStore === storeVal;
-                        opt.hidden = !show;
-                        opt.disabled = !show;
-                        if (show && opt.value === selectedUsername) {
-                            selectedStillVisible = true;
-                        }
-                    }
-                    if (!storeVal) {
-                        placeholder.textContent = '— Select store first —';
-                        userSel.value = '';
-                    } else {
-                        placeholder.textContent = '— Select user —';
-                        if (!selectedStillVisible) {
-                            userSel.value = '';
-                        }
-                        if (prefillUsername) {
-                            for (var j = 1; j < userSel.options.length; j++) {
-                                var prefOpt = userSel.options[j];
-                                if (!prefOpt.hidden && !prefOpt.disabled && prefOpt.value === prefillUsername) {
-                                    userSel.value = prefillUsername;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if (storeSel && userSel) {
-                    storeSel.addEventListener('change', filterUsersByStore);
-                    filterUsersByStore();
-                }
+    return render_template(
+        'staff/assign_task.html',
+        all_users=all_users,
+        user_display_names=user_display_names,
+        user_store_ids=user_store_ids,
+        all_stores=all_stores,
+        prefill_username=prefill_username,
+        prefill_store_id=prefill_store_id,
+        store_scope_locked=store_scope_locked,
+        staff_console_redirect=staff_console_redirect,
+        all_documents=all_documents,
+        all_training_videos=all_training_videos,
+        prefill_document_id=prefill_document_id,
+        prefill_video_id=prefill_video_id,
+        assign_task_form_endpoint='manager_assign_task' if force_manager else 'admin_assign_task',
+    )
 
-                var docSel = document.getElementById('document_id');
-                var videoSel = document.getElementById('video_id');
-                var titleInput = document.getElementById('task_title');
-                var optionalLabel = document.getElementById('task_title_optional');
-                var notesInput = document.getElementById('notes');
-                var notesGroup = document.getElementById('internal_notes_group');
-                var notesHelp = document.getElementById('internal_notes_help');
-                if (!docSel || !videoSel || !titleInput) return;
 
-                function syncLinkedTaskFields() {
-                    var hasDoc = !!docSel.value;
-                    var hasVideo = !!videoSel.value;
-                    var hasLinked = hasDoc || hasVideo;
+@app.route('/admin/assign-task', methods=['GET', 'POST'])
+@login_required
+def admin_assign_task():
+    if not current_user.is_admin():
+        abort(403)
+    sc = (
+        request.args.get('staff_console')
+        or request.form.get('staff_console')
+        or session.get(STAFF_CONSOLE_HOME_KEY)
+        or ''
+    ).strip().lower()
+    if sc == 'manager' and current_user.is_manager():
+        if request.method == 'GET':
+            return redirect(url_for('manager_assign_task', **request.args))
+        touch_staff_console_home('manager')
+        return _assign_task_impl(force_manager=True)
+    return _assign_task_impl()
 
-                    if (hasDoc && hasVideo) {
-                        if (docSel === document.activeElement) {
-                            videoSel.value = '';
-                            hasVideo = false;
-                        } else {
-                            docSel.value = '';
-                            hasDoc = false;
-                        }
-                        hasLinked = hasDoc || hasVideo;
-                    }
 
-                    if (hasLinked) {
-                        titleInput.required = false;
-                        if (optionalLabel) optionalLabel.style.display = 'inline';
-                        if (!titleInput.value.trim()) {
-                            if (hasDoc) {
-                                var docLabel = docSel.options[docSel.selectedIndex] ? docSel.options[docSel.selectedIndex].text : '';
-                                titleInput.placeholder = 'Auto: Sign Document: ' + docLabel;
-                            } else if (hasVideo) {
-                                var videoLabel = videoSel.options[videoSel.selectedIndex] ? videoSel.options[videoSel.selectedIndex].text : '';
-                                titleInput.placeholder = 'Auto: Complete Training: ' + videoLabel;
-                            }
-                        }
-                    } else {
-                        titleInput.required = true;
-                        if (optionalLabel) optionalLabel.style.display = 'none';
-                        titleInput.placeholder = 'Short title shown in their task list';
-                    }
-
-                    if (notesInput && notesGroup) {
-                        var trainingSelected = !!videoSel.value;
-                        notesInput.disabled = trainingSelected;
-                        notesGroup.style.opacity = trainingSelected ? '0.55' : '1';
-                        if (notesHelp) {
-                            notesHelp.style.display = trainingSelected ? 'block' : 'none';
-                        }
-                        if (trainingSelected) {
-                            notesInput.value = '';
-                        }
-                    }
-                }
-
-                docSel.addEventListener('change', syncLinkedTaskFields);
-                videoSel.addEventListener('change', syncLinkedTaskFields);
-                syncLinkedTaskFields();
-            })();
-        </script>
-    </body>
-    </html>
-    ''', all_users=all_users, user_display_names=user_display_names, user_store_ids=user_store_ids,
-         all_stores=all_stores, prefill_username=prefill_username, prefill_store_id=prefill_store_id,
-         staff_console_redirect=staff_console_redirect, all_documents=all_documents,
-         all_training_videos=all_training_videos, prefill_document_id=prefill_document_id,
-         prefill_video_id=prefill_video_id)
-
+@app.route('/manager/assign-task', methods=['GET', 'POST'])
+@manager_required
+def manager_assign_task():
+    touch_staff_console_home('manager')
+    return _assign_task_impl(force_manager=True)
 
 @app.route('/admin/new-hire/<username>/nudge-task/<int:task_id>', methods=['POST'])
 @login_required
@@ -26154,10 +26091,10 @@ def nudge_user_task(username, task_id):
     task = UserTask.query.filter_by(id=task_id, username=username).first()
     if not task:
         flash('Task not found.', 'error')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
     if task.status == 'completed':
         flash('Cannot nudge a completed task.', 'info')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
     # Get user email: NewHire first, then User
     to_email = None
     new_hire = NewHire.query.filter_by(username=username).first()
@@ -26169,7 +26106,7 @@ def nudge_user_task(username, task_id):
             to_email = str(user_record.email).strip()
     if not to_email:
         flash(f'No email address for {username}. Cannot send nudge.', 'error')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
     task_title = task.task_title or 'Your assigned task'
     subject = f'Reminder: Complete your onboarding task – {task_title}'
     tasks_link = onboarding_tasks_url()
@@ -26195,12 +26132,12 @@ def nudge_user_task(username, task_id):
         flash(f'Nudge email sent to {to_email} for task "{task_title}".', 'success')
     else:
         flash('Email could not be sent. Check mail configuration.', 'error')
-    return redirect(url_for('view_new_hire_details', username=username))
+    return redirect_new_hire_details(username)
 
 
 def _manager_can_act_on_new_hire(username):
-    """True if current user is admin, or is manager and this new hire is at their store."""
-    if current_user.is_admin():
+    """True if org-wide admin, or manager acting on a new hire at their store."""
+    if current_user.is_admin() and not uses_manager_console_scope():
         return True
     if not current_user.is_manager():
         return False
@@ -26236,11 +26173,11 @@ def update_new_hire_details(username):
             sid_int = int(store_raw)
             if Store.query.get(sid_int):
                 new_store_id = sid_int
-        if not current_user.is_admin():
+        if not current_user.is_admin() or uses_manager_console_scope():
             mgr_sid = get_current_user_store_id()
             if mgr_sid is not None and new_store_id is not None and new_store_id != mgr_sid:
                 flash('Managers can only assign this employee to their own store or leave store unset.', 'error')
-                return redirect(url_for('view_new_hire_details', username=username))
+                return redirect_new_hire_details(username)
 
         # Update first name and last name (required on model; keep existing if blank)
         first_name = request.form.get('first_name', '').strip() or (new_hire.first_name or '')
@@ -26255,7 +26192,7 @@ def update_new_hire_details(username):
         current_new_hire_email = normalize_email(getattr(new_hire, 'email', None))
         if submitted_email != current_new_hire_email:
             flash('Email is locked after account creation. Use password reset for access issues.', 'error')
-            return redirect(url_for('view_new_hire_details', username=username))
+            return redirect_new_hire_details(username)
         
         # Update department
         dept_id, dept_name = resolve_department_from_form(request.form.get('department_id', ''))
@@ -26288,9 +26225,16 @@ def update_new_hire_details(username):
         
         # Update status
         status = request.form.get('status', 'pending').strip()
-        if status in ['pending', 'active', 'completed', 'removed']:
+        allowed_statuses = ['pending', 'active', 'completed']
+        if not uses_manager_console_scope():
+            allowed_statuses.append('removed')
+        if status in allowed_statuses:
             new_hire.status = status
 
+        if uses_manager_console_scope():
+            mgr_sid = get_current_user_store_id()
+            if mgr_sid is not None:
+                new_store_id = mgr_sid
         new_hire.store_id = new_store_id
         user_row = UserModel.query.filter_by(username=username).first()
         if user_row is not None:
@@ -26302,7 +26246,7 @@ def update_new_hire_details(username):
         db.session.rollback()
         flash(f'Error updating new hire details: {str(e)}', 'error')
     
-    return redirect(url_for('view_new_hire_details', username=username))
+    return redirect_new_hire_details(username)
 
 
 @app.route('/admin/new-hire/<username>/cancel-access', methods=['POST'])
@@ -26317,18 +26261,18 @@ def new_hire_cancel_access(username):
     user = UserModel.query.filter_by(username=username).first()
     if not user:
         flash('No login account found for this user.', 'error')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
     if getattr(user, 'role', None) == 'admin':
         flash('Cannot cancel access for an admin.', 'error')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
     if user.username == current_user.username:
         flash('You cannot revoke your own access.', 'error')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
     from datetime import date
     _already = _access_revoke_calendar_date(getattr(user, 'access_revoked_at', None))
     if _already is not None and date.today() >= _already:
         flash('Access is already cancelled for this user. Use Restore access if you want them to log in again.', 'info')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
     try:
         user.access_revoked_at = date.today()
         db.session.commit()
@@ -26348,7 +26292,7 @@ def new_hire_cancel_access(username):
                 flash(f'Error: {str(e)}', 'error')
         else:
             flash(f'Error: {str(e)}', 'error')
-    return redirect(url_for('view_new_hire_details', username=username))
+    return redirect_new_hire_details(username)
 
 
 @app.route('/admin/new-hire/<username>/restore-access', methods=['POST'])
@@ -26363,7 +26307,7 @@ def new_hire_restore_access(username):
     user = UserModel.query.filter_by(username=username).first()
     if not user:
         flash('No login account found for this user.', 'error')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
     try:
         user.access_revoked_at = None
         db.session.commit()
@@ -26383,7 +26327,7 @@ def new_hire_restore_access(username):
                 flash(f'Error: {str(e)}', 'error')
         else:
             flash(f'Error: {str(e)}', 'error')
-    return redirect(url_for('view_new_hire_details', username=username))
+    return redirect_new_hire_details(username)
 
 
 @app.route('/admin/new-hire/<username>/remove-user', methods=['GET', 'POST'])
@@ -26405,7 +26349,7 @@ def remove_new_hire_user(username):
     user_record = UserModel.query.filter_by(username=username).first()
     if user_record and getattr(user_record, 'role', None) == 'admin':
         flash('Cannot remove an admin user.', 'error')
-        return redirect(url_for('view_new_hire_details', username=username))
+        return redirect_new_hire_details(username)
 
     if request.method == 'POST':
         try:
