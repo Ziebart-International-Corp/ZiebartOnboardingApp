@@ -25666,15 +25666,28 @@ def remove_user_task(task_id):
 def admin_assign_task():
     """Assign a one-off UserTask to any user. Optionally link to a Document so it acts as a sign-document task."""
     all_users = UserModel.query.order_by(UserModel.username).all()
+    new_hires_by_username = {
+        nh.username: nh for nh in NewHire.query.all()
+    }
     user_display_names = {}
+    user_store_ids = {}
     for u in all_users:
-        new_hire = NewHire.query.filter_by(username=u.username).first()
+        new_hire = new_hires_by_username.get(u.username)
         if new_hire:
             user_display_names[u.username] = f"{new_hire.first_name} {new_hire.last_name}".strip() or u.username
         elif getattr(u, 'full_name', None) and u.full_name.strip():
             user_display_names[u.username] = u.full_name.strip()
         else:
             user_display_names[u.username] = u.username
+        sid = getattr(u, 'store_id', None)
+        if sid is None and new_hire:
+            sid = getattr(new_hire, 'store_id', None)
+        user_store_ids[u.username] = sid
+
+    try:
+        all_stores = Store.query.order_by(Store.name).all()
+    except Exception:
+        all_stores = []
 
     try:
         all_documents = Document.query.order_by(Document.original_filename).all()
@@ -25789,6 +25802,10 @@ def admin_assign_task():
     prefill_username = (request.args.get('username') or '').strip()
     staff_console_redirect = (request.args.get('staff_console') or 'admin').strip()
     prefill_document_id = (request.args.get('document_id') or '').strip()
+    prefill_store_id = ''
+    if prefill_username in user_store_ids:
+        sid = user_store_ids[prefill_username]
+        prefill_store_id = str(sid) if sid is not None else 'none'
 
     return render_template_string('''
     <!DOCTYPE html>
@@ -25878,11 +25895,27 @@ def admin_assign_task():
                 <form method="POST" action="{{ url_for('admin_assign_task') }}">
                     <input type="hidden" name="staff_console" value="{{ staff_console_redirect }}">
                     <div class="form-group">
+                        <label for="store_filter">Store</label>
+                        <select id="store_filter">
+                            <option value="">— Select store —</option>
+                            {% for st in all_stores %}
+                            <option value="{{ st.id }}" {% if prefill_store_id == st.id|string %}selected{% endif %}>
+                                {{ st.name }}{% if st.code %} ({{ st.code }}){% endif %}
+                            </option>
+                            {% endfor %}
+                            <option value="none" {% if prefill_store_id == 'none' %}selected{% endif %}>No store assigned</option>
+                        </select>
+                        <div class="help">Choose a store to narrow the user list below.</div>
+                    </div>
+                    <div class="form-group">
                         <label for="username">User</label>
                         <select id="username" name="username" required>
-                            <option value="">— Select user —</option>
+                            <option value="">— Select store first —</option>
                             {% for u in all_users %}
-                            <option value="{{ u.username }}" {% if u.username == prefill_username %}selected{% endif %}>
+                            <option value="{{ u.username }}"
+                                    data-store-id="{{ user_store_ids.get(u.username) if user_store_ids.get(u.username) is not none else 'none' }}"
+                                    {% if u.username == prefill_username %}selected{% endif %}
+                                    hidden disabled>
                                 {{ user_display_names.get(u.username, u.username) }} ({{ u.username }})
                             </option>
                             {% endfor %}
@@ -25934,6 +25967,49 @@ def admin_assign_task():
         </div>
         <script>
             (function() {
+                var storeSel = document.getElementById('store_filter');
+                var userSel = document.getElementById('username');
+                var prefillUsername = {{ prefill_username|tojson }};
+                function filterUsersByStore() {
+                    if (!storeSel || !userSel) return;
+                    var storeVal = storeSel.value;
+                    var placeholder = userSel.options[0];
+                    var selectedUsername = userSel.value;
+                    var selectedStillVisible = false;
+                    for (var i = 1; i < userSel.options.length; i++) {
+                        var opt = userSel.options[i];
+                        var optStore = opt.getAttribute('data-store-id') || 'none';
+                        var show = !!storeVal && optStore === storeVal;
+                        opt.hidden = !show;
+                        opt.disabled = !show;
+                        if (show && opt.value === selectedUsername) {
+                            selectedStillVisible = true;
+                        }
+                    }
+                    if (!storeVal) {
+                        placeholder.textContent = '— Select store first —';
+                        userSel.value = '';
+                    } else {
+                        placeholder.textContent = '— Select user —';
+                        if (!selectedStillVisible) {
+                            userSel.value = '';
+                        }
+                        if (prefillUsername) {
+                            for (var j = 1; j < userSel.options.length; j++) {
+                                var prefOpt = userSel.options[j];
+                                if (!prefOpt.hidden && !prefOpt.disabled && prefOpt.value === prefillUsername) {
+                                    userSel.value = prefillUsername;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (storeSel && userSel) {
+                    storeSel.addEventListener('change', filterUsersByStore);
+                    filterUsersByStore();
+                }
+
                 var docSel = document.getElementById('document_id');
                 var titleInput = document.getElementById('task_title');
                 var optionalLabel = document.getElementById('task_title_optional');
@@ -25959,7 +26035,8 @@ def admin_assign_task():
         </script>
     </body>
     </html>
-    ''', all_users=all_users, user_display_names=user_display_names, prefill_username=prefill_username,
+    ''', all_users=all_users, user_display_names=user_display_names, user_store_ids=user_store_ids,
+         all_stores=all_stores, prefill_username=prefill_username, prefill_store_id=prefill_store_id,
          staff_console_redirect=staff_console_redirect, all_documents=all_documents,
          prefill_document_id=prefill_document_id)
 
