@@ -25664,7 +25664,7 @@ def remove_user_task(task_id):
 @app.route('/admin/assign-task', methods=['GET', 'POST'])
 @admin_required
 def admin_assign_task():
-    """Assign a one-off UserTask to any user. Optionally link to a Document so it acts as a sign-document task."""
+    """Assign a one-off UserTask to any user. Optionally link to a Document or TrainingVideo."""
     all_users = UserModel.query.order_by(UserModel.username).all()
     new_hires_by_username = {
         nh.username: nh for nh in NewHire.query.all()
@@ -25694,6 +25694,11 @@ def admin_assign_task():
     except Exception:
         all_documents = []
 
+    try:
+        all_training_videos = TrainingVideo.query.filter_by(is_active=True).order_by(TrainingVideo.title).all()
+    except Exception:
+        all_training_videos = []
+
     if request.method == 'POST':
         sc = (request.form.get('staff_console') or request.args.get('staff_console') or 'admin').strip()
         username = (request.form.get('username') or '').strip()
@@ -25703,6 +25708,7 @@ def admin_assign_task():
         notes = (request.form.get('notes') or '').strip() or None
         due_date_str = (request.form.get('due_date') or '').strip()
         document_id_str = (request.form.get('document_id') or '').strip()
+        video_id_str = (request.form.get('video_id') or '').strip()
 
         if priority not in ('low', 'normal', 'high', 'urgent'):
             priority = 'normal'
@@ -25720,11 +25726,26 @@ def admin_assign_task():
                 return redirect(url_for('admin_assign_task', staff_console=sc))
             document_id = document.id
 
-        if not task_title and not document:
-            flash('Please enter a task title or select a document.', 'error')
+        video = None
+        video_id = None
+        if video_id_str.isdigit():
+            video = TrainingVideo.query.get(int(video_id_str))
+            if not video or not video.is_active:
+                flash('Selected training video was not found or is inactive.', 'error')
+                return redirect(url_for('admin_assign_task', staff_console=sc))
+            video_id = video.id
+
+        if document and video:
+            flash('Please select either a document or a training video, not both.', 'error')
+            return redirect(url_for('admin_assign_task', staff_console=sc))
+
+        if not task_title and not document and not video:
+            flash('Please enter a task title or select a document or training video.', 'error')
             return redirect(url_for('admin_assign_task', staff_console=sc))
         if not task_title and document:
             task_title = f"Sign Document: {document.name_for_users}"
+        if not task_title and video:
+            task_title = f"Complete Training: {video.title}"
         if len(task_title) > 200:
             task_title = task_title[:200]
 
@@ -25765,17 +25786,38 @@ def admin_assign_task():
                         f"{document.description or document.name_for_users}"
                     )
 
+            if video is not None:
+                existing_training_task = UserTask.query.filter_by(
+                    username=username,
+                    task_type='training',
+                    status='pending',
+                ).filter(UserTask.notes.like(f'video_id:{video_id}%')).first()
+                if existing_training_task:
+                    display_name = user_display_names.get(username, username)
+                    flash(
+                        f'{display_name} already has a pending training task for "{video.title}".',
+                        'error',
+                    )
+                    return redirect(url_for('admin_assign_task', staff_console=sc))
+
+                if not task_description:
+                    task_description = f"Please watch and complete the training video: {video.title}"
+
+            task_notes = notes
+            if video is not None:
+                task_notes = f'video_id:{video_id}'
+
             task = UserTask(
                 username=username,
                 task_title=task_title,
                 task_description=task_description,
-                task_type='document' if document else 'general',
+                task_type='document' if document else ('training' if video else 'general'),
                 document_id=document_id,
                 priority=priority,
                 status='pending',
                 due_date=due_date,
                 assigned_by=current_user.username,
-                notes=notes,
+                notes=task_notes,
                 display_order=5000,
                 depends_on_task_id=None,
             )
@@ -25790,6 +25832,12 @@ def admin_assign_task():
                     f'They will see a sign-document task on their Tasks page.',
                     'success'
                 )
+            elif video is not None:
+                flash(
+                    f'Training video "{video.title}" assigned to {display_name}. '
+                    f'They will see a watch-and-quiz task on their Tasks page.',
+                    'success'
+                )
             else:
                 flash(f'Task assigned to {display_name}.', 'success')
         except Exception as e:
@@ -25802,6 +25850,7 @@ def admin_assign_task():
     prefill_username = (request.args.get('username') or '').strip()
     staff_console_redirect = (request.args.get('staff_console') or 'admin').strip()
     prefill_document_id = (request.args.get('document_id') or '').strip()
+    prefill_video_id = (request.args.get('video_id') or '').strip()
     prefill_store_id = ''
     if prefill_username in user_store_ids:
         sid = user_store_ids[prefill_username]
@@ -25888,9 +25937,9 @@ def admin_assign_task():
             {% endwith %}
             <div class="admin-panel">
                 <p class="help" style="margin-bottom: 16px;">
-                    Creates a one-off task on the user’s <strong>Tasks</strong> page. Pick a <strong>document</strong>
-                    below if the task is to sign a specific form — that will also assign the document to them and
-                    email them the signing link. Leave the document blank for any other type of one-off task.
+                    Creates a one-off task on the user’s <strong>Tasks</strong> page. Optionally link the task to a
+                    <strong>document</strong> (signing) or a <strong>training video</strong> (watch video and complete
+                    the quiz). Leave both blank for a general one-off task.
                 </p>
                 <form method="POST" action="{{ url_for('admin_assign_task') }}">
                     <input type="hidden" name="staff_console" value="{{ staff_console_redirect }}">
@@ -25924,7 +25973,7 @@ def admin_assign_task():
                     <div class="form-group">
                         <label for="document_id">Document to sign (optional)</label>
                         <select id="document_id" name="document_id">
-                            <option value="">— None (general task) —</option>
+                            <option value="">— None —</option>
                             {% for d in all_documents %}
                             <option value="{{ d.id }}" {% if prefill_document_id == d.id|string %}selected{% endif %}>
                                 {{ d.name_for_users or d.original_filename }}
@@ -25932,12 +25981,26 @@ def admin_assign_task():
                             {% endfor %}
                         </select>
                         <div class="help">
-                            If a document is selected, the user gets a “Sign Document” task linked to it and an
-                            email with the signing link. Leave blank for a general one-off task.
+                            If selected, the user gets a sign-document task and the document is assigned to them.
                         </div>
                     </div>
                     <div class="form-group">
-                        <label for="task_title">Task title <span id="task_title_optional" style="display:none; font-weight:400; color:#9aa5b8;">(optional — auto-filled from document)</span></label>
+                        <label for="video_id">Training video (optional)</label>
+                        <select id="video_id" name="video_id">
+                            <option value="">— None —</option>
+                            {% for v in all_training_videos %}
+                            <option value="{{ v.id }}" {% if prefill_video_id == v.id|string %}selected{% endif %}>
+                                {{ v.title }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <div class="help">
+                            If selected, the user gets a training task to watch the video and complete the quiz at the end.
+                            Cannot be combined with a document on the same task.
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="task_title">Task title <span id="task_title_optional" style="display:none; font-weight:400; color:#9aa5b8;">(optional — auto-filled from document or video)</span></label>
                         <input type="text" id="task_title" name="task_title" maxlength="200" required placeholder="Short title shown in their task list">
                     </div>
                     <div class="form-group">
@@ -25957,9 +26020,10 @@ def admin_assign_task():
                         <label for="due_date">Due date (optional)</label>
                         <input type="date" id="due_date" name="due_date">
                     </div>
-                    <div class="form-group">
+                    <div class="form-group" id="internal_notes_group">
                         <label for="notes">Internal notes (optional)</label>
                         <input type="text" id="notes" name="notes" maxlength="500" placeholder="Visible to admins on task row">
+                        <div class="help" id="internal_notes_help" style="display:none;">Not used when a training video is selected.</div>
                     </div>
                     <button type="submit" class="btn">Assign task</button>
                 </form>
@@ -26011,26 +26075,64 @@ def admin_assign_task():
                 }
 
                 var docSel = document.getElementById('document_id');
+                var videoSel = document.getElementById('video_id');
                 var titleInput = document.getElementById('task_title');
                 var optionalLabel = document.getElementById('task_title_optional');
-                if (!docSel || !titleInput) return;
-                function syncTitleRequirement() {
+                var notesInput = document.getElementById('notes');
+                var notesGroup = document.getElementById('internal_notes_group');
+                var notesHelp = document.getElementById('internal_notes_help');
+                if (!docSel || !videoSel || !titleInput) return;
+
+                function syncLinkedTaskFields() {
                     var hasDoc = !!docSel.value;
-                    if (hasDoc) {
+                    var hasVideo = !!videoSel.value;
+                    var hasLinked = hasDoc || hasVideo;
+
+                    if (hasDoc && hasVideo) {
+                        if (docSel === document.activeElement) {
+                            videoSel.value = '';
+                            hasVideo = false;
+                        } else {
+                            docSel.value = '';
+                            hasDoc = false;
+                        }
+                        hasLinked = hasDoc || hasVideo;
+                    }
+
+                    if (hasLinked) {
                         titleInput.required = false;
                         if (optionalLabel) optionalLabel.style.display = 'inline';
                         if (!titleInput.value.trim()) {
-                            var label = docSel.options[docSel.selectedIndex] ? docSel.options[docSel.selectedIndex].text : '';
-                            titleInput.placeholder = 'Auto: Sign Document: ' + label;
+                            if (hasDoc) {
+                                var docLabel = docSel.options[docSel.selectedIndex] ? docSel.options[docSel.selectedIndex].text : '';
+                                titleInput.placeholder = 'Auto: Sign Document: ' + docLabel;
+                            } else if (hasVideo) {
+                                var videoLabel = videoSel.options[videoSel.selectedIndex] ? videoSel.options[videoSel.selectedIndex].text : '';
+                                titleInput.placeholder = 'Auto: Complete Training: ' + videoLabel;
+                            }
                         }
                     } else {
                         titleInput.required = true;
                         if (optionalLabel) optionalLabel.style.display = 'none';
                         titleInput.placeholder = 'Short title shown in their task list';
                     }
+
+                    if (notesInput && notesGroup) {
+                        var trainingSelected = !!videoSel.value;
+                        notesInput.disabled = trainingSelected;
+                        notesGroup.style.opacity = trainingSelected ? '0.55' : '1';
+                        if (notesHelp) {
+                            notesHelp.style.display = trainingSelected ? 'block' : 'none';
+                        }
+                        if (trainingSelected) {
+                            notesInput.value = '';
+                        }
+                    }
                 }
-                docSel.addEventListener('change', syncTitleRequirement);
-                syncTitleRequirement();
+
+                docSel.addEventListener('change', syncLinkedTaskFields);
+                videoSel.addEventListener('change', syncLinkedTaskFields);
+                syncLinkedTaskFields();
             })();
         </script>
     </body>
@@ -26038,7 +26140,8 @@ def admin_assign_task():
     ''', all_users=all_users, user_display_names=user_display_names, user_store_ids=user_store_ids,
          all_stores=all_stores, prefill_username=prefill_username, prefill_store_id=prefill_store_id,
          staff_console_redirect=staff_console_redirect, all_documents=all_documents,
-         prefill_document_id=prefill_document_id)
+         all_training_videos=all_training_videos, prefill_document_id=prefill_document_id,
+         prefill_video_id=prefill_video_id)
 
 
 @app.route('/admin/new-hire/<username>/nudge-task/<int:task_id>', methods=['POST'])
