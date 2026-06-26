@@ -867,10 +867,19 @@ body.user-app-shell #mobileNav {
         align-items: center !important;
         padding: max(10px, env(safe-area-inset-top, 0px)) 14px 10px !important;
         flex-wrap: nowrap !important;
+        gap: 8px !important;
+    }
+    body.user-app-shell .top-header .logo-section {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+    body.user-app-shell .top-header .nav-links {
+        display: none !important;
     }
     body.user-app-shell .user-section {
         gap: 10px !important;
         flex-shrink: 0;
+        margin-left: auto;
     }
     body.user-app-shell .notification-icon {
         display: flex;
@@ -1104,21 +1113,22 @@ body.user-app-shell #mobileNav {
         right: 0 !important;
         left: auto !important;
     }
-    /* Finale + external links: compact chrome; readable message + links; main area scrolls if needed */
+    /* Finale + external links: on mobile allow natural page scroll (avoid clipped content) */
     html:has(body.dashboard-home-compact) {
-        height: 100%;
+        height: auto;
     }
     html:has(body.dashboard-home-compact),
     html:has(body.dashboard-home-compact) body.dashboard-home-compact.user-app-shell {
-        max-height: 100dvh;
+        max-height: none;
     }
     body.dashboard-home-compact.user-app-shell {
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-        height: 100%;
-        max-height: 100dvh;
-        padding-bottom: calc(50px + env(safe-area-inset-bottom, 0px)) !important;
+        display: block;
+        overflow-x: hidden;
+        overflow-y: auto;
+        height: auto;
+        max-height: none;
+        min-height: 100dvh;
+        padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px)) !important;
     }
     body.dashboard-home-compact .top-header {
         flex-shrink: 0;
@@ -1154,35 +1164,25 @@ body.user-app-shell #mobileNav {
         font-size: 0.9em !important;
     }
     body.dashboard-home-compact .dashboard-view {
-        flex: 1 1 auto;
-        min-height: 0;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
+        display: block;
+        overflow: visible;
     }
     body.dashboard-home-compact .dashboard-container,
     body.dashboard-home-compact .dashboard-page-wrap {
-        flex: 1 1 auto;
-        min-height: 0;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
+        display: block;
+        overflow: visible;
         padding-top: 0 !important;
         padding-bottom: 0 !important;
         padding-left: 8px !important;
         padding-right: 8px !important;
     }
     body.dashboard-home-compact .main-content {
-        flex: 1 1 auto;
-        min-height: 0;
         display: flex;
         flex-direction: column;
-        justify-content: flex-start;
-        gap: 6px !important;
+        gap: 12px !important;
         margin-top: 0 !important;
-        overflow-x: hidden;
-        overflow-y: auto;
-        -webkit-overflow-scrolling: touch;
+        overflow: visible;
+        padding-bottom: 8px;
     }
     body.dashboard-home-compact .dashboard-tasks-col {
         flex: 0 1 auto;
@@ -1191,7 +1191,7 @@ body.user-app-shell #mobileNav {
     body.dashboard-home-compact .finale-card {
         min-height: 0 !important;
         justify-content: flex-start !important;
-        padding: 12px 14px !important;
+        padding: 16px 14px !important;
         margin-left: 8px !important;
         margin-right: 8px !important;
         border-radius: 14px !important;
@@ -5514,8 +5514,19 @@ def dashboard():
             }
             
             @media (max-width: 768px) {
+                .nav-links { display: none !important; }
+                .top-header {
+                    padding: max(10px, env(safe-area-inset-top, 0px)) 14px 10px;
+                    flex-wrap: nowrap;
+                    gap: 8px;
+                }
+                .logo-section img {
+                    height: 42px;
+                    margin-bottom: 0;
+                    align-self: center;
+                }
                 .dashboard-page-wrap {
-                    padding: 0 15px 20px;
+                    padding: 12px 14px 20px;
                 }
                 .dashboard-hero-banner {
                     padding: 28px 20px 36px;
@@ -5528,11 +5539,22 @@ def dashboard():
                 }
                 .main-content {
                     grid-template-columns: 1fr;
-                    margin-top: -20px;
-                    gap: 20px;
+                    margin-top: 0;
+                    gap: 16px;
                 }
                 .dashboard-tasks-card {
                     max-height: none;
+                    min-height: 0;
+                }
+                .finale-card {
+                    min-height: 0 !important;
+                    padding: 24px 16px !important;
+                }
+                .dashboard-progress-label {
+                    color: var(--text-primary, #f2f5fb) !important;
+                }
+                .dashboard-progress-meta {
+                    color: var(--text-muted, #b7c1d3) !important;
                 }
                 .welcome-section h1 {
                     font-size: 2em;
@@ -5992,9 +6014,9 @@ def dashboard():
                             <div class="progress-bar-container" style="flex: 1; min-width: 0;">
                                 <div class="progress-bar-fill" style="width: {{ progress_percentage }}%;"></div>
                             </div>
-                            <span style="font-size: 0.9em; font-weight: 600; color: #333; flex-shrink: 0;">{{ progress_percentage }}%</span>
+                            <span class="dashboard-progress-label" style="font-size: 0.9em; font-weight: 600; flex-shrink: 0;">{{ progress_percentage }}%</span>
                         </div>
-                        <div style="text-align: center; margin-top: 8px; color: #808080; font-size: 0.85em; flex-shrink: 0;">
+                        <div class="dashboard-progress-meta" style="text-align: center; margin-top: 8px; font-size: 0.85em; flex-shrink: 0;">
                         {{ completed_tasks }} of {{ total_tasks }} tasks completed
                     </div>
                     
@@ -6038,15 +6060,15 @@ def dashboard():
                     {% else %}
                     <div style="text-align: center; padding: 40px 20px; color: #28a745;">
                         <div style="font-size: 3em; margin-bottom: 15px;">✓</div>
-                        <h3 style="font-size: 1.5em; margin-bottom: 10px; color: #000000; font-weight: 800; font-family: 'URW Form', Arial, sans-serif;">All Tasks Completed!</h3>
-                        <p style="color: #808080; font-size: 1.1em;">Great job! You've completed all your onboarding tasks.</p>
+                        <h3 style="font-size: 1.5em; margin-bottom: 10px; color: var(--text-primary, #f2f5fb); font-weight: 800; font-family: 'URW Form', Arial, sans-serif;">All Tasks Completed!</h3>
+                        <p style="color: var(--text-muted, #b7c1d3); font-size: 1.1em;">Great job! You've completed all your onboarding tasks.</p>
                     </div>
                     {% endif %}
                 </div>
                 {% else %}
                 <div class="section dashboard-card">
                     <h2 class="section-title-dash">Tasks</h2>
-                    <p style="color: #808080; font-size: 0.95em;">No tasks assigned yet. Check back soon or contact HR.</p>
+                    <p style="color: var(--text-muted, #b7c1d3); font-size: 0.95em;">No tasks assigned yet. Check back soon or contact HR.</p>
                 </div>
                 {% endif %}
                 </div>
