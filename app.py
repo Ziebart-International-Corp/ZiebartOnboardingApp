@@ -22216,14 +22216,73 @@ def _serve_sign_document_page(doc_id):
                 el.style.height = rect.height + 'px';
             }
 
+            function getChoiceGroupKey(field) {
+                if (!field || field.field_type !== 'checkbox_choice') return '';
+                var g = (field.choice_group || '').trim();
+                return g || ('_field_' + field.id);
+            }
+
+            function isChoiceGroupFilled(groupKey) {
+                if (!groupKey) return false;
+                for (var i = 0; i < signOverlayFields.length; i++) {
+                    var f = signOverlayFields[i];
+                    if (f.field_type === 'checkbox_choice' && getChoiceGroupKey(f) === groupKey && f.filled) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            function isSignFieldIncomplete(field) {
+                if (!field) return false;
+                if (field.field_type === 'checkbox_choice' && (field.choice_group || '').trim()) {
+                    return !isChoiceGroupFilled(getChoiceGroupKey(field));
+                }
+                return !field.filled;
+            }
+
+            function isSignFieldDoneForDisplay(field) {
+                if (!field) return false;
+                if (field.field_type === 'checkbox_choice' && (field.choice_group || '').trim()) {
+                    return isChoiceGroupFilled(getChoiceGroupKey(field));
+                }
+                return !!field.filled;
+            }
+
+            function countSignFieldUnits() {
+                var total = 0;
+                var seenGroups = {};
+                signOverlayFields.forEach(function(f) {
+                    if (f.field_type === 'checkbox_choice' && (f.choice_group || '').trim()) {
+                        var gkey = getChoiceGroupKey(f);
+                        if (seenGroups[gkey]) return;
+                        seenGroups[gkey] = true;
+                        total++;
+                    } else {
+                        total++;
+                    }
+                });
+                return total;
+            }
+
             function countFilledSignFields() {
-                var n = 0;
-                signOverlayFields.forEach(function(f) { if (f.filled) n++; });
-                return n;
+                var done = 0;
+                var seenGroups = {};
+                signOverlayFields.forEach(function(f) {
+                    if (f.field_type === 'checkbox_choice' && (f.choice_group || '').trim()) {
+                        var gkey = getChoiceGroupKey(f);
+                        if (seenGroups[gkey]) return;
+                        seenGroups[gkey] = true;
+                        if (isChoiceGroupFilled(gkey)) done++;
+                    } else if (f.filled) {
+                        done++;
+                    }
+                });
+                return done;
             }
 
             function updateSignProgress() {
-                var total = signOverlayFields.length;
+                var total = countSignFieldUnits();
                 var done = countFilledSignFields();
                 var text = document.getElementById('signProgressText');
                 var fill = document.getElementById('signProgressFill');
@@ -22232,7 +22291,7 @@ def _serve_sign_document_page(doc_id):
                 buildMobileFieldList();
             }
 
-            function jumpToSignField(fieldId) {
+            function focusSignField(fieldId) {
                 var field = getSignField(fieldId);
                 if (!field) return;
                 closeSignaturePopover();
@@ -22243,13 +22302,19 @@ def _serve_sign_document_page(doc_id):
                         renderFieldOverlays();
                         var el = document.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
                         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        handleFieldOverlayClick(fieldId);
                     }, 250);
                     return;
                 }
                 renderFieldOverlays();
                 var el = document.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
                 if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+
+            function jumpToSignField(fieldId) {
+                var field = getSignField(fieldId);
+                if (!field) return;
+                focusSignField(fieldId);
+                if (field.field_type === 'checkbox_choice') return;
                 handleFieldOverlayClick(fieldId);
             }
 
@@ -22263,21 +22328,34 @@ def _serve_sign_document_page(doc_id):
                 }
                 list.style.display = 'flex';
                 list.innerHTML = '';
+                var seenMobileChoiceGroups = {};
                 signOverlayFields.forEach(function(field) {
+                    if (field.field_type === 'checkbox_choice' && (field.choice_group || '').trim()) {
+                        var gkey = getChoiceGroupKey(field);
+                        if (seenMobileChoiceGroups[gkey]) return;
+                        seenMobileChoiceGroups[gkey] = true;
+                    }
                     var btn = document.createElement('button');
                     btn.type = 'button';
+                    var done = isSignFieldDoneForDisplay(field);
                     btn.className = 'sign-mobile-field-item' +
-                        (field.filled ? ' is-done' : '') +
+                        (done ? ' is-done' : '') +
                         (activeOverlayFieldId === field.id ? ' is-active' : '');
                     var label = document.createElement('span');
                     label.className = 'sign-mobile-field-item-label';
                     label.textContent = field.label || (field.kind === 'signature' ? 'Signature' : 'Field');
                     var meta = document.createElement('span');
                     meta.className = 'sign-mobile-field-item-meta';
-                    meta.textContent = (field.filled ? 'Done' : 'Tap') + ' · p' + field.page;
+                    meta.textContent = (done ? 'Done' : 'Tap') + ' · p' + field.page;
                     btn.appendChild(label);
                     btn.appendChild(meta);
-                    btn.addEventListener('click', function() { jumpToSignField(field.id); });
+                    btn.addEventListener('click', function() {
+                        if (field.field_type === 'checkbox_choice') {
+                            toggleChoiceCheckbox(field.id);
+                            return;
+                        }
+                        jumpToSignField(field.id);
+                    });
                     list.appendChild(btn);
                 });
             }
@@ -22763,8 +22841,8 @@ def _serve_sign_document_page(doc_id):
             function scrollToFirstIncompleteField() {
                 if (editingOverlayFieldId !== null) return;
                 for (var i = 0; i < signOverlayFields.length; i++) {
-                    if (!signOverlayFields[i].filled) {
-                        jumpToSignField(signOverlayFields[i].id);
+                    if (isSignFieldIncomplete(signOverlayFields[i])) {
+                        focusSignField(signOverlayFields[i].id);
                         return;
                     }
                 }
@@ -22888,13 +22966,27 @@ def _serve_sign_document_page(doc_id):
                 });
             }
 
-            function updateChoiceCheckboxUI(fieldId, isSelected) {
-                var fld = getSignField(fieldId);
-                if (fld) {
-                    fld.filled = isSelected;
-                    fld.value = isSelected ? 'X' : '';
-                    renderFieldOverlays();
-                }
+            function applyChoiceGroupSelection(fieldId, value) {
+                var field = getSignField(fieldId);
+                var group = field ? (field.choice_group || '').trim() : '';
+                signOverlayFields.forEach(function(f) {
+                    if (f.field_type !== 'checkbox_choice') return;
+                    if (group && f.choice_group === group) {
+                        if (f.id === fieldId && value === 'X') {
+                            f.filled = true;
+                            f.value = 'X';
+                        } else {
+                            f.filled = false;
+                            f.value = '';
+                        }
+                    } else if (!group && f.id === fieldId) {
+                        f.filled = value === 'X';
+                        f.value = value === 'X' ? 'X' : '';
+                    }
+                });
+                activeOverlayFieldId = null;
+                editingOverlayFieldId = null;
+                renderFieldOverlays();
             }
 
             function toggleChoiceCheckbox(fieldId) {
@@ -22956,19 +23048,8 @@ def _serve_sign_document_page(doc_id):
                 .then(data => {
                     if (data.success) {
                         if (typedType === 'checkbox_choice') {
-                            var group = field ? field.choice_group : '';
-                            signOverlayFields.forEach(function(f) {
-                                if (f.field_type === 'checkbox_choice' && group && f.choice_group === group && f.id !== fieldId) {
-                                    updateChoiceCheckboxUI(f.id, false);
-                                }
-                            });
-                            if (value === 'X') {
-                                updateChoiceCheckboxUI(fieldId, true);
-                            } else {
-                                updateOverlayFieldState(fieldId, false, '', null);
-                            }
+                            applyChoiceGroupSelection(fieldId, value);
                             updateSignProgress();
-                            scrollToFirstIncompleteField();
                             return;
                         }
                         updateOverlayFieldState(fieldId, true, value, null);
