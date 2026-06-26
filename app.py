@@ -21428,9 +21428,45 @@ def _serve_sign_document_page(doc_id):
                 display: flex;
                 align-items: center;
                 justify-content: flex-start;
-                overflow: hidden;
+                overflow: visible;
                 z-index: 101;
                 transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+            }
+            body.sign-document-page .field-overlay:not(.filled) {
+                border: 2px dashed rgba(254, 1, 0, 0.62);
+                background: rgba(255, 255, 255, 0.72);
+                box-shadow: 0 0 0 1px rgba(254, 1, 0, 0.15);
+            }
+            body.sign-document-page .field-overlay.kind-typed:not(.filled) {
+                border-color: rgba(0, 123, 255, 0.72);
+                background: rgba(255, 255, 255, 0.78);
+                box-shadow: 0 0 0 1px rgba(0, 123, 255, 0.12);
+            }
+            body.sign-document-page .field-overlay:not(.filled)::before {
+                content: attr(data-label);
+                position: absolute;
+                top: -1px;
+                left: -1px;
+                transform: translateY(-100%);
+                max-width: min(180px, 42vw);
+                padding: 2px 6px;
+                font-size: 10px;
+                font-weight: 700;
+                line-height: 1.25;
+                border-radius: 4px 4px 0 0;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                pointer-events: none;
+                z-index: 1;
+            }
+            body.sign-document-page .field-overlay.kind-signature:not(.filled)::before {
+                background: #fe0100;
+                color: #fff;
+            }
+            body.sign-document-page .field-overlay.kind-typed:not(.filled)::before {
+                background: #007bff;
+                color: #fff;
             }
             .field-overlay:hover:not(.active):not(.filled) {
                 border-color: rgba(0, 123, 255, 0.45);
@@ -21451,8 +21487,59 @@ def _serve_sign_document_page(doc_id):
             .field-overlay.active {
                 border-color: #007bff;
                 background: #fff;
-                box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.35);
+                box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.45);
                 z-index: 102;
+            }
+            body.sign-document-page .field-overlay.active:not(.filled) {
+                animation: sign-field-pulse 1.4s ease-in-out infinite;
+            }
+            @keyframes sign-field-pulse {
+                0%, 100% { box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.45); }
+                50% { box-shadow: 0 0 0 5px rgba(254, 1, 0, 0.35); }
+            }
+            .sign-mobile-field-list {
+                display: none;
+                flex-direction: column;
+                gap: 8px;
+                margin-bottom: 12px;
+                max-height: 160px;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            .sign-mobile-field-item {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                width: 100%;
+                padding: 10px 12px;
+                border-radius: 8px;
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                background: rgba(255, 255, 255, 0.06);
+                color: #f2f5fb;
+                font-size: 0.9em;
+                text-align: left;
+                cursor: pointer;
+            }
+            .sign-mobile-field-item.is-done {
+                opacity: 0.65;
+                border-color: rgba(40, 167, 69, 0.45);
+            }
+            .sign-mobile-field-item.is-active {
+                border-color: rgba(254, 1, 0, 0.65);
+                background: rgba(254, 1, 0, 0.12);
+            }
+            .sign-mobile-field-item-label {
+                flex: 1;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .sign-mobile-field-item-meta {
+                flex-shrink: 0;
+                font-size: 0.78em;
+                color: #b7c1d3;
             }
             .field-overlay-label {
                 display: none;
@@ -21688,11 +21775,42 @@ def _serve_sign_document_page(doc_id):
                     min-height: 0;
                     padding: 8px;
                 }
-                .document-viewer {
-                    min-height: min(55vh, 520px);
-                }
                 #pdfCanvas {
-                    max-height: min(55vh, 520px);
+                    width: 100% !important;
+                    max-width: 100%;
+                    height: auto !important;
+                    max-height: none !important;
+                }
+                .sign-mobile-field-list {
+                    display: flex;
+                }
+                .sign-hint-banner {
+                    font-size: 0.85em;
+                }
+                body.sign-document-page .field-overlay:not(.filled) {
+                    min-width: 44px;
+                    min-height: 36px;
+                }
+                .sign-doc-toolbar {
+                    flex-direction: column;
+                    align-items: stretch;
+                }
+                #signNextFieldBtn {
+                    width: 100%;
+                    min-height: 44px;
+                }
+                .sign-document-page .pdf-page-scroller {
+                    display: none !important;
+                }
+                .sign-document-page .document-viewer-layout {
+                    flex-direction: column;
+                }
+                .sign-document-page .field-overlay.active {
+                    z-index: 103;
+                }
+                .sign-document-page .field-overlay-input {
+                    font-size: max(16px, 1em) !important;
+                    min-height: 36px;
                 }
                 .signature-pad-container {
                     margin-bottom: 10px;
@@ -21986,7 +22104,8 @@ def _serve_sign_document_page(doc_id):
                         <button type="button" id="signNextFieldBtn" class="btn" style="background:#fe0100;">Next field</button>
                         <a href="{{ url_for('view_documents') }}" class="btn-done-link">Done</a>
                     </div>
-                    <p class="sign-hint-banner">Click a field on the form to type or sign. Press Tab to move between fields. Each field saves when you click away.</p>
+                    <p class="sign-hint-banner">Tap a highlighted field on the form to type or sign. Use <strong>Next field</strong> or the list below to jump between fields.</p>
+                    <div id="signMobileFieldList" class="sign-mobile-field-list" aria-label="Fields to complete"></div>
                     {% elif is_pdf and not document_file_missing %}
                     <p class="sign-hint-banner">This document has no fillable fields configured yet. Contact your administrator.</p>
                     <p style="margin-bottom: 12px;"><a href="{{ url_for('view_documents') }}" class="btn-done-link">← Back to documents</a></p>
@@ -22062,12 +22181,30 @@ def _serve_sign_document_page(doc_id):
                 var scaleX = canvas.width / canvasRect.width;
                 var scaleY = canvas.height / canvasRect.height;
                 if (!scaleX || !scaleY) return null;
+                var minW = window.innerWidth <= 768 ? 44 : 24;
+                var minH = window.innerWidth <= 768 ? 36 : 20;
                 return {
                     left: field.x / scaleX,
                     top: field.y / scaleY,
-                    width: Math.max(field.width / scaleX, 24),
-                    height: Math.max(field.height / scaleY, 20)
+                    width: Math.max(field.width / scaleX, minW),
+                    height: Math.max(field.height / scaleY, minH)
                 };
+            }
+
+            function isMobileSignView() {
+                return window.innerWidth <= 768;
+            }
+
+            function computePdfScale(page) {
+                var viewport = page.getViewport({ scale: 1.0 });
+                if (isMobileSignView()) {
+                    var viewer = document.getElementById('documentViewer');
+                    var pad = 24;
+                    var availW = (viewer ? viewer.clientWidth : window.innerWidth) - pad;
+                    if (availW < 260) availW = window.innerWidth - pad;
+                    return Math.min(availW / viewport.width, 2.5);
+                }
+                return 800 / viewport.height;
             }
 
             function positionOverlayElement(el, field) {
@@ -22092,6 +22229,57 @@ def _serve_sign_document_page(doc_id):
                 var fill = document.getElementById('signProgressFill');
                 if (text) text.textContent = done + ' / ' + total + ' complete';
                 if (fill) fill.style.width = (total ? (100 * done / total) : 0) + '%';
+                buildMobileFieldList();
+            }
+
+            function jumpToSignField(fieldId) {
+                var field = getSignField(fieldId);
+                if (!field) return;
+                closeSignaturePopover();
+                activeOverlayFieldId = fieldId;
+                if (field.page !== currentPage && pdfDoc) {
+                    goToPage(field.page);
+                    setTimeout(function() {
+                        renderFieldOverlays();
+                        var el = document.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        handleFieldOverlayClick(fieldId);
+                    }, 250);
+                    return;
+                }
+                renderFieldOverlays();
+                var el = document.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                handleFieldOverlayClick(fieldId);
+            }
+
+            function buildMobileFieldList() {
+                var list = document.getElementById('signMobileFieldList');
+                if (!list) return;
+                if (!isMobileSignView()) {
+                    list.innerHTML = '';
+                    list.style.display = 'none';
+                    return;
+                }
+                list.style.display = 'flex';
+                list.innerHTML = '';
+                signOverlayFields.forEach(function(field) {
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'sign-mobile-field-item' +
+                        (field.filled ? ' is-done' : '') +
+                        (activeOverlayFieldId === field.id ? ' is-active' : '');
+                    var label = document.createElement('span');
+                    label.className = 'sign-mobile-field-item-label';
+                    label.textContent = field.label || (field.kind === 'signature' ? 'Signature' : 'Field');
+                    var meta = document.createElement('span');
+                    meta.className = 'sign-mobile-field-item-meta';
+                    meta.textContent = (field.filled ? 'Done' : 'Tap') + ' · p' + field.page;
+                    btn.appendChild(label);
+                    btn.appendChild(meta);
+                    btn.addEventListener('click', function() { jumpToSignField(field.id); });
+                    list.appendChild(btn);
+                });
             }
 
             function highlightActiveOverlays() {
@@ -22139,6 +22327,7 @@ def _serve_sign_document_page(doc_id):
                     el.className = 'field-overlay kind-' + field.kind + (field.filled ? ' filled' : '') + (activeOverlayFieldId === field.id ? ' active' : '');
                     el.setAttribute('data-field-id', field.id);
                     el.setAttribute('data-kind', field.kind);
+                    el.setAttribute('data-label', field.label || (field.kind === 'signature' ? 'Sign here' : 'Fill in'));
                     el.title = field.label;
                     positionOverlayElement(el, field);
                     buildFieldOverlayContent(field, el);
@@ -22247,7 +22436,8 @@ def _serve_sign_document_page(doc_id):
                 }
                 if (field.field_type !== 'last4') {
                     input.value = field.value || '';
-                    var fs = Math.max(10, Math.min(14, (field.height || 30) * 0.35));
+                    var rect = getFieldScreenRect(field);
+                    var fs = Math.max(12, Math.min(18, (rect ? rect.height * 0.55 : 14)));
                     input.style.fontSize = fs + 'px';
                     input.style.background = '#fff';
                     input.style.color = '#000';
@@ -22255,7 +22445,8 @@ def _serve_sign_document_page(doc_id):
                     input.style.caretColor = '#000';
                     el.appendChild(input);
                 } else {
-                    var fs2 = Math.max(10, Math.min(14, (field.height || 30) * 0.35));
+                    var rect2 = getFieldScreenRect(field);
+                    var fs2 = Math.max(12, Math.min(18, (rect2 ? rect2.height * 0.55 : 14)));
                     input.style.fontSize = fs2 + 'px';
                 }
                 input.addEventListener('mousedown', function(e) { e.stopPropagation(); });
@@ -22286,7 +22477,12 @@ def _serve_sign_document_page(doc_id):
                         renderFieldOverlays();
                     }
                 });
-                setTimeout(function() { input.focus(); }, 0);
+                setTimeout(function() {
+                    input.focus();
+                    if (isMobileSignView() && el) {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                }, 0);
             }
 
             function updateOverlayFieldState(fieldId, filled, value, signatureImage) {
@@ -22324,14 +22520,15 @@ def _serve_sign_document_page(doc_id):
                     (savedSignatureImageBase64 ? '<button type="button" id="popoverSavedBtn" style="background:#007bff;color:#fff;">Use saved</button>' : '') +
                     '<button type="button" id="popoverCancelBtn">Cancel</button></div>';
                 document.body.appendChild(pop);
-                if (overlayEl) {
+                if (overlayEl && !isMobileSignView()) {
                     var r = overlayEl.getBoundingClientRect();
                     pop.style.left = Math.min(r.left, window.innerWidth - 300) + 'px';
                     pop.style.top = Math.min(r.bottom + 8, window.innerHeight - 220) + 'px';
                 } else {
                     pop.style.left = '50%';
-                    pop.style.top = '30%';
+                    pop.style.top = 'max(12px, env(safe-area-inset-top, 0px))';
                     pop.style.transform = 'translateX(-50%)';
+                    pop.style.width = 'min(340px, calc(100vw - 24px))';
                 }
                 popoverPadCanvas = document.getElementById('popoverSignaturePad');
                 if (popoverPadCanvas) initPopoverSignaturePad(popoverPadCanvas);
@@ -22353,27 +22550,47 @@ def _serve_sign_document_page(doc_id):
                 ctx.lineWidth = 2;
                 ctx.lineCap = 'round';
                 var drawing = false, lx = 0, ly = 0;
-                function start(e) {
-                    drawing = true;
+                function pointFromEvent(e) {
                     var rect = canvas.getBoundingClientRect();
-                    lx = e.clientX - rect.left;
-                    ly = e.clientY - rect.top;
+                    var clientX = e.clientX;
+                    var clientY = e.clientY;
+                    if (e.touches && e.touches.length) {
+                        clientX = e.touches[0].clientX;
+                        clientY = e.touches[0].clientY;
+                    } else if (e.changedTouches && e.changedTouches.length) {
+                        clientX = e.changedTouches[0].clientX;
+                        clientY = e.changedTouches[0].clientY;
+                    }
+                    return {
+                        x: (clientX - rect.left) * (canvas.width / rect.width),
+                        y: (clientY - rect.top) * (canvas.height / rect.height)
+                    };
+                }
+                function start(e) {
+                    if (e.cancelable) e.preventDefault();
+                    drawing = true;
+                    var p = pointFromEvent(e);
+                    lx = p.x; ly = p.y;
                 }
                 function move(e) {
                     if (!drawing) return;
-                    var rect = canvas.getBoundingClientRect();
-                    var cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+                    if (e.cancelable) e.preventDefault();
+                    var p = pointFromEvent(e);
                     ctx.beginPath();
                     ctx.moveTo(lx, ly);
-                    ctx.lineTo(cx, cy);
+                    ctx.lineTo(p.x, p.y);
                     ctx.stroke();
-                    lx = cx; ly = cy;
+                    lx = p.x; ly = p.y;
                 }
                 function stop() { drawing = false; }
-                canvas.onmousedown = start;
-                canvas.onmousemove = move;
-                canvas.onmouseup = stop;
-                canvas.onmouseout = stop;
+                canvas.addEventListener('mousedown', start);
+                canvas.addEventListener('mousemove', move);
+                canvas.addEventListener('mouseup', stop);
+                canvas.addEventListener('mouseout', stop);
+                canvas.addEventListener('touchstart', start, { passive: false });
+                canvas.addEventListener('touchmove', move, { passive: false });
+                canvas.addEventListener('touchend', stop);
+                canvas.addEventListener('touchcancel', stop);
             }
 
             function submitSignatureApi(fieldId, base64Data, usedSaved, onSuccess) {
@@ -22518,9 +22735,7 @@ def _serve_sign_document_page(doc_id):
                 var canvas = document.getElementById('pdfCanvas');
                 var ctx = canvas.getContext('2d');
                 pdfDoc.getPage(pageNum).then(function(page) {
-                    var viewerHeight = 800;
-                    var viewport = page.getViewport({ scale: 1.0 });
-                    var scale = viewerHeight / viewport.height;
+                    var scale = computePdfScale(page);
                     pdfScale = scale;
                     var scaledViewport = page.getViewport({ scale: scale });
                     canvas.width = scaledViewport.width;
@@ -22548,27 +22763,32 @@ def _serve_sign_document_page(doc_id):
             function scrollToFirstIncompleteField() {
                 if (editingOverlayFieldId !== null) return;
                 for (var i = 0; i < signOverlayFields.length; i++) {
-                    var f = signOverlayFields[i];
-                    if (!f.filled) {
-                        if (f.page !== currentPage && pdfDoc) goToPage(f.page);
-                        setTimeout(function(fid) {
-                            activeOverlayFieldId = fid;
-                            renderFieldOverlays();
-                            var el = document.querySelector('.field-overlay[data-field-id="' + fid + '"]');
-                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        }, 200, f.id);
+                    if (!signOverlayFields[i].filled) {
+                        jumpToSignField(signOverlayFields[i].id);
                         return;
                     }
                 }
             }
 
             var resizeOverlayTimer;
+            var lastRenderWidth = window.innerWidth;
             window.addEventListener('resize', function() {
                 clearTimeout(resizeOverlayTimer);
                 resizeOverlayTimer = setTimeout(function() {
                     if (editingOverlayFieldId !== null) return;
+                    if (pdfDoc && Math.abs(window.innerWidth - lastRenderWidth) > 40) {
+                        lastRenderWidth = window.innerWidth;
+                        goToPage(currentPage);
+                        return;
+                    }
                     renderFieldOverlays();
+                    buildMobileFieldList();
                 }, 150);
+            });
+            window.addEventListener('orientationchange', function() {
+                setTimeout(function() {
+                    if (pdfDoc) goToPage(currentPage);
+                }, 300);
             });
 
             var typedFieldPhoneRegex = new RegExp({{ typed_field_phone_regex_js|tojson }});
