@@ -1418,7 +1418,7 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
                         'x_position': x,
                         'y_position': y,
                         'width': max(width, 120.0),
-                        'height': max(height, 50.0),
+                        'height': max(height, 80.0),
                         'field_label': f'{role} signature',
                         'is_required': role == 'Employee',
                     })
@@ -1430,7 +1430,7 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
                         'x_position': x,
                         'y_position': y,
                         'width': max(width, 120.0),
-                        'height': max(height, 50.0),
+                        'height': max(height, 80.0),
                         'field_label': label[:200],
                         'is_required': True,
                     })
@@ -1737,19 +1737,49 @@ def embed_typed_field_values_in_pdf(
             _place_text_in_pdf_rect(page, rect, val)
 
 
+def _signature_image_rect(pdf_doc, page_idx: int, widget_rect, field) -> fitz.Rect | None:
+    """
+    Target rect for a drawn signature image.
+
+    Acrobat signature widgets often report a short widget.rect while the visible
+    box (and DB sync geometry) is taller — use the union of PDF widget + DB field.
+    """
+    rects: list[fitz.Rect] = []
+    if widget_rect is not None and not widget_rect.is_empty:
+        rects.append(fitz.Rect(widget_rect))
+    if field is not None and 0 <= page_idx < len(pdf_doc):
+        page = pdf_doc[page_idx]
+        rects.append(
+            viewer_coords_to_pdf_rect(
+                page,
+                getattr(field, 'x_position', 0) or 0,
+                getattr(field, 'y_position', 0) or 0,
+                getattr(field, 'width', 200) or 200,
+                getattr(field, 'height', 50) or 50,
+            )
+        )
+    if not rects:
+        return None
+    out = rects[0]
+    for rect in rects[1:]:
+        out |= rect
+    return out
+
+
 def embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields) -> None:
-    """Place drawn signatures using AcroForm widget rects when available."""
+    """Place drawn signatures using the tallest available AcroForm/DB target rect."""
     try:
-        from ee_pdf_field_map import EE_SIGNATURE_ACROS
+        from ee_pdf_field_map import EE_SIGNATURE_ACROS, canonical_acro
         sig_acros = EE_SIGNATURE_ACROS
     except ImportError:
+        canonical_acro = lambda n: (n or '').strip()  # noqa: E731
         sig_acros = {'employee': 'Employee_Signature', 'manager': 'Manager_Signature'}
 
-    widget_rects: dict[str, tuple[int, object]] = {}
+    widget_rects: dict[str, tuple[int, fitz.Rect]] = {}
     sig_acro_names = set(sig_acros.values())
     for page_idx, page in enumerate(pdf_doc):
         for widget in page.widgets() or []:
-            wname = (widget.field_name or '').strip()
+            wname = canonical_acro((widget.field_name or '').strip())
             if wname in sig_acro_names:
                 try:
                     widget.field_value = ''
@@ -1758,7 +1788,7 @@ def embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields) -> None:
                     pass
             for role, acro in sig_acros.items():
                 if wname == acro and widget.rect and not widget.rect.is_empty:
-                    widget_rects[role] = (page_idx, widget.rect)
+                    widget_rects[role] = (page_idx, fitz.Rect(widget.rect))
 
     field_by_id = {f.id: f for f in signature_fields if getattr(f, 'id', None)}
 
@@ -1771,25 +1801,20 @@ def embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields) -> None:
             lbl = (field.field_label or '').lower()
             role = 'manager' if 'manager' in lbl else 'employee'
 
-        page = None
-        img_rect = None
+        page_idx = None
+        widget_rect = None
         if role and role in widget_rects:
-            page_idx, target_rect = widget_rects[role]
-            page = pdf_doc[page_idx]
-            img_rect = fitz.Rect(target_rect)
+            page_idx, widget_rect = widget_rects[role]
         elif field:
-            page_num = int(getattr(field, 'page_number', 1) or 1) - 1
-            if page_num < 0 or page_num >= len(pdf_doc):
-                continue
-            page = pdf_doc[page_num]
-            img_rect = viewer_coords_to_pdf_rect(
-                page,
-                getattr(field, 'x_position', 0) or 0,
-                getattr(field, 'y_position', 0) or 0,
-                getattr(field, 'width', 200) or 200,
-                getattr(field, 'height', 50) or 50,
-            )
+            page_idx = int(getattr(field, 'page_number', 1) or 1) - 1
         else:
+            continue
+
+        if page_idx is None or page_idx < 0 or page_idx >= len(pdf_doc):
+            continue
+        page = pdf_doc[page_idx]
+        img_rect = _signature_image_rect(pdf_doc, page_idx, widget_rect, field)
+        if not img_rect or img_rect.is_empty:
             continue
 
         try:
