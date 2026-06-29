@@ -1009,16 +1009,32 @@ _KNOWN_ACRO_OPTION_LABELS = frozenset({
 })
 
 
+def _is_exclusive_choice_pair(labels: list[str]) -> bool:
+    """True when labels are a mutually exclusive pair (not independent checkboxes)."""
+    if len(labels) != 2:
+        return False
+    a, b = (l.strip().lower() for l in labels)
+    return (
+        {a, b} == {'single', 'married'}
+        or {a, b} == {'male', 'female'}
+        or {a, b} == {'yes', 'no'}
+    )
+
+
 def _split_mixed_option_clusters(cluster: list) -> list[list]:
-    """Split a row cluster that accidentally merged gender, race, yes/no, etc."""
+    """Split a row cluster that accidentally merged gender, race, yes/no, acks, etc."""
     buckets: dict[str, list] = {}
     for item in cluster:
         cat = _acro_option_category(item.get('field_label') or '')
         buckets.setdefault(cat, []).append(item)
-    out = [b for b in buckets.values() if len(b) >= 2]
-    singles = [b[0] for b in buckets.values() if len(b) == 1]
-    if singles:
-        out.extend([[s] for s in singles])
+    out: list[list] = []
+    for cat, items in buckets.items():
+        if cat == 'ack':
+            out.extend([[item] for item in items])
+        elif len(items) >= 2:
+            out.append(items)
+        else:
+            out.extend([[item] for item in items])
     return out if out else [cluster]
 
 
@@ -1180,8 +1196,17 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
                 for sub in _split_mixed_option_clusters(cluster):
                     if len(sub) < 2:
                         sub[0]['field_type'] = 'checkbox_choice'
+                        sub[0]['choice_group'] = None
                         sub[0]['is_required'] = False
                         _append_marker_field(sub[0])
+                        continue
+                    labels = [(c.get('field_label') or '').strip() for c in sub]
+                    if len(sub) == 2 and not _is_exclusive_choice_pair(labels):
+                        for c in sub:
+                            c['field_type'] = 'checkbox_choice'
+                            c['choice_group'] = None
+                            c['is_required'] = False
+                            _append_marker_field(c)
                         continue
                     if any((c.get('width') or 0) > 55 for c in sub):
                         for c in sub:

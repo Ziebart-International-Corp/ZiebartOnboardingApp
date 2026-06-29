@@ -229,6 +229,14 @@ def first_incomplete_wizard_index(steps: list[dict[str, Any]]) -> int:
     return max(0, len(steps) - 1)
 
 
+def first_incomplete_required_wizard_index(steps: list[dict[str, Any]]) -> int:
+    """First required step without a saved value (ignores optional steps)."""
+    for i, step in enumerate(steps):
+        if step.get('required') and not step.get('filled'):
+            return i
+    return max(0, len(steps) - 1)
+
+
 def wizard_progress_counts(steps: list[dict[str, Any]]) -> tuple[int, int]:
     total = len(steps)
     done = sum(1 for s in steps if s.get('filled'))

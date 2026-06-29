@@ -201,6 +201,17 @@ EE_DEPENDENT_ACROS = frozenset({
 
 EE_DEPENDENT_CHOICE_GROUPS = frozenset({'ee_dep1_gender'})
 
+EE_ACK_GROUP_ID = 'ack:ee_acknowledgements'
+
+EE_ACK_ORDER = [
+    'Employee Handbook Received',
+    'Harassment Training Completed',
+    'Technical Training Received',
+    'Hepatitis B Vaccine Declination',
+    'Safety Data SheetsSafety Handbook Reviewed',
+    'Urethane Liner Safety Received Rhino Technician only',
+]
+
 EE_STEP_ORDER = [
     'Hire Date', 'Name3_es_:signer:fullname', 'Text12', 'Text13', 'EMail8_es_:signer:email',
     'Date9_es_:signer:date', 'Text14',
@@ -215,10 +226,7 @@ EE_STEP_ORDER = [
     'Name6_es_:signer:fullname', 'Male_3', 'Text27', 'Text28', 'Text29', 'Text30',
     'Name7_es_:signer:fullname', 'Male_4', 'Date10_es_:signer:date',
     'Text31', 'Text32', 'Text33',
-    'Employee Handbook Received', 'Harassment Training Completed',
-    'Technical Training Received', 'Hepatitis B Vaccine Declination',
-    'Safety Data SheetsSafety Handbook Reviewed',
-    'Urethane Liner Safety Received Rhino Technician only',
+    EE_ACK_GROUP_ID,
     'sig:employee', 'Date', 'sig:manager', 'Date_2',
 ]
 
@@ -252,6 +260,65 @@ def ee_id_by_acro(typed_fields: list) -> dict[str, list]:
     return id_by_acro
 
 
+# Correct choice_group per AcroForm name (fixes bad import grouping in existing DB rows).
+EE_WIZARD_CHOICE_GROUP_BY_ACRO: dict[str, str] = {}
+for _gid, (_lbl, _sec, _hint, _opts) in EE_CHOICE_GROUPS.items():
+    for _acro in _opts:
+        EE_WIZARD_CHOICE_GROUP_BY_ACRO[_acro] = _gid
+
+EE_INDEPENDENT_CHECKBOX_ACROS = frozenset(EE_ACK_CHECKBOXES.keys()) | frozenset(EE_GENDER_CHECKBOX_ACROS.keys())
+
+
+def repair_employee_information_field_groups(typed_fields: list) -> bool:
+    """
+    Fix PDF import mistakes where unrelated checkboxes share one choice_group
+    (e.g. Employee Handbook + Harassment Training, or Tobacco + Medicare Yes/No).
+    """
+    changed = False
+    for tf in typed_fields:
+        if tf.field_type != 'checkbox_choice':
+            continue
+        ak = acro_key(tf.placeholder)
+        if ak in EE_INDEPENDENT_CHECKBOX_ACROS:
+            if tf.choice_group is not None:
+                tf.choice_group = None
+                changed = True
+            continue
+        expected = EE_WIZARD_CHOICE_GROUP_BY_ACRO.get(ak)
+        if expected and tf.choice_group != expected:
+            tf.choice_group = expected
+            changed = True
+    return changed
+
+
+def resolve_has_dependents_answer(
+    session_val: Optional[str],
+    typed_values: dict[int, str],
+    typed_fields: list,
+) -> Optional[str]:
+    """Session answer, or infer from saved dependent field values."""
+    ans = (session_val or '').strip().lower()
+    if ans in ('yes', 'no'):
+        return ans
+    id_by_acro = ee_id_by_acro(typed_fields)
+    for ak in ('Name5_es_:signer:fullname', 'Name6_es_:signer:fullname', 'Name7_es_:signer:fullname'):
+        for tf in id_by_acro.get(ak, []):
+            val = (typed_values.get(tf.id) or '').strip()
+            if val and val.upper() != WIZARD_SKIP_NA:
+                return 'yes'
+    dep_values = []
+    for ak in EE_DEPENDENT_ACROS:
+        if ak in EE_INDEPENDENT_CHECKBOX_ACROS or ak.startswith('Male') or ak == 'Check Box40':
+            continue
+        for tf in id_by_acro.get(ak, []):
+            if tf.field_type == 'checkbox_choice':
+                continue
+            dep_values.append((typed_values.get(tf.id) or '').strip())
+    if dep_values and all(v.upper() == WIZARD_SKIP_NA for v in dep_values if v):
+        return 'no'
+    return None
+
+
 def is_ee_dependent_wizard_step(step: dict[str, Any]) -> bool:
     wid = (step.get('wizard_id') or '').strip()
     if wid == EE_HAS_DEPENDENTS_GATE_ID:
@@ -263,6 +330,51 @@ def is_ee_dependent_wizard_step(step: dict[str, Any]) -> bool:
     if step.get('ee_acro') in EE_DEPENDENT_ACROS:
         return True
     return False
+
+
+def build_ee_ack_group_step(
+    id_by_acro: dict[str, list],
+    typed_values: dict[int, str],
+) -> dict[str, Any]:
+    """Single wizard step for all training/handbook acknowledgements."""
+    options: list[dict[str, Any]] = []
+    page = 2
+    sort_y = 0.0
+    for ak in EE_ACK_ORDER:
+        label, hint = EE_ACK_CHECKBOXES.get(ak, (ak, ''))
+        required = ee_field_is_required(ack_acro=ak)
+        for tf in id_by_acro.get(ak, []):
+            val = (typed_values.get(tf.id) or '').strip().upper()
+            is_checked = val == 'X'
+            page = tf.page_number or page
+            sort_y = max(sort_y, tf.y_position or 0.0)
+            options.append({
+                'field_id': tf.id,
+                'label': label,
+                'required': required,
+                'checked': is_checked,
+                'acro': ak,
+            })
+    required_opts = [o for o in options if o.get('required')]
+    filled = bool(required_opts) and all(o.get('checked') for o in required_opts)
+    return {
+        'wizard_id': EE_ACK_GROUP_ID,
+        'kind': 'ack_group',
+        'wizard_type': 'checkbox_group',
+        'label': 'Training and handbook acknowledgements',
+        'section': 'Acknowledgements',
+        'page': page,
+        'sort_y': sort_y,
+        'sort_x': 0,
+        'required': bool(required_opts),
+        'skip_value': '',
+        'hint': (
+            'Check each item that applies to you. Required items are marked with an asterisk (*).'
+        ),
+        'value': '',
+        'filled': filled,
+        'options': options,
+    }
 
 
 def build_has_dependents_gate_step(has_dependents: Optional[str] = None) -> dict[str, Any]:
@@ -493,6 +605,7 @@ def build_ee_information_wizard_steps(
             section = 'Acknowledgements'
         val = (typed_values.get(tf.id) or '').strip().upper()
         required = ee_field_is_required(ack_acro=ak)
+        is_checked = val == 'X'
         return {
             'wizard_id': f'typed:{tf.id}',
             'kind': 'typed',
@@ -507,8 +620,8 @@ def build_ee_information_wizard_steps(
             'required': required,
             'skip_value': '',
             'hint': hint,
-            'value': 'X' if val == 'X' else '',
-            'filled': val == 'X',
+            'value': 'X' if is_checked else '',
+            'filled': is_checked,
             'ee_acro': ak,
         }
 
@@ -517,6 +630,11 @@ def build_ee_information_wizard_steps(
     for step_key in EE_STEP_ORDER:
         if step_key == EE_HAS_DEPENDENTS_GATE_ID:
             steps.append(build_has_dependents_gate_step(has_dependents))
+            continue
+        if step_key == EE_ACK_GROUP_ID:
+            ack_step = build_ee_ack_group_step(id_by_acro, typed_values)
+            if ack_step.get('options'):
+                steps.append(ack_step)
             continue
         if step_key in EE_CHOICE_GROUPS:
             step = _choice_step(step_key)
@@ -568,7 +686,9 @@ def build_ee_information_wizard_steps(
                 if tf.id in ee_choice_member_ids:
                     continue
                 ak = acro_by_id[tf.id]
-                if step_key in EE_ACK_CHECKBOXES or ak in EE_GENDER_CHECKBOX_ACROS:
+                if ak in EE_ACK_ORDER:
+                    continue
+                if ak in EE_GENDER_CHECKBOX_ACROS:
                     key = f'ack:{tf.id}'
                     if key not in seen_step_keys:
                         seen_step_keys.add(key)
@@ -592,6 +712,8 @@ def build_ee_information_wizard_steps(
             return (order_index.get(sk, 999), 0, s.get('sort_y') or 0)
         if wid == EE_HAS_DEPENDENTS_GATE_ID:
             return (order_index.get(EE_HAS_DEPENDENTS_GATE_ID, 999), 0, 0)
+        if wid == EE_ACK_GROUP_ID:
+            return (order_index.get(EE_ACK_GROUP_ID, 999), 0, s.get('sort_y') or 0)
         db_id = s.get('db_id')
         if db_id and s.get('kind') != 'signature':
             ak = acro_by_id.get(db_id, '')

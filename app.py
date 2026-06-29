@@ -18,6 +18,7 @@ from document_wizard import (
     apply_wizard_field_skip,
     build_wizard_fields_for_document,
     document_wizard_eligible,
+    first_incomplete_required_wizard_index,
     first_incomplete_wizard_index,
     wizard_progress_counts,
     wizard_required_steps_complete,
@@ -14671,7 +14672,23 @@ def _load_document_wizard_steps(document, username):
     except Exception:
         signed_field_ids = set()
     user_display_name, user_initials, today_date = _document_wizard_user_defaults(username)
+    try:
+        from document_wizard_labels import (
+            filter_ee_wizard_steps,
+            is_employee_information_form,
+            repair_employee_information_field_groups,
+            resolve_has_dependents_answer,
+        )
+        if is_employee_information_form(typed_fields):
+            if repair_employee_information_field_groups(typed_fields):
+                db.session.commit()
+    except Exception:
+        app.logger.exception('repair EE field groups failed doc_id=%s', document.id)
     has_dependents = session.get(_document_wizard_has_dependents_key(document.id))
+    try:
+        has_dependents = resolve_has_dependents_answer(has_dependents, typed_values, typed_fields)
+    except Exception:
+        pass
     steps = build_wizard_fields_for_document(
         document.id,
         signature_fields,
@@ -14691,6 +14708,13 @@ def _load_document_wizard_steps(document, username):
     except Exception:
         app.logger.exception('filter EE wizard steps failed doc_id=%s', document.id)
     return steps, signature_fields, typed_fields
+
+
+def _wizard_persist_typed(doc_id, typed_field, field_value, username):
+    """Wizard manages its own choice groups; never cross-clear shared DB groups."""
+    return _persist_typed_field_for_user(
+        doc_id, typed_field, field_value, username, manage_choice_group=False,
+    )
 
 
 def _persist_typed_field_for_user(doc_id, typed_field, field_value, username, manage_choice_group=True):
@@ -14865,7 +14889,7 @@ def _serve_document_wizard_page(doc_id):
         if request.args.get('restart') == '1':
             session.pop(_document_wizard_has_dependents_key(doc_id), None)
         if idx is None or request.args.get('restart') == '1':
-            idx = first_incomplete_wizard_index(steps)
+            idx = first_incomplete_required_wizard_index(steps)
         else:
             idx = max(0, min(int(idx), len(steps) - 1))
         session[_document_wizard_index_key(doc_id)] = idx
@@ -14969,6 +14993,15 @@ def _serve_document_wizard_page(doc_id):
                         </label>
                         {% endfor %}
                     </div>
+                    {% elif field.kind == 'ack_group' and field.options %}
+                    <div class="choice-list" role="group" aria-label="{{ field.label }}">
+                        {% for opt in field.options %}
+                        <label class="choice-option" style="align-items:flex-start;">
+                            <input type="checkbox" name="ack_field" value="{{ opt.field_id }}" {% if opt.checked %}checked{% endif %} style="width:22px;height:22px;margin-top:2px;flex-shrink:0;">
+                            <span class="choice-label">{{ opt.label }}{% if opt.required %} *{% endif %}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
                     {% elif field.kind == 'choice_group' and field.options %}
                     <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
                         {% for opt in field.options %}
@@ -14994,7 +15027,7 @@ def _serve_document_wizard_page(doc_id):
                     <input type="tel" name="value" class="field-input wizard-phone-input" id="mainInput" value="{{ current_val }}" inputmode="tel" autocomplete="tel" placeholder="(555) 123-4567" {% if field.required %}required{% endif %}>
                     {% elif field.wizard_type == 'checkbox' %}
                     <label style="display:flex;align-items:center;gap:12px;margin-top:8px;font-size:1.1em;min-height:48px;">
-                        <input type="checkbox" name="value" value="X" id="mainInput" {% if current_val == 'X' %}checked{% endif %} style="width:22px;height:22px;">
+                        <input type="checkbox" name="value" value="X" id="mainInput" {% if current_val == 'X' %}checked{% endif %} {% if field.required %}required{% endif %} style="width:22px;height:22px;">
                         Yes / checked
                     </label>
                     {% elif is_signature %}
@@ -15168,7 +15201,7 @@ def document_wizard_save_field(doc_id):
             def _persist_skipped_field(field_id, value):
                 tf = DocumentTypedField.query.get(field_id)
                 if tf and tf.document_id == doc_id:
-                    _persist_typed_field_for_user(doc_id, tf, value, username)
+                    _wizard_persist_typed(doc_id, tf, value, username)
 
             apply_wizard_field_skip(step, _persist_skipped_field)
             db.session.commit()
@@ -15193,12 +15226,42 @@ def document_wizard_save_field(doc_id):
                 def _persist_gate_field(field_id, field_val):
                     tf = DocumentTypedField.query.get(field_id)
                     if tf and tf.document_id == doc_id:
-                        _persist_typed_field_for_user(doc_id, tf, field_val, username)
+                        _wizard_persist_typed(doc_id, tf, field_val, username)
 
                 if ans == 'no':
                     apply_ee_dependents_not_applicable(_persist_gate_field, id_by_acro)
                 elif prev == 'no':
                     clear_ee_dependents_values(_persist_gate_field, id_by_acro)
+            elif step['kind'] == 'ack_group':
+                if direction != 'skip':
+                    checked_raw = request.form.getlist('ack_field')
+                    checked_ids = set()
+                    for raw in checked_raw:
+                        try:
+                            checked_ids.add(int(raw))
+                        except (TypeError, ValueError):
+                            pass
+                    missing = [
+                        opt['label']
+                        for opt in (step.get('options') or [])
+                        if opt.get('required') and opt.get('field_id') not in checked_ids
+                    ]
+                    if missing:
+                        flash(
+                            'Please check all required acknowledgements: '
+                            + ', '.join(missing[:3])
+                            + ('…' if len(missing) > 3 else ''),
+                            'error',
+                        )
+                        session[_document_wizard_index_key(doc_id)] = idx
+                        return redirect(url_for('view_documents', wizard=doc_id))
+                    for opt in step.get('options') or []:
+                        fid = opt['field_id']
+                        tf = DocumentTypedField.query.get(fid)
+                        if not tf or tf.document_id != doc_id:
+                            continue
+                        field_value = 'X' if fid in checked_ids else ''
+                        _wizard_persist_typed(doc_id, tf, field_value, username)
             elif step['kind'] == 'choice_group':
                 if direction != 'skip':
                     if not value:
@@ -15217,13 +15280,9 @@ def document_wizard_save_field(doc_id):
                                 flash(err, 'error')
                                 session[_document_wizard_index_key(doc_id)] = idx
                                 return redirect(url_for('view_documents', wizard=doc_id))
-                            _persist_typed_field_for_user(
-                                doc_id, tf, 'X', username, manage_choice_group=False,
-                            )
+                            _wizard_persist_typed(doc_id, tf, 'X', username)
                         else:
-                            _persist_typed_field_for_user(
-                                doc_id, tf, '', username, manage_choice_group=False,
-                            )
+                            _wizard_persist_typed(doc_id, tf, '', username)
             elif step['kind'] == 'signature':
                 if direction != 'skip':
                     if not request.form.get('consent'):
@@ -15275,9 +15334,9 @@ def document_wizard_save_field(doc_id):
                             flash(err, 'error')
                             session[_document_wizard_index_key(doc_id)] = idx
                             return redirect(url_for('view_documents', wizard=doc_id))
-                        _persist_typed_field_for_user(doc_id, tf, field_value, username)
+                        _wizard_persist_typed(doc_id, tf, field_value, username)
                     elif tf.field_type == 'checkbox_choice':
-                        _persist_typed_field_for_user(doc_id, tf, '', username)
+                        _wizard_persist_typed(doc_id, tf, '', username)
 
             db.session.commit()
             _finalize_document_completion(doc_id, username)
@@ -15294,10 +15353,12 @@ def document_wizard_save_field(doc_id):
                 if wizard_required_steps_complete(steps_next):
                     session.pop(_document_wizard_index_key(doc_id), None)
                     return redirect(url_for('view_documents', wizard=doc_id, done=1))
-                next_idx = first_incomplete_wizard_index(steps_next)
+                miss_idx = first_incomplete_required_wizard_index(steps_next)
+                miss = steps_next[miss_idx]
+                flash(f'Please complete: {miss.get("label", "required field")}', 'error')
+                session[_document_wizard_index_key(doc_id)] = miss_idx
             else:
-                next_idx = cur_idx + 1
-            session[_document_wizard_index_key(doc_id)] = next_idx
+                session[_document_wizard_index_key(doc_id)] = cur_idx + 1
         db.session.commit()
     except Exception as e:
         db.session.rollback()
