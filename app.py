@@ -36,6 +36,7 @@ from pdf_form_wizard import (
     embed_signatures_in_pdf,
     embed_typed_field_values_in_pdf,
     flatten_pdf_form_widgets,
+    rasterize_pdf_pages,
     save_pdf_document_copy,
     extract_fields_from_layout,
     is_test_form_signature_value,
@@ -24280,7 +24281,16 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
         embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields)
         flatten_pdf_form_widgets(pdf_doc)
 
-        save_pdf_document_copy(pdf_doc, work_path)
+        remaining_widgets = sum(len(list(p.widgets() or [])) for p in pdf_doc)
+        if remaining_widgets:
+            app.logger.warning(
+                'completed PDF still has %s widget(s) after flatten doc_id=%s user=%s',
+                remaining_widgets, document.id, username,
+            )
+
+        flat_doc = rasterize_pdf_pages(pdf_doc)
+        pdf_doc.close()
+        save_pdf_document_copy(flat_doc, work_path)
         return True, work_path
     except Exception as e:
         return False, str(e)
@@ -24843,14 +24853,16 @@ def view_document_completed(doc_id):
                 <a href="{{ url_for('view_documents') }}" class="btn btn-ghost">← Files</a>
             </div>
         </div>
-        <div class="viewer-wrap" id="pdfViewer">
-            <p class="viewer-status" id="pdfStatus">Loading completed PDF…</p>
-        </div>
+        <div class="viewer-wrap" id="pdfViewer"><!-- completed-view:v3 --></div>
         <script>
         (function() {
-            var pdfUrl = {{ url_for('document_completed_pdf', doc_id=doc_id)|tojson }};
+            var pdfUrl = {{ url_for('document_completed_pdf', doc_id=doc_id)|tojson }} + '?t=' + Date.now();
             var viewer = document.getElementById('pdfViewer');
-            var status = document.getElementById('pdfStatus');
+            var status = document.createElement('p');
+            status.className = 'viewer-status';
+            status.id = 'pdfStatus';
+            status.textContent = 'Loading completed PDF…';
+            viewer.appendChild(status);
             if (typeof pdfjsLib === 'undefined') {
                 status.textContent = 'PDF viewer failed to load.';
                 return;

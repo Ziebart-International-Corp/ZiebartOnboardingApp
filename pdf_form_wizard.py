@@ -1499,9 +1499,27 @@ def save_pdf_document_copy(pdf_doc, work_path: str) -> None:
     import shutil
 
     out_path = f'{work_path}.built'
-    pdf_doc.save(out_path, garbage=3, deflate=True)
+    pdf_doc.save(out_path, garbage=4, deflate=True, clean=True)
     pdf_doc.close()
     shutil.move(out_path, work_path)
+
+
+def rasterize_pdf_pages(pdf_doc, *, dpi: int = 200):
+    """
+    Rebuild the PDF with each page as a flat image.
+
+    Guarantees no AcroForm widgets remain — safe for any browser PDF viewer.
+    """
+    out = fitz.open()
+    try:
+        for page in pdf_doc:
+            pix = page.get_pixmap(dpi=dpi, alpha=False)
+            new_page = out.new_page(width=page.rect.width, height=page.rect.height)
+            new_page.insert_image(new_page.rect, pixmap=pix)
+        return out
+    except Exception:
+        out.close()
+        raise
 
 
 def viewer_coords_to_pdf_rect(
