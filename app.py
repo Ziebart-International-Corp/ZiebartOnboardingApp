@@ -13,6 +13,15 @@ except ImportError:
     pass
 
 from flask import Flask, render_template, render_template_string, redirect, url_for, request, session, flash, jsonify, send_file, send_from_directory, make_response, abort
+from document_wizard import (
+    DOCUMENT_WIZARD_MIN_FIELDS,
+    apply_wizard_field_skip,
+    build_wizard_fields_for_document,
+    document_wizard_eligible,
+    first_incomplete_wizard_index,
+    wizard_progress_counts,
+    wizard_required_steps_complete,
+)
 from pdf_form_wizard import (
     ACRO_PLACEHOLDER_PREFIX,
     FITZ_AVAILABLE as PDF_WIZARD_FITZ_AVAILABLE,
@@ -377,10 +386,28 @@ def manager_new_hires_list_url():
     return url_for('manager_new_hires')
 
 
+def _document_configured_field_count(doc_id):
+    sig = DocumentSignatureField.query.filter_by(document_id=doc_id).count()
+    typed = DocumentTypedField.query.filter_by(document_id=doc_id).count()
+    return sig + typed
+
+
 @app.template_global()
 def user_sign_document_url(doc_id):
-    """Sign page URL for users. Uses /documents?sign= so IIS/wfastcgi routes correctly."""
+    """Sign or step-by-step wizard URL for users (IIS-friendly /documents?query)."""
+    if document_wizard_eligible(_document_configured_field_count(doc_id)):
+        return url_for('view_documents', wizard=doc_id)
     return url_for('view_documents', sign=doc_id)
+
+
+@app.template_global()
+def user_document_wizard_url(doc_id):
+    return url_for('view_documents', wizard=doc_id)
+
+
+@app.template_global()
+def user_sign_document_classic_url(doc_id):
+    return url_for('view_documents', sign=doc_id, classic=1)
 
 
 def onboarding_base_url():
@@ -3554,13 +3581,34 @@ def normalize_last4_typed_value(value):
 
 
 def typed_field_is_phone_like(field):
-    """True for phone type or number fields whose label suggests a phone number."""
+    """True for phone type or fields whose label/acro name suggests a phone number."""
     if not field:
         return False
-    if getattr(field, 'field_type', None) == 'phone':
+    return _field_is_phone_like(
+        getattr(field, 'field_type', None),
+        getattr(field, 'field_label', None),
+        getattr(field, 'placeholder', None),
+    )
+
+
+def _field_is_phone_like(field_type, field_label=None, placeholder=None):
+    if field_type == 'phone':
         return True
-    label = (getattr(field, 'field_label', None) or '').lower()
-    return getattr(field, 'field_type', None) == 'number' and 'phone' in label
+    label = (field_label or '').lower()
+    if field_type in ('text', 'number', 'phone'):
+        if 'phone' in label:
+            return True
+    ph = (placeholder or '').strip()
+    if ph.startswith('acro:'):
+        ph = ph[5:]
+    if ph:
+        try:
+            from document_wizard_labels import EE_PHONE_ACROS
+            if ph in EE_PHONE_ACROS:
+                return True
+        except ImportError:
+            pass
+    return field_type == 'number' and 'phone' in label
 
 
 _document_typed_field_cols_migrated = False
@@ -3736,7 +3784,7 @@ def normalize_typed_field_type(field_type):
     return ft if ft in ALLOWED_TYPED_FIELD_TYPES else 'text'
 
 
-def validate_typed_field_value(field_type, value, field_label=None):
+def validate_typed_field_value(field_type, value, field_label=None, placeholder=None, wizard_type=None):
     """Return (ok, error_message) for a typed-field value before save."""
     val = (value or '').strip()
     if field_type == 'checkbox_choice':
@@ -3747,9 +3795,9 @@ def validate_typed_field_value(field_type, value, field_label=None):
         return False, 'Invalid checkbox value.'
     if not val:
         return False, 'Field value is required'
-    phone_like = field_type == 'phone' or (
-        field_type == 'number' and field_label and 'phone' in field_label.lower()
-    )
+    if val.upper() == 'N/A':
+        return True, None
+    phone_like = wizard_type == 'phone' or _field_is_phone_like(field_type, field_label, placeholder)
     if phone_like:
         if not TYPED_FIELD_PHONE_REGEX.match(val):
             return (
@@ -4376,6 +4424,16 @@ def document_fully_completed_for_user(document_id, username):
     typed_fields = DocumentTypedField.query.filter_by(document_id=document_id).all()
     if not sig_fields and not typed_fields:
         return False
+
+    try:
+        from document_wizard_labels import is_employee_information_form
+        if is_employee_information_form(typed_fields):
+            document = Document.query.get(document_id)
+            if document:
+                steps, _, _ = _load_document_wizard_steps(document, username)
+                return wizard_required_steps_complete(steps)
+    except Exception:
+        app.logger.exception('EE wizard completion check failed doc_id=%s', document_id)
 
     required_sig = sig_fields
     if required_sig and not all(
@@ -14543,6 +14601,701 @@ def admin_test_form_download():
         return redirect(url_for('admin_test_form_review'))
 
 
+def _document_wizard_index_key(doc_id):
+    return f'doc_wizard_idx_{doc_id}'
+
+
+def _document_wizard_has_dependents_key(doc_id):
+    return f'doc_wizard_deps_{doc_id}'
+
+
+def _user_can_fill_document(document, username, is_admin=None):
+    if is_admin is None:
+        is_admin = current_user.is_admin() if current_user else False
+    if is_admin:
+        return True
+    return DocumentAssignment.query.filter_by(
+        document_id=document.id, username=username
+    ).first() is not None
+
+
+def _document_wizard_user_defaults(username):
+    user_display_name = username
+    user_initials = (username[:2] if len(username) >= 2 else username).upper()
+    try:
+        nh = NewHire.query.filter_by(username=username).first()
+        if nh:
+            first = (nh.first_name or '').strip()
+            last = (nh.last_name or '').strip()
+            user_display_name = f'{first} {last}'.strip() or username
+            user_initials = ((first[:1] if first else '') + (last[:1] if last else '')).upper() or user_initials
+        else:
+            user_row = UserModel.query.filter_by(username=username).first()
+            if user_row and (user_row.full_name or '').strip():
+                parts = user_row.full_name.strip().split()
+                user_display_name = user_row.full_name.strip()
+                user_initials = (parts[0][:1] + (parts[1][:1] if len(parts) > 1 else '')).upper() if parts else user_initials
+    except Exception:
+        db.session.rollback()
+    from datetime import date
+    return user_display_name, user_initials, date.today().isoformat()
+
+
+def _load_document_wizard_steps(document, username):
+    signature_fields = DocumentSignatureField.query.filter_by(document_id=document.id).order_by(
+        DocumentSignatureField.page_number, DocumentSignatureField.id
+    ).all()
+    try:
+        typed_fields = DocumentTypedField.query.filter_by(document_id=document.id).order_by(
+            DocumentTypedField.page_number, DocumentTypedField.id
+        ).all()
+    except Exception:
+        typed_fields = []
+    try:
+        typed_values = {
+            v.typed_field_id: v.field_value
+            for v in DocumentTypedFieldValue.query.filter_by(
+                document_id=document.id, username=username
+            ).all()
+        }
+    except Exception:
+        typed_values = {}
+    try:
+        signed_field_ids = {
+            s.signature_field_id
+            for s in DocumentSignature.query.filter_by(
+                document_id=document.id, username=username
+            ).all()
+            if s.signature_field_id
+        }
+    except Exception:
+        signed_field_ids = set()
+    user_display_name, user_initials, today_date = _document_wizard_user_defaults(username)
+    has_dependents = session.get(_document_wizard_has_dependents_key(document.id))
+    steps = build_wizard_fields_for_document(
+        document.id,
+        signature_fields,
+        typed_fields,
+        typed_values,
+        signed_field_ids,
+        user_display_name,
+        user_initials,
+        today_date,
+        typed_field_is_phone_like,
+        has_dependents=has_dependents,
+    )
+    try:
+        from document_wizard_labels import filter_ee_wizard_steps, is_employee_information_form
+        if is_employee_information_form(typed_fields):
+            steps = filter_ee_wizard_steps(steps, has_dependents)
+    except Exception:
+        app.logger.exception('filter EE wizard steps failed doc_id=%s', document.id)
+    return steps, signature_fields, typed_fields
+
+
+def _persist_typed_field_for_user(doc_id, typed_field, field_value, username):
+    _ensure_document_typed_field_columns()
+    cleared_field_ids = []
+    if typed_field.field_type == 'checkbox_choice' and field_value == 'X':
+        cleared_field_ids = clear_choice_group_selections_except(
+            doc_id, username, typed_field.choice_group, typed_field.id
+        )
+    existing_value = DocumentTypedFieldValue.query.filter_by(
+        document_id=doc_id,
+        typed_field_id=typed_field.id,
+        username=username,
+    ).first()
+    if field_value == '' and existing_value:
+        db.session.delete(existing_value)
+    elif field_value == '':
+        pass
+    elif existing_value:
+        existing_value.field_value = field_value
+        existing_value.filled_at = datetime.utcnow()
+        existing_value.ip_address = request.remote_addr
+        existing_value.user_agent = request.headers.get('User-Agent', '')
+    else:
+        db.session.add(DocumentTypedFieldValue(
+            document_id=doc_id,
+            typed_field_id=typed_field.id,
+            username=username,
+            field_value=field_value,
+            filled_at=datetime.utcnow(),
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent', ''),
+        ))
+    return cleared_field_ids
+
+
+def _persist_signature_for_user(doc_id, signature_field, signature_image_b64, username, consent_given=True):
+    existing_signature = DocumentSignature.query.filter_by(
+        document_id=doc_id,
+        signature_field_id=signature_field.id,
+        username=username,
+    ).first()
+    if existing_signature:
+        existing_signature.signature_image = signature_image_b64
+        existing_signature.signed_at = datetime.utcnow()
+        existing_signature.ip_address = request.remote_addr
+        existing_signature.user_agent = request.headers.get('User-Agent', '')
+        existing_signature.consent_given = consent_given
+    else:
+        new_signature = DocumentSignature(
+            document_id=doc_id,
+            signature_field_id=signature_field.id,
+            username=username,
+            signature_image=signature_image_b64,
+            signature_type='image',
+            signed_at=datetime.utcnow(),
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent', ''),
+            consent_given=consent_given,
+        )
+        try:
+            new_signature.field_page_number = signature_field.page_number
+            new_signature.field_x_position = signature_field.x_position
+            new_signature.field_y_position = signature_field.y_position
+            new_signature.field_width = signature_field.width
+            new_signature.field_height = signature_field.height
+            new_signature.field_label = signature_field.field_label
+        except (AttributeError, Exception):
+            pass
+        db.session.add(new_signature)
+
+
+def _finalize_document_completion(doc_id, username):
+    all_complete = document_fully_completed_for_user(doc_id, username)
+    if not all_complete:
+        return False
+    _mark_document_assignment_complete_if_ready(doc_id, username)
+    document = Document.query.get(doc_id)
+    if document:
+        try:
+            _persist_signed_pdf_copy(document, username)
+        except Exception as e:
+            app.logger.warning('Failed to persist signed PDF after wizard: %s', e)
+    db.session.commit()
+    return True
+
+
+def _serve_document_wizard_page(doc_id):
+    """Step-by-step mobile-friendly form for assigned documents with many fields."""
+    try:
+        document = Document.query.get(doc_id)
+        if not document:
+            flash('Document not found.', 'error')
+            return redirect(url_for('view_documents'))
+        if not _user_can_fill_document(document, current_user.username):
+            flash('This document has not been assigned to you.', 'error')
+            return redirect(url_for('view_documents'))
+
+        if _document_is_fillable_pdf(document):
+            _try_auto_import_acroform_fields(document, current_user.username)
+
+        steps, _, _ = _load_document_wizard_steps(document, current_user.username)
+        if not steps:
+            flash(
+                'This document does not have any fields configured yet. '
+                'Ask an administrator to import fields from the PDF.',
+                'error',
+            )
+            return redirect(url_for('view_documents'))
+
+        if request.args.get('done') == '1':
+            done_count, total_count = wizard_progress_counts(steps)
+            complete = document_fully_completed_for_user(doc_id, current_user.username)
+            return render_template_string('''
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <title>Form complete — {{ document.name_for_users }}</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <meta name="color-scheme" content="dark">
+                <style>
+                    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+                    body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; }
+                    .header { background: #000; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }
+                    .header a { color: #fff; text-decoration: none; opacity: 0.9; }
+                    .wrap { max-width: 640px; margin: 0 auto; padding: 32px 20px 80px; }
+                    h1 { font-size: 1.5em; margin-bottom: 12px; }
+                    p { color: #b7c1d3; line-height: 1.55; margin-bottom: 16px; }
+                    .stat { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 16px; margin: 20px 0; }
+                    .btn { display: inline-block; padding: 12px 20px; background: #FE0100; color: #fff; text-decoration: none; border-radius: 6px; margin: 6px 6px 6px 0; border: none; font-size: 1em; }
+                    .btn-ghost { background: transparent; border: 1px solid rgba(255,255,255,0.25); color: #f2f5fb; }
+                {{ global_theme_css|safe }}
+                </style>
+            </head>
+            <body class="user-app-shell">
+                <div class="header">
+                    <span>{{ document.name_for_users }}</span>
+                    <a href="{{ url_for('view_documents') }}">← Files</a>
+                </div>
+                <div class="wrap">
+                    {% if complete %}
+                    <h1>✅ Form submitted</h1>
+                    <p>Your answers have been saved{% if done_count >= total_count %} and your completed PDF is ready for HR{% endif %}.</p>
+                    <div class="stat">{{ done_count }} / {{ total_count }} fields completed</div>
+                    <p>HR can download your signed copy from <strong>Manage Documents → Download Signed Copies</strong>. You can return to Files or edit your answers if needed.</p>
+                    {% else %}
+                    <h1>Almost done</h1>
+                    <p>You still have required fields to complete.</p>
+                    <div class="stat">{{ done_count }} / {{ total_count }} fields completed</div>
+                    {% endif %}
+                    <a href="{{ url_for('view_documents', wizard=doc_id) }}" class="btn">{% if complete %}Edit answers{% else %}Continue form{% endif %}</a>
+                    <a href="{{ url_for('view_documents') }}" class="btn btn-ghost">Back to Files</a>
+                    {% if complete %}
+                    <a href="{{ user_sign_document_classic_url(doc_id) }}" class="btn btn-ghost">View PDF</a>
+                    {% endif %}
+                </div>
+            </body>
+            </html>
+            ''',
+                document=document,
+                doc_id=doc_id,
+                done_count=done_count,
+                total_count=total_count,
+                complete=complete,
+            )
+
+        idx = session.get(_document_wizard_index_key(doc_id))
+        if request.args.get('restart') == '1':
+            session.pop(_document_wizard_has_dependents_key(doc_id), None)
+        if idx is None or request.args.get('restart') == '1':
+            idx = first_incomplete_wizard_index(steps)
+        else:
+            idx = max(0, min(int(idx), len(steps) - 1))
+        session[_document_wizard_index_key(doc_id)] = idx
+
+        field = steps[idx]
+        current_val = field.get('value') or ''
+        is_last4 = field.get('wizard_type') == 'last4' or _test_form_field_is_last4({
+            'type': field.get('wizard_type') or field.get('field_type') or '',
+            'label': field.get('label', ''),
+        })
+        is_phone = field.get('wizard_type') == 'phone'
+        last4_digits = _test_form_last4_digits(current_val) if is_last4 else ''
+        is_signature = field.get('wizard_type') == 'signature'
+        sig_b64_existing = ''
+        if is_signature and current_user.username:
+            try:
+                sig_row = DocumentSignature.query.filter_by(
+                    document_id=doc_id,
+                    signature_field_id=field.get('db_id'),
+                    username=current_user.username,
+                ).first()
+                if sig_row and sig_row.signature_image:
+                    sig_b64_existing = sig_row.signature_image
+            except Exception:
+                pass
+
+        done_count, total_count = wizard_progress_counts(steps)
+        progress_pct = int(100 * done_count / max(total_count, 1))
+
+        return render_template_string('''
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <title>{{ field.label }} — {{ document.name_for_users }}</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta name="color-scheme" content="dark">
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+                body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; }
+                .header { background: #000; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+                .header a { color: #fff; text-decoration: none; opacity: 0.9; white-space: nowrap; }
+                .wrap { max-width: 640px; margin: 0 auto; padding: 24px 20px 80px; }
+                .progress { height: 6px; background: #1a2332; border-radius: 3px; margin-bottom: 20px; overflow: hidden; }
+                .progress-bar { height: 100%; background: #FE0100; transition: width 0.25s; }
+                .step-label { font-size: 0.85em; color: #8892a8; margin-bottom: 8px; }
+                .section-tag { display: inline-block; background: rgba(254, 1, 0, 0.15); color: #ffb4b4; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; margin-bottom: 10px; border: 1px solid rgba(254, 1, 0, 0.25); }
+                .page-tag { display: inline-block; background: #1a2332; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; margin-bottom: 12px; }
+                h1 { font-size: 1.45em; margin-bottom: 8px; line-height: 1.3; }
+                .hint { color: #8892a8; margin-bottom: 20px; line-height: 1.5; }
+                .field-input { width: 100%; padding: 14px 16px; font-size: 16px; border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; background: #121a26; color: #f2f5fb; min-height: 48px; }
+                .field-input:focus { outline: none; border-color: #FE0100; }
+                textarea.field-input { min-height: 100px; resize: vertical; }
+                .choice-list { display: flex; flex-direction: column; gap: 10px; }
+                .choice-option { display: block; cursor: pointer; }
+                .choice-option input[type="radio"] { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+                .choice-option .choice-label { display: block; text-align: left; padding: 14px 16px; border: 2px solid rgba(255,255,255,0.25); border-radius: 8px; background: #121a26; color: #f2f5fb; font-size: 1.05em; min-height: 48px; }
+                .choice-option input[type="radio"]:checked + .choice-label { border-color: #FE0100; background: #2a1520; box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.35); }
+                .last4-row { display: flex; align-items: stretch; width: 100%; margin-top: 8px; }
+                .last4-prefix { display: flex; align-items: center; padding: 14px 12px; background: #2a3753; color: #c8d0e0; border: 1px solid rgba(255,255,255,0.24); border-right: none; border-radius: 8px 0 0 8px; font-family: monospace; }
+                .last4-input { flex: 1; padding: 14px 16px; font-size: 16px; font-family: monospace; border: 1px solid rgba(255,255,255,0.24); border-radius: 0 8px 8px 0; background: #121a26; color: #f2f5fb; min-width: 5em; }
+                .wizard-phone-input.phone-invalid { border-color: #dc3545; }
+                .wizard-phone-input.phone-complete { border-color: #28a745; }
+                .nav { display: flex; gap: 12px; margin-top: 28px; flex-wrap: wrap; }
+                .btn-nav { padding: 12px 24px; border-radius: 6px; border: none; cursor: pointer; font-size: 1em; min-height: 48px; }
+                .btn-primary { background: #FE0100; color: #fff; flex: 1; min-width: 140px; }
+                .btn-ghost { background: transparent; color: #8892a8; border: 1px solid rgba(255,255,255,0.2); }
+                .sig-pad-wrap { border: 2px solid rgba(255,255,255,0.28); border-radius: 8px; background: #fff; overflow: hidden; margin-top: 8px; }
+                #sigCanvas { display: block; width: 100%; height: 160px; touch-action: none; cursor: crosshair; background: #fff; }
+                .consent-row { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0; font-size: 0.95em; color: #b7c1d3; }
+                .consent-row input { width: 20px; height: 20px; margin-top: 2px; flex-shrink: 0; }
+                .flash { background: #3a1a1a; border: 1px solid #dc3545; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; color: #ffd7d7; }
+                .alt-link { margin-top: 20px; font-size: 0.9em; }
+                .alt-link a { color: #7eb8ff; }
+            {{ global_theme_css|safe }}
+            </style>
+        </head>
+        <body class="user-app-shell doc-wizard-fill-page">
+            <div class="header">
+                <span>{{ document.name_for_users }}</span>
+                <a href="{{ url_for('view_documents') }}">← Files</a>
+            </div>
+            <div class="wrap">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}{% for category, message in messages %}<div class="flash">{{ message }}</div>{% endfor %}{% endif %}
+                {% endwith %}
+                <div class="progress"><div class="progress-bar" style="width: {{ progress_pct }}%;"></div></div>
+                <div class="step-label">{{ done_count }} / {{ total_count }} complete · Field {{ idx + 1 }} of {{ total_count }}</div>
+                {% if field.section %}<span class="section-tag">{{ field.section }}</span>{% endif %}
+                <span class="page-tag">Page {{ field.page }}</span>
+                <h1>{{ field.label }}</h1>
+                {% if field.hint %}<p class="hint">{{ field.hint }}</p>{% endif %}
+                <form id="fieldForm" method="POST" action="{{ url_for('document_wizard_save_field', doc_id=doc_id) }}">
+                    <input type="hidden" name="wizard_id" value="{{ field.wizard_id }}">
+                    <input type="hidden" name="direction" id="direction" value="next">
+                    {% if field.kind == 'gate' and field.options %}
+                    <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
+                        {% for opt in field.options %}
+                        <label class="choice-option">
+                            <input type="radio" name="value" value="{{ opt.value }}" {% if field.value == opt.value %}checked{% endif %} required>
+                            <span class="choice-label">{{ opt.label }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                    {% elif field.kind == 'choice_group' and field.options %}
+                    <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
+                        {% for opt in field.options %}
+                        <label class="choice-option">
+                            <input type="radio" name="value" value="{{ opt.field_id }}" {% if field.value == opt.field_id|string %}checked{% endif %} required>
+                            <span class="choice-label">{{ opt.label }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                    {% elif field.wizard_type == 'date' %}
+                    <input type="date" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+                    {% elif is_last4 %}
+                    <p class="hint" style="margin-top:0;">Enter only the last 4 digits of your SSN.</p>
+                    <div class="last4-row">
+                        <span class="last4-prefix" aria-hidden="true">XXX-XX-</span>
+                        <input type="text" class="last4-input" id="last4Input" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="1234" value="{{ last4_digits }}" {% if field.required %}required{% endif %}>
+                    </div>
+                    <input type="hidden" name="value" id="mainInput" value="{{ current_val }}">
+                    {% elif field.wizard_type == 'number' %}
+                    <input type="number" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+                    {% elif field.wizard_type == 'phone' %}
+                    <p class="hint" style="margin-top:0;">Enter a 10-digit US phone number (e.g. (555) 123-4567).</p>
+                    <input type="tel" name="value" class="field-input wizard-phone-input" id="mainInput" value="{{ current_val }}" inputmode="tel" autocomplete="tel" placeholder="(555) 123-4567" {% if field.required %}required{% endif %}>
+                    {% elif field.wizard_type == 'checkbox' %}
+                    <label style="display:flex;align-items:center;gap:12px;margin-top:8px;font-size:1.1em;min-height:48px;">
+                        <input type="checkbox" name="value" value="X" id="mainInput" {% if current_val == 'X' %}checked{% endif %} style="width:22px;height:22px;">
+                        Yes / checked
+                    </label>
+                    {% elif is_signature %}
+                    <p class="hint" style="margin-top:0;">Draw your signature below.</p>
+                    <div class="sig-pad-wrap"><canvas id="sigCanvas" width="560" height="160"></canvas></div>
+                    <label class="consent-row"><input type="checkbox" name="consent" value="1" id="consentBox" required> I agree to apply my electronic signature to this field.</label>
+                    <input type="hidden" name="value" id="mainInput" value="">
+                    {% else %}
+                    <input type="text" name="value" class="field-input" id="mainInput" value="{{ current_val }}" placeholder="Enter {{ field.label|lower }}" {% if field.required %}required{% endif %}>
+                    {% endif %}
+                    <div class="nav">
+                        {% if idx > 0 %}
+                        <button type="button" class="btn-nav btn-ghost" onclick="goBack()">Back</button>
+                        {% endif %}
+                        {% if not field.required %}
+                        <button type="button" class="btn-nav btn-ghost" onclick="skipField()">Skip{% if field.skip_value %} (N/A){% endif %}</button>
+                        {% endif %}
+                        <button type="submit" class="btn-nav btn-primary">{{ 'Finish' if idx + 1 >= total_count else 'Next' }}</button>
+                    </div>
+                </form>
+                {% if not field.required and field.skip_value %}
+                <p class="hint alt-link" style="margin-top:16px;">Not applicable? Tap <strong>Skip (N/A)</strong> and we will mark this field as N/A on your form.</p>
+                {% elif not field.required %}
+                <p class="hint alt-link" style="margin-top:16px;">Not applicable? Tap <strong>Skip</strong> to leave this blank.</p>
+                {% endif %}
+                <p class="alt-link">Prefer the PDF view? <a href="{{ user_sign_document_classic_url(doc_id) }}">Open classic sign page</a></p>
+            </div>
+            <script>
+            (function() {
+                var sigCanvas = document.getElementById('sigCanvas');
+                if (sigCanvas) {
+                    var sigCtx = sigCanvas.getContext('2d');
+                    sigCtx.strokeStyle = '#000'; sigCtx.lineWidth = 2.2; sigCtx.lineCap = 'round';
+                    var sigDrawing = false, sigLastX = 0, sigLastY = 0;
+                    function sigPos(e) {
+                        var rect = sigCanvas.getBoundingClientRect();
+                        var scaleX = sigCanvas.width / rect.width, scaleY = sigCanvas.height / rect.height;
+                        var cx = (e.clientX !== undefined ? e.clientX : e.touches[0].clientX) - rect.left;
+                        var cy = (e.clientY !== undefined ? e.clientY : e.touches[0].clientY) - rect.top;
+                        return { x: cx * scaleX, y: cy * scaleY };
+                    }
+                    function sigStart(e) { e.preventDefault(); sigDrawing = true; var p = sigPos(e); sigLastX = p.x; sigLastY = p.y; }
+                    function sigMove(e) { if (!sigDrawing) return; e.preventDefault(); var p = sigPos(e); sigCtx.beginPath(); sigCtx.moveTo(sigLastX, sigLastY); sigCtx.lineTo(p.x, p.y); sigCtx.stroke(); sigLastX = p.x; sigLastY = p.y; }
+                    function sigEnd() { sigDrawing = false; }
+                    sigCanvas.addEventListener('mousedown', sigStart); sigCanvas.addEventListener('mousemove', sigMove);
+                    sigCanvas.addEventListener('mouseup', sigEnd); sigCanvas.addEventListener('mouseleave', sigEnd);
+                    sigCanvas.addEventListener('touchstart', sigStart, { passive: false });
+                    sigCanvas.addEventListener('touchmove', sigMove, { passive: false });
+                    sigCanvas.addEventListener('touchend', sigEnd);
+                    var existingB64 = {{ sig_b64_existing|tojson }};
+                    if (existingB64) { var img = new Image(); img.onload = function() { sigCtx.drawImage(img, 0, 0, sigCanvas.width, sigCanvas.height); }; img.src = 'data:image/png;base64,' + existingB64; }
+                }
+                var last4 = document.getElementById('last4Input');
+                var hidden = document.getElementById('mainInput');
+                if (last4 && hidden && last4.classList.contains('last4-input')) {
+                    function syncLast4() { var d = (last4.value || '').replace(/\\D/g, '').slice(0, 4); last4.value = d; hidden.value = d.length === 4 ? ('XXX-XX-' + d) : ''; }
+                    last4.addEventListener('input', syncLast4); syncLast4();
+                }
+                var phoneInput = document.getElementById('mainInput');
+                var typedFieldPhoneRegex = new RegExp({{ typed_field_phone_regex_js|tojson }});
+                if (phoneInput && phoneInput.classList.contains('wizard-phone-input')) {
+                    function digitsOnly(v) { return (v || '').replace(/\\D/g, ''); }
+                    function formatPhone(digits) {
+                        digits = (digits || '').slice(0, 10);
+                        if (!digits.length) return '';
+                        if (digits.length <= 3) return '(' + digits;
+                        if (digits.length <= 6) return '(' + digits.slice(0, 3) + ') ' + digits.slice(3);
+                        return '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6);
+                    }
+                    phoneInput.addEventListener('input', function() {
+                        var digits = digitsOnly(phoneInput.value);
+                        var formatted = formatPhone(digits);
+                        var oldLen = phoneInput.value.length;
+                        var start = phoneInput.selectionStart;
+                        phoneInput.value = formatted;
+                        if (document.activeElement === phoneInput && start != null) {
+                            try {
+                                var delta = formatted.length - oldLen;
+                                var pos = Math.max(0, Math.min(formatted.length, start + delta));
+                                phoneInput.setSelectionRange(pos, pos);
+                            } catch (e) {}
+                        }
+                        var complete = digits.length === 10;
+                        phoneInput.classList.toggle('phone-invalid', digits.length > 0 && !complete);
+                        phoneInput.classList.toggle('phone-complete', complete);
+                    });
+                    if (phoneInput.value) {
+                        phoneInput.dispatchEvent(new Event('input'));
+                    }
+                }
+                var form = document.getElementById('fieldForm');
+                if (form) form.addEventListener('submit', function(e) {
+                    if (phoneInput && phoneInput.classList.contains('wizard-phone-input')) {
+                        var ph = (phoneInput.value || '').trim();
+                        if (ph && !typedFieldPhoneRegex.test(ph)) {
+                            e.preventDefault();
+                            alert('Please enter a valid 10-digit phone number (e.g. (555) 123-4567).');
+                            phoneInput.focus();
+                            return;
+                        }
+                    }
+                    if (sigCanvas) {
+                        var ctx = sigCanvas.getContext('2d');
+                        var data = ctx.getImageData(0, 0, sigCanvas.width, sigCanvas.height).data;
+                        var hasInk = false;
+                        for (var i = 3; i < data.length; i += 4) { if (data[i] > 0) { hasInk = true; break; } }
+                        if (!hasInk) { e.preventDefault(); alert('Please draw your signature.'); return; }
+                        hidden.value = sigCanvas.toDataURL('image/png').split(',')[1];
+                    }
+                });
+            })();
+            function goBack() { document.getElementById('direction').value = 'back'; document.getElementById('fieldForm').submit(); }
+            function skipField() { document.getElementById('direction').value = 'skip'; document.getElementById('fieldForm').querySelectorAll('[required]').forEach(function(el){ el.removeAttribute('required'); }); document.getElementById('fieldForm').submit(); }
+            </script>
+        </body>
+        </html>
+        ''',
+            document=document,
+            doc_id=doc_id,
+            field=field,
+            idx=idx,
+            total_count=total_count,
+            done_count=done_count,
+            progress_pct=progress_pct,
+            current_val=current_val,
+            is_last4=is_last4,
+            is_phone=is_phone,
+            last4_digits=last4_digits,
+            typed_field_phone_regex_js=TYPED_FIELD_PHONE_REGEX_JS,
+            is_signature=is_signature,
+            sig_b64_existing=sig_b64_existing,
+        )
+    except Exception as e:
+        app.logger.exception('document wizard page failed doc_id=%s', doc_id)
+        flash(f'Could not open form: {e}', 'error')
+        return redirect(url_for('view_documents'))
+
+
+@app.route('/documents/<int:doc_id>/wizard/save-field', methods=['POST'])
+@login_required
+def document_wizard_save_field(doc_id):
+    document = Document.query.get(doc_id)
+    if not document:
+        flash('Document not found.', 'error')
+        return redirect(url_for('view_documents'))
+    if not _user_can_fill_document(document, current_user.username):
+        flash('This document has not been assigned to you.', 'error')
+        return redirect(url_for('view_documents'))
+
+    wizard_id = (request.form.get('wizard_id') or '').strip()
+    direction = (request.form.get('direction') or 'next').strip()
+    value = (request.form.get('value') or '').strip()
+    username = current_user.username
+
+    steps, signature_fields, typed_fields = _load_document_wizard_steps(document, username)
+    step_map = {s['wizard_id']: s for s in steps}
+    if wizard_id not in step_map:
+        flash('Invalid field.', 'error')
+        return redirect(url_for('view_documents', wizard=doc_id))
+
+    step = step_map[wizard_id]
+    idx = next((i for i, s in enumerate(steps) if s['wizard_id'] == wizard_id), 0)
+
+    try:
+        if direction == 'skip':
+            if step.get('required'):
+                flash('This field is required.', 'error')
+                session[_document_wizard_index_key(doc_id)] = idx
+                return redirect(url_for('view_documents', wizard=doc_id))
+
+            def _persist_skipped_field(field_id, value):
+                tf = DocumentTypedField.query.get(field_id)
+                if tf and tf.document_id == doc_id:
+                    _persist_typed_field_for_user(doc_id, tf, value, username)
+
+            apply_wizard_field_skip(step, _persist_skipped_field)
+            db.session.commit()
+            _finalize_document_completion(doc_id, username)
+        elif direction != 'back':
+            if step['kind'] == 'gate':
+                ans = value.strip().lower()
+                if ans not in ('yes', 'no'):
+                    flash('Please select Yes or No.', 'error')
+                    session[_document_wizard_index_key(doc_id)] = idx
+                    return redirect(url_for('view_documents', wizard=doc_id))
+                deps_key = _document_wizard_has_dependents_key(doc_id)
+                prev = session.get(deps_key)
+                session[deps_key] = ans
+                from document_wizard_labels import (
+                    apply_ee_dependents_not_applicable,
+                    clear_ee_dependents_values,
+                    ee_id_by_acro,
+                )
+                id_by_acro = ee_id_by_acro(typed_fields)
+
+                def _persist_gate_field(field_id, field_val):
+                    tf = DocumentTypedField.query.get(field_id)
+                    if tf and tf.document_id == doc_id:
+                        _persist_typed_field_for_user(doc_id, tf, field_val, username)
+
+                if ans == 'no':
+                    apply_ee_dependents_not_applicable(_persist_gate_field, id_by_acro)
+                elif prev == 'no':
+                    clear_ee_dependents_values(_persist_gate_field, id_by_acro)
+            elif step['kind'] == 'choice_group':
+                if direction != 'skip':
+                    if not value:
+                        flash('Please select one option.', 'error')
+                        session[_document_wizard_index_key(doc_id)] = idx
+                        return redirect(url_for('view_documents', wizard=doc_id))
+                    selected_id = int(value)
+                    for opt in step.get('options') or []:
+                        fid = opt['field_id']
+                        tf = DocumentTypedField.query.get(fid)
+                        if not tf or tf.document_id != doc_id:
+                            continue
+                        if fid == selected_id:
+                            ok, err = validate_typed_field_value('checkbox_choice', 'X', tf.field_label)
+                            if not ok:
+                                flash(err, 'error')
+                                session[_document_wizard_index_key(doc_id)] = idx
+                                return redirect(url_for('view_documents', wizard=doc_id))
+                            _persist_typed_field_for_user(doc_id, tf, 'X', username)
+                        else:
+                            _persist_typed_field_for_user(doc_id, tf, '', username)
+            elif step['kind'] == 'signature':
+                if direction != 'skip':
+                    if not request.form.get('consent'):
+                        flash('Please confirm you agree to apply your electronic signature.', 'error')
+                        session[_document_wizard_index_key(doc_id)] = idx
+                        return redirect(url_for('view_documents', wizard=doc_id))
+                    if not value:
+                        flash('Please draw your signature.', 'error')
+                        session[_document_wizard_index_key(doc_id)] = idx
+                        return redirect(url_for('view_documents', wizard=doc_id))
+                    sig_field = DocumentSignatureField.query.get(step['db_id'])
+                    if not sig_field or sig_field.document_id != doc_id:
+                        flash('Invalid signature field.', 'error')
+                        return redirect(url_for('view_documents', wizard=doc_id))
+                    _persist_signature_for_user(doc_id, sig_field, value, username, consent_given=True)
+            elif step['kind'] == 'typed':
+                tf = DocumentTypedField.query.get(step['db_id'])
+                if not tf or tf.document_id != doc_id:
+                    flash('Invalid field.', 'error')
+                    return redirect(url_for('view_documents', wizard=doc_id))
+                if direction != 'skip':
+                    if tf.field_type == 'checkbox_choice':
+                        field_value = 'X' if value == 'X' else ''
+                    elif tf.field_type == 'last4':
+                        field_value = normalize_last4_typed_value(value)
+                    else:
+                        field_value = value
+                        if not field_value and tf.field_type in ('typed_name', 'typed_initials', 'date'):
+                            _, _, today = _document_wizard_user_defaults(username)
+                            if tf.field_type == 'typed_name':
+                                field_value = _document_wizard_user_defaults(username)[0]
+                            elif tf.field_type == 'typed_initials':
+                                field_value = _document_wizard_user_defaults(username)[1]
+                            else:
+                                field_value = today
+                    if step.get('required') and not field_value and direction != 'skip':
+                        flash('This field is required.', 'error')
+                        session[_document_wizard_index_key(doc_id)] = idx
+                        return redirect(url_for('view_documents', wizard=doc_id))
+                    if field_value:
+                        ok, err = validate_typed_field_value(
+                            tf.field_type,
+                            field_value,
+                            tf.field_label,
+                            placeholder=tf.placeholder,
+                            wizard_type=step.get('wizard_type'),
+                        )
+                        if not ok:
+                            flash(err, 'error')
+                            session[_document_wizard_index_key(doc_id)] = idx
+                            return redirect(url_for('view_documents', wizard=doc_id))
+                        _persist_typed_field_for_user(doc_id, tf, field_value, username)
+                    elif tf.field_type == 'checkbox_choice':
+                        _persist_typed_field_for_user(doc_id, tf, '', username)
+
+            db.session.commit()
+            _finalize_document_completion(doc_id, username)
+
+        if direction == 'back':
+            session[_document_wizard_index_key(doc_id)] = max(0, idx - 1)
+        elif direction == 'skip' or direction == 'next':
+            steps_next, _, _ = _load_document_wizard_steps(document, username)
+            if step.get('kind') == 'gate':
+                next_idx = first_incomplete_wizard_index(steps_next)
+            elif idx + 1 >= len(steps_next):
+                session.pop(_document_wizard_index_key(doc_id), None)
+                return redirect(url_for('view_documents', wizard=doc_id, done=1))
+            else:
+                next_idx = idx + 1
+            session[_document_wizard_index_key(doc_id)] = next_idx
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        app.logger.exception('document_wizard_save_field failed')
+        flash(f'Could not save: {e}', 'error')
+        session[_document_wizard_index_key(doc_id)] = idx
+
+    return redirect(url_for('view_documents', wizard=doc_id))
+
+
 @app.route('/admin/departments/add', methods=['POST'])
 @admin_required
 def add_department():
@@ -19806,7 +20559,14 @@ def remove_document_assignment(assignment_id):
 @app.route('/documents')
 @login_required
 def view_documents():
-    """View assigned documents (regular users) or all documents (admins). Supports ?sign=<doc_id> to open sign page."""
+    """View assigned documents (regular users) or all documents (admins). Supports ?sign=<doc_id> or ?wizard=<doc_id>."""
+    wizard_id = request.args.get('wizard')
+    if wizard_id:
+        try:
+            doc_id = int(wizard_id)
+            return _serve_document_wizard_page(doc_id)
+        except (ValueError, TypeError):
+            pass
     sign_id = request.args.get('sign')
     if sign_id:
         try:
@@ -20995,6 +21755,9 @@ def _serve_sign_document_page(doc_id):
                 'error',
             )
             return redirect(url_for('view_documents'))
+
+        if document_wizard_eligible(len(signature_fields) + len(typed_fields)) and not request.args.get('classic'):
+            return redirect(url_for('view_documents', wizard=doc_id))
         
         # Get existing signatures by current user
         try:
@@ -22105,6 +22868,9 @@ def _serve_sign_document_page(doc_id):
                         <a href="{{ url_for('view_documents') }}" class="btn-done-link">Done</a>
                     </div>
                     <p class="sign-hint-banner">Tap a highlighted field on the form to type or sign. Use <strong>Next field</strong> or the list below to jump between fields.</p>
+                    {% if (signature_fields|length + typed_fields|length) >= wizard_min_fields %}
+                    <p class="sign-hint-banner" style="margin-top: -4px;"><a href="{{ user_document_wizard_url(document.id) }}" style="color: #7eb8ff;">Switch to step-by-step form</a> — easier on mobile for large forms.</p>
+                    {% endif %}
                     <div id="signMobileFieldList" class="sign-mobile-field-list" aria-label="Fields to complete"></div>
                     {% elif is_pdf and not document_file_missing %}
                     <p class="sign-hint-banner">This document has no fillable fields configured yet. Contact your administrator.</p>
@@ -23164,7 +23930,8 @@ def _serve_sign_document_page(doc_id):
          typed_field_phone_regex_js=TYPED_FIELD_PHONE_REGEX_JS,
          typed_field_last4_regex_js=TYPED_FIELD_LAST4_REGEX_JS,
          sign_overlay_fields_json=sign_overlay_fields_json,
-         sign_overlay_fields=sign_overlay_fields)
+         sign_overlay_fields=sign_overlay_fields,
+         wizard_min_fields=DOCUMENT_WIZARD_MIN_FIELDS)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -23960,7 +24727,10 @@ def submit_typed_field(doc_id):
             return jsonify({'success': False, 'error': 'Field value is required'}), 400
 
         ok, validation_error = validate_typed_field_value(
-            typed_field.field_type, field_value, typed_field.field_label
+            typed_field.field_type,
+            field_value,
+            typed_field.field_label,
+            placeholder=typed_field.placeholder,
         )
         if not ok:
             return jsonify({'success': False, 'error': validation_error}), 400

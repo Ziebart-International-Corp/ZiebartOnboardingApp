@@ -886,10 +886,13 @@ def _widget_to_app_typed_field_type(widget, label: str) -> str:
     wtype = getattr(widget, 'field_type', 1)
     if wtype == 2 or wtype == 5:
         return 'checkbox_choice'
-    if wtype in (3, 4):
-        return 'text'
     if wtype == 6:
         return 'signature'
+    rect = list(getattr(widget, 'rect', []) or [])
+    if len(rect) == 4 and _is_acro_radio_marker(rect):
+        return 'checkbox_choice'
+    if wtype in (3, 4):
+        return 'text'
     if _SSN_LABEL_RE.search(label):
         return 'last4'
     label_lower = label.lower()
@@ -898,6 +901,363 @@ def _widget_to_app_typed_field_type(widget, label: str) -> str:
     if 'phone' in label_lower or 'tel' in label_lower:
         return 'phone'
     return 'text'
+
+
+def _page_text_lines(page) -> list[dict]:
+    lines = []
+    for block in page.get_text('dict').get('blocks') or []:
+        if block.get('type') != 0:
+            continue
+        for line in block.get('lines') or []:
+            text = ''.join(s.get('text', '') for s in line.get('spans') or []).strip()
+            if not text or text.count('_') > len(text) * 0.5:
+                continue
+            bbox = line.get('bbox') or (0, 0, 0, 0)
+            lines.append({'text': text, 'bbox': bbox})
+    return lines
+
+
+def _label_left_of_rect(lines: list[dict], rect: list[float]) -> str | None:
+    x0, y0, x1, y1 = rect
+    cy = (y0 + y1) / 2
+    best = None
+    best_dist = 9999.0
+    for ln in lines:
+        bx0, by0, bx1, by1 = ln['bbox']
+        if by1 < y0 - 18 or by0 > y1 + 18:
+            continue
+        if bx1 > x0 + 8:
+            continue
+        text = ln['text'].strip(' :.-')
+        if len(text) < 2 or len(text) > 90:
+            continue
+        dist = x0 - bx1
+        if 0 <= dist < best_dist:
+            best_dist = dist
+            best = text
+    return best
+
+
+def _label_above_rect(lines: list[dict], rect: list[float]) -> str | None:
+    x0, y0, x1, y1 = rect
+    best = None
+    best_dy = 9999.0
+    for ln in lines:
+        bx0, by0, bx1, by1 = ln['bbox']
+        if by1 > y0 + 4:
+            continue
+        if bx1 < x0 - 40 or bx0 > x1 + 40:
+            continue
+        dy = y0 - by1
+        if 0 < dy < best_dy and dy < 45:
+            best_dy = dy
+            best = ln['text'].strip(' :.-')
+    return best
+
+
+def _humanize_acro_widget_name(name: str) -> str | None:
+    n = (name or '').strip()
+    if not n:
+        return None
+    low = n.lower()
+    if 'signature' in low and 'signer' in low:
+        return 'Signature'
+    if ':signer:email' in low:
+        return 'Email address'
+    if ':signer:date' in low:
+        return 'Date'
+    if ':signer:fullname' in low:
+        return None
+    if n in ('undefined',) or n.startswith('Check Box'):
+        return None
+    if re.match(r'^Text\d+$', n, re.I):
+        return None
+    if n.startswith('Yes') or n.startswith('No'):
+        return n.split('_')[0]
+    return n.replace('_', ' ').strip() or None
+
+
+def _is_acro_radio_marker(rect: list[float]) -> bool:
+    w = float(rect[2]) - float(rect[0])
+    h = float(rect[3]) - float(rect[1])
+    return w <= 42 and h <= 22
+
+
+def _acro_option_category(label: str) -> str:
+    l = (label or '').strip().lower()
+    if l in ('male', 'female'):
+        return 'gender'
+    if l in ('single', 'married'):
+        return 'marital'
+    if l in ('yes', 'no'):
+        return 'yesno'
+    if any(k in l for k in ('black', 'indian', 'asian', 'hawaiian', 'hispanic', 'white')):
+        return 'race'
+    if any(k in l for k in ('handbook', 'training', 'hepatitis', 'safety', 'urethane', 'medicare', 'tobacco')):
+        return 'ack'
+    return 'other'
+
+
+_KNOWN_ACRO_OPTION_LABELS = frozenset({
+    'single', 'married', 'male', 'female', 'yes', 'no',
+    'black/african american', 'american indian', 'asian',
+    'native hawaiian/pacific islanders', 'hispanic/spanish', 'white (caucasian',
+    'employee handbook received', 'harassment training completed',
+    'technical training received', 'hepatitis b vaccine declination',
+    'safety data sheets/safety handbook reviewed',
+    'urethane liner safety received (rhino technician only',
+})
+
+
+def _split_mixed_option_clusters(cluster: list) -> list[list]:
+    """Split a row cluster that accidentally merged gender, race, yes/no, etc."""
+    buckets: dict[str, list] = {}
+    for item in cluster:
+        cat = _acro_option_category(item.get('field_label') or '')
+        buckets.setdefault(cat, []).append(item)
+    out = [b for b in buckets.values() if len(b) >= 2]
+    singles = [b[0] for b in buckets.values() if len(b) == 1]
+    if singles:
+        out.extend([[s] for s in singles])
+    return out if out else [cluster]
+
+
+def _slug_group_name(label: str, page: int, suffix: str = '') -> str:
+    base = re.sub(r'[^a-zA-Z0-9]+', '_', (label or 'choice').strip().lower()).strip('_')
+    if not base:
+        base = 'choice'
+    key = f'{base}_p{page}'
+    if suffix:
+        key = f'{key}_{suffix}'
+    return key[:100]
+
+
+def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_fields: list) -> None:
+    """Improve labels and group radio/checkbox markers using PDF text context."""
+    if not FITZ_AVAILABLE or not typed_fields:
+        return
+
+    doc = fitz.open(pdf_path)
+    try:
+        page_lines = {i: _page_text_lines(doc[i]) for i in range(doc.page_count)}
+        page_heights = {i + 1: doc[i].rect.height for i in range(doc.page_count)}
+
+        # Promote signature-named text widgets to signature fields.
+        remaining_typed = []
+        for spec in typed_fields:
+            wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
+            label = (spec.get('field_label') or '').strip()
+            if 'signature' in wname.lower() and 'signer' in wname.lower():
+                signature_fields.append({
+                    'page_number': spec['page_number'],
+                    'x_position': spec['x_position'],
+                    'y_position': spec['y_position'],
+                    'width': max(spec.get('width') or 120, 120.0),
+                    'height': max(spec.get('height') or 50, 50.0),
+                    'field_label': 'Signature',
+                    'is_required': True,
+                })
+                continue
+            remaining_typed.append(spec)
+        typed_fields[:] = remaining_typed
+
+        # Resolve human labels for unnamed/generic fields.
+        for spec in typed_fields:
+            page_num = spec['page_number']
+            page_h = page_heights.get(page_num, 792)
+            wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
+            rect_pdf = None
+            # Reconstruct approximate PDF rect from viewer coords
+            scale = SIGN_VIEWER_HEIGHT / float(page_h)
+            x = spec['x_position'] / scale
+            y = spec['y_position'] / scale
+            w = (spec.get('width') or 24) / scale
+            h = (spec.get('height') or 18) / scale
+            rect_pdf = [x, y, x + w, y + h]
+
+            lines = page_lines.get(page_num - 1, [])
+            human = _humanize_acro_widget_name(wname)
+            keep_option_label = (spec.get('field_label') or '').strip().lower() in _KNOWN_ACRO_OPTION_LABELS
+            if not keep_option_label:
+                if not human or human.lower() in ('undefined', 'yes', 'no', 'male', 'female', 'single', 'married'):
+                    left = _label_left_of_rect(lines, rect_pdf)
+                    above = _label_above_rect(lines, rect_pdf)
+                    if left and above and len(above) < len(left):
+                        human = left
+                    elif left:
+                        human = left
+                    elif above:
+                        human = above
+                if human and human.lower() not in ('undefined',):
+                    spec['field_label'] = human[:200]
+                elif spec.get('field_label', '').lower() in ('undefined', 'yes', 'no', ''):
+                    if left := _label_left_of_rect(lines, rect_pdf):
+                        spec['field_label'] = left[:200]
+
+            if wname and ':signer:date' in wname.lower() or (spec.get('field_label') or '').lower() == 'date':
+                spec['field_type'] = 'date'
+            if wname and ':signer:email' in wname.lower():
+                spec['field_type'] = 'text'
+            if _SSN_LABEL_RE.search(spec.get('field_label') or ''):
+                spec['field_type'] = 'last4'
+
+        # Group radio markers (small boxes) into checkbox_choice groups.
+        markers = []
+        texts = []
+        for spec in typed_fields:
+            wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
+            page_h = page_heights.get(spec['page_number'], 792)
+            scale = SIGN_VIEWER_HEIGHT / float(page_h)
+            pw = (spec.get('width') or 24) / scale
+            ph = (spec.get('height') or 18) / scale
+            rect_pdf = [
+                spec['x_position'] / scale,
+                spec['y_position'] / scale,
+                spec['x_position'] / scale + pw,
+                spec['y_position'] / scale + ph,
+            ]
+            label = (spec.get('field_label') or '').strip()
+            option_like = label.lower() in {
+                'single', 'married', 'male', 'female', 'yes', 'no',
+                'black/african american', 'american indian', 'asian',
+                'native hawaiian/pacific islanders', 'hispanic/spanish',
+                'white (caucasian', 'employee handbook received',
+                'harassment training completed', 'technical training received',
+                'hepatitis b vaccine declination',
+                'safety data sheets/safety handbook reviewed',
+                'urethane liner safety received (rhino technician only',
+            } or _is_acro_radio_marker(rect_pdf)
+            if option_like and pw <= 45:
+                markers.append({**spec, '_rect_pdf': rect_pdf})
+            else:
+                texts.append(spec)
+
+        typed_fields[:] = texts
+        by_page: dict[int, list] = {}
+        for m in markers:
+            by_page.setdefault(m['page_number'], []).append(m)
+
+        def _append_marker_field(item: dict) -> None:
+            item.pop('_rect_pdf', None)
+            typed_fields.append(item)
+
+        for page_num, page_markers in by_page.items():
+            lines = page_lines.get(page_num - 1, [])
+            # Vertical stacks (race/ethnicity column at same X)
+            by_x: dict[int, list] = {}
+            for m in page_markers:
+                xkey = int(round(m['_rect_pdf'][0] / 12))
+                by_x.setdefault(xkey, []).append(m)
+            remaining_markers = []
+            for xkey, col in by_x.items():
+                col.sort(key=lambda s: s['_rect_pdf'][1])
+                if len(col) >= 4 and all(
+                    _acro_option_category(c.get('field_label') or '') == 'race' for c in col
+                ):
+                    group_key = _slug_group_name('Race / Ethnicity', page_num, str(xkey))
+                    for c in col:
+                        c['field_type'] = 'checkbox_choice'
+                        c['choice_group'] = group_key
+                        c['is_required'] = False
+                        _append_marker_field(c)
+                else:
+                    remaining_markers.extend(col)
+
+            sorted_m = sorted(remaining_markers, key=lambda s: (round(s['_rect_pdf'][1] / 8), s['_rect_pdf'][0]))
+            row_clusters: list[list] = []
+            for m in sorted_m:
+                placed = False
+                for cluster in row_clusters:
+                    cy = sum(x['_rect_pdf'][1] for x in cluster) / len(cluster)
+                    if abs(m['_rect_pdf'][1] - cy) <= 8:
+                        cluster.append(m)
+                        placed = True
+                        break
+                if not placed:
+                    row_clusters.append([m])
+
+            for cluster in row_clusters:
+                for sub in _split_mixed_option_clusters(cluster):
+                    if len(sub) < 2:
+                        sub[0]['field_type'] = 'checkbox_choice'
+                        sub[0]['is_required'] = False
+                        _append_marker_field(sub[0])
+                        continue
+                    if any((c.get('width') or 0) > 55 for c in sub):
+                        for c in sub:
+                            c['field_type'] = 'text'
+                            c['choice_group'] = None
+                            _append_marker_field(c)
+                        continue
+                    labels_lower = [(c.get('field_label') or '').strip().lower() for c in sub]
+                    if not all(
+                        lb in _KNOWN_ACRO_OPTION_LABELS or _is_acro_radio_marker(c['_rect_pdf'])
+                        for lb, c in zip(labels_lower, sub)
+                    ):
+                        for c in sub:
+                            c['field_type'] = 'text'
+                            c['choice_group'] = None
+                            _append_marker_field(c)
+                        continue
+                    union = sub[0]['_rect_pdf'][:]
+                    for c in sub[1:]:
+                        r = c['_rect_pdf']
+                        union[0] = min(union[0], r[0])
+                        union[1] = min(union[1], r[1])
+                        union[2] = max(union[2], r[2])
+                        union[3] = max(union[3], r[3])
+                    labels = [(c.get('field_label') or '').strip() for c in sub]
+                    if 'Single' in labels and 'Married' in labels:
+                        group_label = 'Marital status'
+                    elif 'Male' in labels and 'Female' in labels:
+                        group_label = 'Gender'
+                    elif all(l.lower() in ('yes', 'no') for l in labels):
+                        group_label = 'Yes / No'
+                    else:
+                        group_label = _label_left_of_rect(lines, union) or _label_above_rect(lines, union) or 'Select one'
+                    group_key = _slug_group_name(group_label, page_num, str(int(round(union[1]))))
+                    for c in sub:
+                        c['field_type'] = 'checkbox_choice'
+                        c['choice_group'] = group_key
+                        opt_label = (c.get('field_label') or 'Option').strip()
+                        c['field_label'] = opt_label[:200]
+                        c['is_required'] = False
+                        _append_marker_field(c)
+
+        # Race fields that landed as singles — regroup if enough remain
+        race_labels = {
+            'black/african american', 'american indian', 'asian',
+            'native hawaiian/pacific islanders', 'hispanic/spanish', 'white (caucasian',
+        }
+        race_fields = [
+            s for s in typed_fields
+            if s.get('field_type') == 'checkbox_choice'
+            and (s.get('field_label') or '').lower() in race_labels
+        ]
+        if len(race_fields) >= 4:
+            gkey = _slug_group_name('Race / Ethnicity', race_fields[0]['page_number'])
+            for s in race_fields:
+                s['choice_group'] = gkey
+
+        # Auto typed_name for primary employee name field
+        for spec in typed_fields:
+            wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
+            if wname == 'Name3_es_:signer:fullname':
+                spec['field_type'] = 'typed_name'
+                spec['field_label'] = 'Employee name'
+            elif ':signer:fullname' in wname.lower() and spec.get('field_type') == 'text':
+                if not spec.get('field_label') or spec['field_label'].lower() == 'name':
+                    spec['field_label'] = 'Name'
+
+        # Strip choice groups from non-choice field types.
+        for spec in typed_fields:
+            if spec.get('field_type') in ('last4', 'typed_name', 'date', 'text', 'number', 'phone'):
+                spec['choice_group'] = None
+
+        typed_fields.sort(key=lambda s: (s.get('page_number') or 1, s.get('y_position') or 0, s.get('x_position') or 0))
+        signature_fields.sort(key=lambda s: (s.get('page_number') or 1, s.get('y_position') or 0))
+    finally:
+        doc.close()
 
 
 def collect_acroform_import_specs(pdf_path: str) -> dict:
@@ -939,6 +1299,22 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
                 placeholder = f'{ACRO_PLACEHOLDER_PREFIX}{wname}' if wname else None
                 page_number = page_index + 1
 
+                wname = (w.field_name or '').strip()
+                label = (w.field_label or wname or '').strip()
+                if not label or label.lower() == 'undefined':
+                    label = wname or f'Field on page {page_index + 1}'
+                if 'signature' in wname.lower() and 'signer' in wname.lower():
+                    signature_fields.append({
+                        'page_number': page_number,
+                        'x_position': x,
+                        'y_position': y,
+                        'width': max(width, 120.0),
+                        'height': max(height, 50.0),
+                        'field_label': 'Signature',
+                        'is_required': True,
+                    })
+                    continue
+
                 if getattr(w, 'field_type', None) == 6:
                     signature_fields.append({
                         'page_number': page_number,
@@ -971,6 +1347,8 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
                 })
     finally:
         doc.close()
+
+    _enrich_acroform_import_specs(pdf_path, signature_fields, typed_fields)
 
     widget_count = len(signature_fields) + len(typed_fields)
     return {
