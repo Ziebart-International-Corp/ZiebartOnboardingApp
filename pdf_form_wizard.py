@@ -1480,3 +1480,170 @@ def acro_value_for_widget(widget, field_value: str, field_type: str) -> str:
             return 'Yes'
         return 'Off'
     return val
+
+
+def viewer_coords_to_pdf_rect(
+    page,
+    x_viewer: float,
+    y_viewer: float,
+    width_viewer: float,
+    height_viewer: float,
+):
+    """Map sign-page viewer pixels to a PDF rect on this page."""
+    page_height = page.rect.height
+    page_width = page.rect.width
+    scale_y = page_height / SIGN_VIEWER_HEIGHT
+    viewer_width_px = SIGN_VIEWER_HEIGHT * (page_width / page_height)
+    scale_x = page_width / viewer_width_px
+    x0 = float(x_viewer) * scale_x
+    y0 = float(y_viewer) * scale_y
+    return fitz.Rect(
+        x0,
+        y0,
+        x0 + float(width_viewer) * scale_x,
+        y0 + float(height_viewer) * scale_y,
+    )
+
+
+def _place_text_in_pdf_rect(page, rect, text: str, *, fontsize: int | None = None) -> None:
+    val = (text or '').strip()
+    if not val or rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        return
+    fs = fontsize
+    if fs is None:
+        fs = int(rect.height * 0.75)
+        fs = max(8, min(fs, 72))
+    try:
+        rc = page.insert_textbox(
+            rect, val, fontsize=fs, align=0, color=(0, 0, 0), render_mode=0,
+        )
+        if rc < 0:
+            page.insert_text((rect.x0 + 2, rect.y0 + fs + 1), val[:200], fontsize=fs, color=(0, 0, 0))
+    except Exception:
+        try:
+            page.insert_text((rect.x0 + 2, rect.y0 + fs + 1), val[:200], fontsize=fs, color=(0, 0, 0))
+        except Exception:
+            pass
+
+
+def embed_typed_field_values_in_pdf(pdf_doc, typed_fields, typed_value_map: dict) -> None:
+    """
+    Render saved typed/checkbox values onto the PDF.
+    Uses on-page widget updates plus text overlay so values appear in all viewers.
+    """
+    try:
+        from ee_pdf_field_map import canonical_acro
+    except ImportError:
+        canonical_acro = lambda n: (n or '').strip()  # noqa: E731
+
+    by_acro: dict[str, list[tuple]] = {}
+    for tf in typed_fields:
+        tid = getattr(tf, 'id', None)
+        if tid is None or tid not in typed_value_map:
+            continue
+        val = (typed_value_map[tid] or '').strip()
+        if not val:
+            continue
+        ph = (getattr(tf, 'placeholder', None) or '').strip()
+        ak = canonical_acro(ph[len(ACRO_PLACEHOLDER_PREFIX):]) if ph.startswith(ACRO_PLACEHOLDER_PREFIX) else ''
+        if ak:
+            by_acro.setdefault(ak, []).append((tf, val))
+
+    for page in pdf_doc:
+        for widget in page.widgets() or []:
+            wname = canonical_acro((widget.field_name or '').strip())
+            entries = by_acro.get(wname)
+            if not entries:
+                continue
+            tf, val = entries[0]
+            ft = getattr(tf, 'field_type', None) or 'text'
+            try:
+                widget.field_value = acro_value_for_widget(widget, val, ft)
+                widget.update()
+            except Exception:
+                pass
+
+    for tf in typed_fields:
+        tid = getattr(tf, 'id', None)
+        if tid is None or tid not in typed_value_map:
+            continue
+        val = (typed_value_map[tid] or '').strip()
+        if not val:
+            continue
+        page_num = int(getattr(tf, 'page_number', 1) or 1) - 1
+        if page_num < 0 or page_num >= len(pdf_doc):
+            continue
+        page = pdf_doc[page_num]
+        rect = viewer_coords_to_pdf_rect(
+            page,
+            getattr(tf, 'x_position', 0) or 0,
+            getattr(tf, 'y_position', 0) or 0,
+            getattr(tf, 'width', 200) or 200,
+            getattr(tf, 'height', 30) or 30,
+        )
+        ft = getattr(tf, 'field_type', None) or 'text'
+        if ft == 'checkbox_choice':
+            if val.upper() == 'X':
+                _place_text_in_pdf_rect(page, rect, 'X', fontsize=max(8, int(rect.height * 0.85)))
+        else:
+            _place_text_in_pdf_rect(page, rect, val)
+
+
+def embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields) -> None:
+    """Place drawn signatures using AcroForm widget rects when available."""
+    try:
+        from ee_pdf_field_map import EE_SIGNATURE_ACROS
+        sig_acros = EE_SIGNATURE_ACROS
+    except ImportError:
+        sig_acros = {'employee': 'Employee_Signature', 'manager': 'Manager_Signature'}
+
+    widget_rects: dict[str, tuple[int, object]] = {}
+    for page_idx, page in enumerate(pdf_doc):
+        for widget in page.widgets() or []:
+            wname = (widget.field_name or '').strip()
+            for role, acro in sig_acros.items():
+                if wname == acro and widget.rect and not widget.rect.is_empty:
+                    widget_rects[role] = (page_idx, widget.rect)
+
+    field_by_id = {f.id: f for f in signature_fields if getattr(f, 'id', None)}
+
+    for sig in user_signatures:
+        if not sig.signature_image:
+            continue
+        role = None
+        field = field_by_id.get(sig.signature_field_id) if sig.signature_field_id else None
+        if field:
+            lbl = (field.field_label or '').lower()
+            role = 'manager' if 'manager' in lbl else 'employee'
+
+        page = None
+        img_rect = None
+        if role and role in widget_rects:
+            page_idx, target_rect = widget_rects[role]
+            page = pdf_doc[page_idx]
+            img_rect = fitz.Rect(target_rect)
+        elif field:
+            page_num = int(getattr(field, 'page_number', 1) or 1) - 1
+            if page_num < 0 or page_num >= len(pdf_doc):
+                continue
+            page = pdf_doc[page_num]
+            img_rect = viewer_coords_to_pdf_rect(
+                page,
+                getattr(field, 'x_position', 0) or 0,
+                getattr(field, 'y_position', 0) or 0,
+                getattr(field, 'width', 200) or 200,
+                getattr(field, 'height', 50) or 50,
+            )
+        else:
+            continue
+
+        try:
+            from PIL import Image
+            sig_image_data = base64.standard_b64decode(sig.signature_image)
+            sig_img = Image.open(BytesIO(sig_image_data))
+            img_bytes = BytesIO()
+            sig_img.save(img_bytes, format='PNG')
+            img_bytes.seek(0)
+            page.insert_image(img_rect, stream=img_bytes.getvalue(), keep_proportion=True)
+        except Exception:
+            continue

@@ -33,6 +33,8 @@ from pdf_form_wizard import (
     collect_acroform_import_specs,
     count_pdf_acroform_widgets,
     delete_wizard_state,
+    embed_signatures_in_pdf,
+    embed_typed_field_values_in_pdf,
     extract_fields_from_layout,
     is_test_form_signature_value,
     load_wizard_state,
@@ -24265,143 +24267,11 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
 
         pdf_doc = fitz.open(work_path)
 
-        # Overlay image signatures
-        for sig in user_signatures:
-            if not sig.signature_image:
-                continue
+        typed_fields = DocumentTypedField.query.filter_by(document_id=document.id).all()
+        signature_fields = DocumentSignatureField.query.filter_by(document_id=document.id).all()
 
-            field = DocumentSignatureField.query.get(sig.signature_field_id) if sig.signature_field_id else None
-
-            sig_field_page = getattr(sig, 'field_page_number', None)
-            sig_field_x = getattr(sig, 'field_x_position', None)
-            sig_field_y = getattr(sig, 'field_y_position', None)
-            sig_field_width = getattr(sig, 'field_width', None)
-            sig_field_height = getattr(sig, 'field_height', None)
-
-            if not field:
-                if not sig_field_page or sig_field_x is None or sig_field_y is None:
-                    continue
-                page_number = sig_field_page
-                x_position = sig_field_x
-                y_position = sig_field_y
-                width = sig_field_width or 200
-                height = sig_field_height or 80
-            else:
-                page_number = sig_field_page if sig_field_page else field.page_number
-                x_position = sig_field_x if sig_field_x is not None else field.x_position
-                y_position = sig_field_y if sig_field_y is not None else field.y_position
-                width = sig_field_width if sig_field_width else (field.width or 200)
-                height = sig_field_height if sig_field_height else (field.height or 80)
-
-            try:
-                from PIL import Image
-                sig_image_data = base64.b64decode(sig.signature_image)
-                sig_img = Image.open(BytesIO(sig_image_data))
-
-                page_num = int(page_number) - 1
-                if page_num < 0 or page_num >= len(pdf_doc):
-                    continue
-
-                page = pdf_doc[page_num]
-                page_rect = page.rect
-                page_width = page_rect.width
-                page_height = page_rect.height
-
-                viewer_height_px = 800.0
-                scale_y = page_height / viewer_height_px
-                viewer_width_px = viewer_height_px * (page_width / page_height)
-                scale_x = page_width / viewer_width_px
-
-                x_pdf = float(x_position) * scale_x
-                y_pdf = float(y_position) * scale_y
-                width_pdf = float(width) * scale_x
-                height_pdf = float(height) * scale_y
-
-                x_pdf = max(0, min(x_pdf, page_width - width_pdf))
-                y_pdf = max(0, min(y_pdf, page_height - height_pdf))
-
-                img_bytes = BytesIO()
-                sig_img.save(img_bytes, format='PNG')
-                img_bytes.seek(0)
-
-                img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
-                page.insert_image(img_rect, stream=img_bytes.getvalue())
-            except Exception:
-                continue
-
-        # Overlay typed fields (skip AcroForm imports — filled via widgets below)
-        for typed_field_id, field_value in typed_value_map.items():
-            try:
-                typed_field = DocumentTypedField.query.get(typed_field_id)
-                if not typed_field:
-                    continue
-                ph = (typed_field.placeholder or '').strip()
-                if ph.startswith(ACRO_PLACEHOLDER_PREFIX):
-                    continue
-                page_num = typed_field.page_number - 1
-                if page_num < 0 or page_num >= len(pdf_doc):
-                    continue
-
-                page = pdf_doc[page_num]
-                page_rect = page.rect
-                page_width = page_rect.width
-                page_height = page_rect.height
-
-                viewer_height_px = 800.0
-                scale_y = page_height / viewer_height_px
-                viewer_width_px = viewer_height_px * (page_width / page_height)
-                scale_x = page_width / viewer_width_px
-
-                x_pdf = typed_field.x_position * scale_x
-                y_pdf = typed_field.y_position * scale_y
-                width_pdf = (typed_field.width or 200) * scale_x
-                height_pdf = (typed_field.height or 30) * scale_y
-
-                x_pdf = max(0, min(x_pdf, page_width - width_pdf))
-                y_pdf = max(0, min(y_pdf, page_height - height_pdf))
-                text_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
-
-                font_size = int(height_pdf * 0.7)
-                font_size = 8 if font_size < 8 else (72 if font_size > 72 else font_size)
-
-                rc = page.insert_textbox(
-                    text_rect,
-                    field_value or '',
-                    fontsize=font_size,
-                    align=0,
-                    color=(0, 0, 0),
-                    render_mode=0
-                )
-                if rc < 0:
-                    text_y = y_pdf + font_size + 2
-                    page.insert_text((x_pdf + 2, text_y), (field_value or '')[:100], fontsize=font_size, color=(0, 0, 0))
-            except Exception:
-                continue
-
-        # Fill native AcroForm widgets when fields were imported from Acrobat
-        widget_by_name = {}
-        for page in pdf_doc:
-            for w in page.widgets() or []:
-                if w.field_name:
-                    widget_by_name[w.field_name] = w
-        for typed_field_id, field_value in typed_value_map.items():
-            try:
-                typed_field = DocumentTypedField.query.get(typed_field_id)
-                if not typed_field or not typed_field.placeholder:
-                    continue
-                ph = typed_field.placeholder.strip()
-                if not ph.startswith(ACRO_PLACEHOLDER_PREFIX):
-                    continue
-                wname = ph[len(ACRO_PLACEHOLDER_PREFIX):]
-                w = widget_by_name.get(wname)
-                if not w:
-                    continue
-                w.field_value = acro_value_for_widget(
-                    w, field_value, typed_field.field_type or 'text',
-                )
-                w.update()
-            except Exception:
-                continue
+        embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields)
+        embed_typed_field_values_in_pdf(pdf_doc, typed_fields, typed_value_map)
 
         pdf_doc.save(work_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         pdf_doc.close()
