@@ -411,6 +411,17 @@ def user_sign_document_classic_url(doc_id):
     return url_for('view_documents', sign=doc_id, classic=1)
 
 
+@app.template_global()
+def user_document_completed_view_url(doc_id):
+    return url_for('view_document_completed', doc_id=doc_id)
+
+
+def _signed_pdf_download_filename(document, username):
+    base_name = os.path.splitext(document.original_filename)[0]
+    ext = os.path.splitext(document.original_filename)[1] or '.pdf'
+    return f"{base_name}_signed_{username}{ext}"
+
+
 def onboarding_base_url():
     """Public base URL for onboarding links in outbound emails."""
     base = (
@@ -14872,7 +14883,7 @@ def _serve_document_wizard_page(doc_id):
                     <a href="{{ url_for('view_documents', wizard=doc_id) }}" class="btn">{% if complete %}Edit answers{% else %}Continue form{% endif %}</a>
                     <a href="{{ url_for('view_documents') }}" class="btn btn-ghost">Back to Files</a>
                     {% if complete %}
-                    <a href="{{ user_sign_document_classic_url(doc_id) }}" class="btn btn-ghost">View PDF</a>
+                    <a href="{{ user_document_completed_view_url(doc_id) }}" class="btn btn-ghost">View PDF</a>
                     {% endif %}
                 </div>
             </body>
@@ -24318,11 +24329,14 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
             except Exception:
                 continue
 
-        # Overlay typed fields
+        # Overlay typed fields (skip AcroForm imports — filled via widgets below)
         for typed_field_id, field_value in typed_value_map.items():
             try:
                 typed_field = DocumentTypedField.query.get(typed_field_id)
                 if not typed_field:
+                    continue
+                ph = (typed_field.placeholder or '').strip()
+                if ph.startswith(ACRO_PLACEHOLDER_PREFIX):
                     continue
                 page_num = typed_field.page_number - 1
                 if page_num < 0 or page_num >= len(pdf_doc):
@@ -24880,6 +24894,113 @@ def submit_typed_field(doc_id):
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': f'Error: {str(e)}'}), 500
+
+
+@app.route('/documents/<int:doc_id>/completed')
+@login_required
+def view_document_completed(doc_id):
+    """Clean read-only view of the employee's completed PDF (no field overlays)."""
+    document = Document.query.get(doc_id)
+    if not document:
+        flash('Document not found.', 'error')
+        return redirect(url_for('view_documents'))
+    if not _user_can_fill_document(document, current_user.username):
+        flash('This document has not been assigned to you.', 'error')
+        return redirect(url_for('view_documents'))
+    if not os.path.exists(document.file_path):
+        flash('Document file not found on server.', 'error')
+        return redirect(url_for('view_documents'))
+
+    is_pdf = (
+        document.file_type == 'application/pdf'
+        or (document.original_filename or '').lower().endswith('.pdf')
+    )
+    if not is_pdf:
+        flash('Preview is only available for PDF documents.', 'error')
+        return redirect(url_for('view_documents'))
+
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <title>{{ document.name_for_users }} — Completed PDF</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="dark">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; display: flex; flex-direction: column; }
+            .header {
+                background: #000; padding: 12px 20px; display: flex; flex-wrap: wrap;
+                justify-content: space-between; align-items: center; gap: 12px;
+            }
+            .header-title { font-weight: 600; }
+            .header-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+            .header a, .btn-link { color: #fff; text-decoration: none; opacity: 0.9; }
+            .btn {
+                display: inline-block; padding: 10px 18px; background: #FE0100; color: #fff;
+                text-decoration: none; border-radius: 6px; border: none; font-size: 0.95em; cursor: pointer;
+            }
+            .btn-ghost {
+                background: transparent; border: 1px solid rgba(255,255,255,0.25); color: #f2f5fb;
+            }
+            .viewer-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0; }
+            .pdf-frame {
+                flex: 1; width: 100%; min-height: calc(100vh - 64px); border: none; background: #1a1f28;
+            }
+            {{ global_theme_css|safe }}
+        </style>
+    </head>
+    <body class="user-app-shell">
+        <div class="header">
+            <span class="header-title">{{ document.name_for_users }}</span>
+            <div class="header-actions">
+                <a href="{{ url_for('download_document', doc_id=doc_id) }}" class="btn">Download PDF</a>
+                <a href="{{ url_for('view_documents', wizard=doc_id) }}" class="btn btn-ghost">Edit form</a>
+                <a href="{{ url_for('view_documents') }}" class="btn btn-ghost">← Files</a>
+            </div>
+        </div>
+        <div class="viewer-wrap">
+            <iframe
+                class="pdf-frame"
+                title="Completed PDF"
+                src="{{ url_for('document_completed_pdf', doc_id=doc_id) }}"
+            ></iframe>
+        </div>
+    </body>
+    </html>
+    ''',
+        document=document,
+        doc_id=doc_id,
+    )
+
+
+@app.route('/documents/<int:doc_id>/completed-pdf')
+@login_required
+def document_completed_pdf(doc_id):
+    """Stream the user's completed PDF inline (values baked in, no UI overlays)."""
+    document = Document.query.get(doc_id)
+    if not document:
+        abort(404)
+    if not _user_can_fill_document(document, current_user.username):
+        abort(403)
+    if not os.path.exists(document.file_path):
+        abort(404)
+
+    ok, result = _build_signed_pdf_copy_for_user(document, current_user.username)
+    if not ok:
+        app.logger.warning(
+            'completed PDF build failed doc_id=%s user=%s: %s',
+            doc_id, current_user.username, result,
+        )
+        abort(500)
+
+    download_name = _signed_pdf_download_filename(document, current_user.username)
+    return send_file(
+        result,
+        mimetype='application/pdf',
+        as_attachment=False,
+        download_name=download_name,
+    )
 
 
 @app.route('/documents/<int:doc_id>/download')

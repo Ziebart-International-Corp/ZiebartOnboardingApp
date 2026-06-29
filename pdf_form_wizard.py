@@ -1009,6 +1009,25 @@ _KNOWN_ACRO_OPTION_LABELS = frozenset({
 })
 
 
+def _apply_ee_canonical_choice_groups(typed_fields: list) -> None:
+    """Assign choice_group from ee_pdf_field_map when widget names are canonical EE fields."""
+    try:
+        from ee_pdf_field_map import EE_ACRO_TO_CHOICE_GROUP, EE_ACK_ACROS, canonical_acro
+    except ImportError:
+        return
+    ack_set = frozenset(EE_ACK_ACROS)
+    for spec in typed_fields:
+        wname = canonical_acro((spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, ''))
+        if wname in ack_set:
+            spec['field_type'] = 'checkbox_choice'
+            spec['choice_group'] = None
+            continue
+        group = EE_ACRO_TO_CHOICE_GROUP.get(wname)
+        if group:
+            spec['field_type'] = 'checkbox_choice'
+            spec['choice_group'] = group
+
+
 def _is_exclusive_choice_pair(labels: list[str]) -> bool:
     """True when labels are a mutually exclusive pair (not independent checkboxes)."""
     if len(labels) != 2:
@@ -1308,12 +1327,30 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
         # Auto typed_name for primary employee name field
         for spec in typed_fields:
             wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
-            if wname == 'Name3_es_:signer:fullname':
+            if wname == 'Employee_Name':
                 spec['field_type'] = 'typed_name'
                 spec['field_label'] = 'Employee name'
+            elif wname == 'Employee_SSN_Last4':
+                spec['field_type'] = 'last4'
+                spec['field_label'] = 'Social Security Number (last 4)'
+            elif wname in ('Employee_Birthdate', 'Employee_Signature_Date', 'Manager_Signature_Date'):
+                spec['field_type'] = 'date'
+            elif wname in (
+                'Dependent_1_Birthdate', 'Dependent_2_Birthdate', 'Dependent_3_Birthdate',
+            ):
+                spec['field_type'] = 'date'
+            elif wname in (
+                'Employee_Phone_Number',
+                'Emergency_Contact_1_Home_Phone', 'Emergency_Contact_1_Cell_Phone',
+                'Emergency_Contact_1_Work_Phone', 'Emergency_Contact_2_Home_Phone',
+                'Emergency_Contact_2_Cell_Phone', 'Emergency_Contact_2_Work_Phone',
+            ):
+                spec['field_type'] = 'phone'
             elif ':signer:fullname' in wname.lower() and spec.get('field_type') == 'text':
                 if not spec.get('field_label') or spec['field_label'].lower() == 'name':
                     spec['field_label'] = 'Name'
+
+        _apply_ee_canonical_choice_groups(typed_fields)
 
         # Strip choice groups from non-choice field types.
         for spec in typed_fields:
@@ -1354,30 +1391,36 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
                     continue
                 seen_keys.add(dedupe_key)
                 wname = (w.field_name or '').strip()
-                label = (w.field_label or w.field_name or '').strip()
-                if not label:
-                    label = wname or f'Field on page {page_index + 1}'
+                try:
+                    from ee_pdf_field_map import canonical_acro
+                    wname = canonical_acro(wname)
+                except ImportError:
+                    pass
                 rect = list(w.rect) if w.rect else None
                 if not rect or len(rect) != 4:
                     continue
                 x, y, width, height = pdf_rect_to_viewer_coords(rect, page_h)
-                required = bool(w.field_flags & 2) if hasattr(w, 'field_flags') else True
-                placeholder = f'{ACRO_PLACEHOLDER_PREFIX}{wname}' if wname else None
                 page_number = page_index + 1
-
-                wname = (w.field_name or '').strip()
+                placeholder = f'{ACRO_PLACEHOLDER_PREFIX}{wname}' if wname else None
                 label = (w.field_label or wname or '').strip()
                 if not label or label.lower() == 'undefined':
                     label = wname or f'Field on page {page_index + 1}'
-                if 'signature' in wname.lower() and 'signer' in wname.lower():
+                if wname in ('Employee_Signature', 'Manager_Signature') or (
+                    'signature' in wname.lower() and 'signer' in wname.lower()
+                ):
+                    role = 'Employee' if 'Employee' in wname or wname.endswith('1') else 'Manager'
+                    if wname == 'Manager_Signature':
+                        role = 'Manager'
+                    elif wname == 'Employee_Signature':
+                        role = 'Employee'
                     signature_fields.append({
                         'page_number': page_number,
                         'x_position': x,
                         'y_position': y,
                         'width': max(width, 120.0),
                         'height': max(height, 50.0),
-                        'field_label': 'Signature',
-                        'is_required': True,
+                        'field_label': f'{role} signature',
+                        'is_required': role == 'Employee',
                     })
                     continue
 

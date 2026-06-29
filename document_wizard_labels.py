@@ -3,129 +3,145 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
+from ee_pdf_field_map import (
+    EE_ACRO_CHOICE_GROUPS,
+    EE_ACRO_TO_CHOICE_GROUP,
+    EE_ACK_ACROS,
+    EE_FORM_MARKER_ACROS,
+    EE_SIGNATURE_ACROS,
+    canonical_acro,
+)
+
 
 def acro_key(placeholder: Optional[str]) -> str:
     ph = (placeholder or '').strip()
     if ph.startswith('acro:'):
-        return ph[5:]
-    return ph
+        return canonical_acro(ph[5:])
+    return canonical_acro(ph)
 
 
 def is_employee_information_form(typed_fields: list) -> bool:
     keys = {acro_key(getattr(tf, 'placeholder', None)) for tf in typed_fields}
-    return 'Name3_es_:signer:fullname' in keys and 'Name5_es_:signer:fullname' in keys
+    return EE_FORM_MARKER_ACROS.issubset(keys)
 
 
-# (label, section, hint)
+# (label, section, hint) — keys are canonical AcroForm names
 EE_TYPED_LABELS: dict[str, tuple[str, str, str]] = {
-    'Hire Date': ('Hire date', 'Personal information', ''),
-    'Name3_es_:signer:fullname': (
+    'Employee_Hire_Date': ('Hire date', 'Personal information', ''),
+    'Employee_Name': (
         'Employee name', 'Personal information',
         'Your full legal name as it appears on payroll records.',
     ),
-    'Text12': ('Phone number', 'Personal information', ''),
-    'Text13': ('Home address', 'Personal information', ''),
-    'EMail8_es_:signer:email': ('Email address', 'Personal information', ''),
-    'Date9_es_:signer:date': ('Birthdate', 'Personal information', ''),
-    'Text14': (
+    'Employee_Phone_Number': ('Phone number', 'Personal information', ''),
+    'Employee_Address': ('Home address', 'Personal information', ''),
+    'Employee_Email': ('Email address', 'Personal information', ''),
+    'Employee_Birthdate': ('Birthdate', 'Personal information', ''),
+    'Employee_SSN_Last4': (
         'Social Security Number', 'Personal information',
         'Enter only the last 4 digits of your SSN or Tax ID.',
     ),
-    'Name4_es_:signer:fullname': ('Primary emergency contact — name', 'Emergency contacts', ''),
-    'Text15': (
+    'Emergency_Contact_1_Name': ('Primary emergency contact — name', 'Emergency contacts', ''),
+    'Emergency_Contact_1_Relationship': (
         'Primary emergency contact — relationship to you', 'Emergency contacts',
         'e.g. Spouse, Parent, Friend',
     ),
-    'Text16': ('Primary emergency contact — home phone', 'Emergency contacts', ''),
-    'Text17': ('Primary emergency contact — cell phone', 'Emergency contacts', ''),
-    'Text18': ('Primary emergency contact — work phone', 'Emergency contacts', ''),
-    'Text19': ('Secondary emergency contact — name', 'Emergency contacts', ''),
-    'Text23': ('Secondary emergency contact — relationship to you', 'Emergency contacts', ''),
-    'Text20': ('Secondary emergency contact — home phone', 'Emergency contacts', ''),
-    'Text21': ('Secondary emergency contact — cell phone', 'Emergency contacts', ''),
-    'Text22': ('Secondary emergency contact — work phone', 'Emergency contacts', ''),
-    'Carrier Name': (
+    'Emergency_Contact_1_Home_Phone': ('Primary emergency contact — home phone', 'Emergency contacts', ''),
+    'Emergency_Contact_1_Cell_Phone': ('Primary emergency contact — cell phone', 'Emergency contacts', ''),
+    'Emergency_Contact_1_Work_Phone': ('Primary emergency contact — work phone', 'Emergency contacts', ''),
+    'Emergency_Contact_2_Name': ('Secondary emergency contact — name', 'Emergency contacts', ''),
+    'Emergency_Contact_2_Relationship': ('Secondary emergency contact — relationship to you', 'Emergency contacts', ''),
+    'Emergency_Contact_2_Home_Phone': ('Secondary emergency contact — home phone', 'Emergency contacts', ''),
+    'Emergency_Contact_2_Cell_Phone': ('Secondary emergency contact — cell phone', 'Emergency contacts', ''),
+    'Emergency_Contact_2_Work_Phone': ('Secondary emergency contact — work phone', 'Emergency contacts', ''),
+    'Other_Health_Plan_Carrier_Name': (
         'Other health plan — carrier name', 'Medical information',
         'If covered under another group health plan, enter the carrier name.',
     ),
-    'undefined': ('Other health plan — policy number', 'Medical information', ''),
-    'Relationship': ('Other health plan — relationship to policyholder', 'Medical information', ''),
-    'Name5_es_:signer:fullname': (
-        'Dependent 1 — name', 'Dependent 1',
-        'Full name of your first dependent.',
+    'Other_Health_Plan_Policy_Number': ('Other health plan — policy number', 'Medical information', ''),
+    'Other_Health_Plan_Policyholder_Name': ('Other health plan — policyholder name', 'Medical information', ''),
+    'Other_Health_Plan_Relationship': (
+        'Other health plan — relationship to policyholder', 'Medical information', '',
     ),
-    'Date11_es_:signer:date': ('Dependent 1 — birthdate', 'Dependent 1', ''),
-    'Text25': ('Dependent 1 — relationship to you', 'Dependent 1', 'e.g. Child, Spouse'),
-    'Text24': ('Dependent 1 — Social Security Number', 'Dependent 1', 'Last 4 digits only, if applicable.'),
-    'Text26': ('Dependent 1 — address', 'Dependent 1', 'Only if this dependent does not live with you.'),
-    'Name6_es_:signer:fullname': ('Dependent 2 — name', 'Dependent 2', 'Leave blank if not applicable.'),
-    'Text27': ('Dependent 2 — birthdate', 'Dependent 2', ''),
-    'Text28': ('Dependent 2 — relationship to you', 'Dependent 2', ''),
-    'Text29': ('Dependent 2 — Social Security Number', 'Dependent 2', 'Last 4 digits only, if applicable.'),
-    'Text30': ('Dependent 2 — address', 'Dependent 2', 'Only if this dependent does not live with you.'),
-    'Name7_es_:signer:fullname': ('Dependent 3 — name', 'Dependent 3', 'Leave blank if not applicable.'),
-    'Date10_es_:signer:date': ('Dependent 3 — birthdate', 'Dependent 3', ''),
-    'Text31': ('Dependent 3 — relationship to you', 'Dependent 3', ''),
-    'Text32': ('Dependent 3 — Social Security Number', 'Dependent 3', 'Last 4 digits only, if applicable.'),
-    'Text33': ('Dependent 3 — address', 'Dependent 3', 'Only if this dependent does not live with you.'),
-    'Date': ('Employee signature — date', 'Signatures', ''),
-    'Date_2': ('Manager signature — date', 'Signatures', 'Your manager completes this when reviewing your form.'),
+    'Dependent_1_Name': ('Dependent 1 — name', 'Dependent 1', 'Full name of your first dependent.'),
+    'Dependent_1_Birthdate': ('Dependent 1 — birthdate', 'Dependent 1', ''),
+    'Dependent_1_Relationship': ('Dependent 1 — relationship to you', 'Dependent 1', 'e.g. Child, Spouse'),
+    'Dependent_1_SSN_Last4': ('Dependent 1 — Social Security Number', 'Dependent 1', 'Last 4 digits only, if applicable.'),
+    'Dependent_1_Address': (
+        'Dependent 1 — address', 'Dependent 1', 'Only if this dependent does not live with you.',
+    ),
+    'Dependent_2_Name': ('Dependent 2 — name', 'Dependent 2', 'Leave blank if not applicable.'),
+    'Dependent_2_Birthdate': ('Dependent 2 — birthdate', 'Dependent 2', ''),
+    'Dependent_2_Relationship': ('Dependent 2 — relationship to you', 'Dependent 2', ''),
+    'Dependent_2_SSN_Last4': ('Dependent 2 — Social Security Number', 'Dependent 2', 'Last 4 digits only, if applicable.'),
+    'Dependent_2_Address': ('Dependent 2 — address', 'Dependent 2', 'Only if this dependent does not live with you.'),
+    'Dependent_3_Name': ('Dependent 3 — name', 'Dependent 3', 'Leave blank if not applicable.'),
+    'Dependent_3_Birthdate': ('Dependent 3 — birthdate', 'Dependent 3', ''),
+    'Dependent_3_Relationship': ('Dependent 3 — relationship to you', 'Dependent 3', ''),
+    'Dependent_3_SSN_Last4': ('Dependent 3 — Social Security Number', 'Dependent 3', 'Last 4 digits only, if applicable.'),
+    'Dependent_3_Address': ('Dependent 3 — address', 'Dependent 3', 'Only if this dependent does not live with you.'),
+    'Employee_Signature_Date': ('Employee signature — date', 'Signatures', ''),
+    'Manager_Signature_Date': (
+        'Manager signature — date', 'Signatures', 'Your manager completes this when reviewing your form.',
+    ),
 }
 
+# Choice groups: group_id -> (label, section, hint, {acro: option label})
 EE_CHOICE_GROUPS: dict[str, tuple[str, str, str, dict[str, str]]] = {
-    'ee_marital': ('Marital status', 'Personal information', '', {'Single': 'Single', 'Married': 'Married'}),
-    'ee_gender': ('Gender', 'Personal information', '', {'Male': 'Male', 'Female': 'Female'}),
+    'ee_marital': (
+        'Marital status', 'Personal information', '',
+        {'Employee_Marital_Status_Single': 'Single', 'Employee_Marital_Status_Married': 'Married'},
+    ),
+    'ee_gender': (
+        'Gender', 'Personal information', '',
+        {'Employee_Gender_Male': 'Male', 'Employee_Gender_Female': 'Female'},
+    ),
     'ee_race': (
         'Race / ethnicity (EEOC)', 'Personal information',
         'Select the option that best describes you. Used for EEO reporting only.',
         {
-            'BlackAfrican American': 'Black / African American',
-            'American Indian': 'American Indian',
-            'Asian': 'Asian',
-            'Native HawaiianPacific Islanders': 'Native Hawaiian / Pacific Islander',
-            'HispanicSpanish': 'Hispanic / Spanish origin',
-            'White Caucasian': 'White (Caucasian)',
+            'Race_Black_African_American': 'Black / African American',
+            'Race_American_Indian': 'American Indian',
+            'Race_Asian': 'Asian',
+            'Race_Native_Hawaiian_Pacific_Islander': 'Native Hawaiian / Pacific Islander',
+            'Race_Hispanic_Spanish': 'Hispanic / Spanish origin',
+            'Race_White_Caucasian': 'White (Caucasian)',
         },
     ),
-    'ee_tobacco': ('Are you a tobacco user?', 'Medical information', '', {'Yes': 'Yes', 'No': 'No'}),
-    'ee_medicare': ('Are you enrolled in Medicare?', 'Medical information', '', {'Yes_2': 'Yes', 'No_2': 'No'}),
-    'ee_medicaid': ('Are you enrolled in Medicaid?', 'Medical information', '', {'Check Box34': 'Yes', 'Check Box35': 'No'}),
+    'ee_tobacco': ('Are you a tobacco user?', 'Medical information', '', {'Tobacco_User_Yes': 'Yes', 'Tobacco_User_No': 'No'}),
+    'ee_medicare': ('Are you enrolled in Medicare?', 'Medical information', '', {'Medicare_Yes': 'Yes', 'Medicare_No': 'No'}),
+    'ee_medicaid': ('Are you enrolled in Medicaid?', 'Medical information', '', {'Medicaid_Yes': 'Yes', 'Medicaid_No': 'No'}),
     'ee_group_health': (
         'Are you covered under another group health plan?', 'Medical information', '',
-        {'Check Box36': 'Yes', 'Check Box37': 'No'},
+        {'Other_Health_Plan_Yes': 'Yes', 'Other_Health_Plan_No': 'No'},
     ),
-    'ee_dep1_gender': ('Dependent 1 — gender', 'Dependent 1', '', {'Male_2': 'Male', 'Check Box40': 'Female'}),
-}
-
-EE_GENDER_CHECKBOX_ACROS: dict[str, tuple[str, str, str]] = {
-    'Male_3': ('Dependent 2 — male', 'Dependent 2', 'Check if this dependent is male.'),
-    'Male_4': ('Dependent 3 — male', 'Dependent 3', 'Check if this dependent is male.'),
+    'ee_health_plan_relationship': (
+        'Relationship to policyholder', 'Medical information', '',
+        {'Other_Health_Plan_Relationship_Spouse': 'Spouse', 'Other_Health_Plan_Relationship_Child': 'Child'},
+    ),
+    'ee_dep1_gender': (
+        'Dependent 1 — gender', 'Dependent 1', '',
+        {'Dependent_1_Gender_Male': 'Male', 'Dependent_1_Gender_Female': 'Female'},
+    ),
+    'ee_dep2_gender': (
+        'Dependent 2 — gender', 'Dependent 2', '',
+        {'Dependent_2_Gender_Male': 'Male', 'Dependent_2_Gender_Female': 'Female'},
+    ),
+    'ee_dep3_gender': (
+        'Dependent 3 — gender', 'Dependent 3', '',
+        {'Dependent_3_Gender_Male': 'Male', 'Dependent_3_Gender_Female': 'Female'},
+    ),
 }
 
 EE_ACK_CHECKBOXES: dict[str, tuple[str, str]] = {
-    'Employee Handbook Received': (
-        'Employee Handbook received',
-        'Check each acknowledgement that applies to you.',
+    'Ack_Employee_Handbook': ('Employee Handbook received', 'Check each acknowledgement that applies to you.'),
+    'Ack_Harassment_Training': ('Harassment training completed', 'Check each acknowledgement that applies to you.'),
+    'Ack_Technical_Training': ('Technical training received', 'Check each acknowledgement that applies to you.'),
+    'Ack_Hepatitis_B_Declination': ('Hepatitis B vaccine declination', 'Check each acknowledgement that applies to you.'),
+    'Ack_Safety_Handbook_Reviewed': (
+        'Safety Data Sheets / Safety Handbook reviewed', 'Check each acknowledgement that applies to you.',
     ),
-    'Harassment Training Completed': (
-        'Harassment training completed',
-        'Check each acknowledgement that applies to you.',
-    ),
-    'Technical Training Received': (
-        'Technical training received',
-        'Check each acknowledgement that applies to you.',
-    ),
-    'Hepatitis B Vaccine Declination': (
-        'Hepatitis B vaccine declination',
-        'Check each acknowledgement that applies to you.',
-    ),
-    'Safety Data SheetsSafety Handbook Reviewed': (
-        'Safety Data Sheets / Safety Handbook reviewed',
-        'Check each acknowledgement that applies to you.',
-    ),
-    'Urethane Liner Safety Received Rhino Technician only': (
-        'Urethane Liner Safety received (Rhino Technicians only)',
-        'Check each acknowledgement that applies to you.',
+    'Ack_Urethane_Liner_Safety': (
+        'Urethane Liner Safety received (Rhino Technicians only)', 'Check each acknowledgement that applies to you.',
     ),
 }
 
@@ -136,99 +152,74 @@ EE_SIGNATURE_LABELS: dict[str, tuple[str, str]] = {
 
 WIZARD_SKIP_NA = 'N/A'
 
-# AcroForm widget names the employee must complete (cannot skip).
 EE_REQUIRED_ACROS = {
-    'Hire Date',
-    'Name3_es_:signer:fullname',
-    'Text12',
-    'Text13',
-    'EMail8_es_:signer:email',
-    'Date9_es_:signer:date',
-    'Text14',
-    'Name4_es_:signer:fullname',
-    'Text15',
-    'Text17',
-    'Date',
+    'Employee_Hire_Date', 'Employee_Name', 'Employee_Phone_Number', 'Employee_Address',
+    'Employee_Email', 'Employee_Birthdate', 'Employee_SSN_Last4',
+    'Emergency_Contact_1_Name', 'Emergency_Contact_1_Relationship', 'Emergency_Contact_1_Cell_Phone',
+    'Employee_Signature_Date',
 }
 
 EE_REQUIRED_CHOICE_GROUPS = {
-    'ee_marital',
-    'ee_gender',
-    'ee_race',
-    'ee_tobacco',
-    'ee_medicare',
-    'ee_medicaid',
-    'ee_group_health',
+    'ee_marital', 'ee_gender', 'ee_race', 'ee_tobacco', 'ee_medicare', 'ee_medicaid', 'ee_group_health',
 }
 
 EE_REQUIRED_ACK_ACROS = {
-    'Employee Handbook Received',
-    'Harassment Training Completed',
-    'Technical Training Received',
-    'Hepatitis B Vaccine Declination',
-    'Safety Data SheetsSafety Handbook Reviewed',
+    'Ack_Employee_Handbook', 'Ack_Harassment_Training', 'Ack_Technical_Training',
+    'Ack_Hepatitis_B_Declination', 'Ack_Safety_Handbook_Reviewed',
 }
 
 EE_PHONE_ACROS = {
-    'Text12', 'Text16', 'Text17', 'Text18', 'Text20', 'Text21', 'Text22',
+    'Employee_Phone_Number',
+    'Emergency_Contact_1_Home_Phone', 'Emergency_Contact_1_Cell_Phone', 'Emergency_Contact_1_Work_Phone',
+    'Emergency_Contact_2_Home_Phone', 'Emergency_Contact_2_Cell_Phone', 'Emergency_Contact_2_Work_Phone',
 }
 
-EE_LAST4_ACROS = {'Text14', 'Text24', 'Text29', 'Text32'}
+EE_LAST4_ACROS = {'Employee_SSN_Last4', 'Dependent_1_SSN_Last4', 'Dependent_2_SSN_Last4', 'Dependent_3_SSN_Last4'}
 
 EE_HAS_DEPENDENTS_GATE_ID = 'gate:has_dependents'
 
 EE_DEPENDENT_ACROS = frozenset({
-    'Name5_es_:signer:fullname',
-    'Date11_es_:signer:date',
-    'Text25',
-    'Text24',
-    'Text26',
-    'Name6_es_:signer:fullname',
-    'Text27',
-    'Text28',
-    'Text29',
-    'Text30',
-    'Name7_es_:signer:fullname',
-    'Date10_es_:signer:date',
-    'Text31',
-    'Text32',
-    'Text33',
-    'Male_2',
-    'Male_3',
-    'Male_4',
-    'Check Box40',
+    'Dependent_1_Name', 'Dependent_1_Birthdate', 'Dependent_1_Relationship',
+    'Dependent_1_SSN_Last4', 'Dependent_1_Address',
+    'Dependent_1_Gender_Male', 'Dependent_1_Gender_Female',
+    'Dependent_2_Name', 'Dependent_2_Birthdate', 'Dependent_2_Relationship',
+    'Dependent_2_SSN_Last4', 'Dependent_2_Address',
+    'Dependent_2_Gender_Male', 'Dependent_2_Gender_Female',
+    'Dependent_3_Name', 'Dependent_3_Birthdate', 'Dependent_3_Relationship',
+    'Dependent_3_SSN_Last4', 'Dependent_3_Address',
+    'Dependent_3_Gender_Male', 'Dependent_3_Gender_Female',
 })
 
-EE_DEPENDENT_CHOICE_GROUPS = frozenset({'ee_dep1_gender'})
+EE_DEPENDENT_CHOICE_GROUPS = frozenset({'ee_dep1_gender', 'ee_dep2_gender', 'ee_dep3_gender'})
 
 EE_ACK_GROUP_ID = 'ack:ee_acknowledgements'
-
-EE_ACK_ORDER = [
-    'Employee Handbook Received',
-    'Harassment Training Completed',
-    'Technical Training Received',
-    'Hepatitis B Vaccine Declination',
-    'Safety Data SheetsSafety Handbook Reviewed',
-    'Urethane Liner Safety Received Rhino Technician only',
-]
+EE_ACK_ORDER = list(EE_ACK_ACROS)
 
 EE_STEP_ORDER = [
-    'Hire Date', 'Name3_es_:signer:fullname', 'Text12', 'Text13', 'EMail8_es_:signer:email',
-    'Date9_es_:signer:date', 'Text14',
+    'Employee_Hire_Date', 'Employee_Name', 'Employee_Phone_Number', 'Employee_Address',
+    'Employee_Email', 'Employee_Birthdate', 'Employee_SSN_Last4',
     'ee_marital', 'ee_gender', 'ee_race',
-    'Name4_es_:signer:fullname', 'Text15', 'Text16', 'Text17', 'Text18',
-    'Text19', 'Text23', 'Text20', 'Text21', 'Text22',
+    'Emergency_Contact_1_Name', 'Emergency_Contact_1_Relationship',
+    'Emergency_Contact_1_Home_Phone', 'Emergency_Contact_1_Cell_Phone', 'Emergency_Contact_1_Work_Phone',
+    'Emergency_Contact_2_Name', 'Emergency_Contact_2_Relationship',
+    'Emergency_Contact_2_Home_Phone', 'Emergency_Contact_2_Cell_Phone', 'Emergency_Contact_2_Work_Phone',
     'ee_tobacco', 'ee_medicare', 'ee_medicaid', 'ee_group_health',
-    'Carrier Name', 'undefined', 'Relationship',
+    'Other_Health_Plan_Carrier_Name', 'Other_Health_Plan_Policy_Number',
+    'Other_Health_Plan_Policyholder_Name', 'Other_Health_Plan_Relationship',
+    'ee_health_plan_relationship',
     EE_HAS_DEPENDENTS_GATE_ID,
-    'Name5_es_:signer:fullname', 'ee_dep1_gender', 'Date11_es_:signer:date',
-    'Text25', 'Text24', 'Text26',
-    'Name6_es_:signer:fullname', 'Male_3', 'Text27', 'Text28', 'Text29', 'Text30',
-    'Name7_es_:signer:fullname', 'Male_4', 'Date10_es_:signer:date',
-    'Text31', 'Text32', 'Text33',
+    'Dependent_1_Name', 'ee_dep1_gender', 'Dependent_1_Birthdate',
+    'Dependent_1_Relationship', 'Dependent_1_SSN_Last4', 'Dependent_1_Address',
+    'Dependent_2_Name', 'ee_dep2_gender', 'Dependent_2_Birthdate',
+    'Dependent_2_Relationship', 'Dependent_2_SSN_Last4', 'Dependent_2_Address',
+    'Dependent_3_Name', 'ee_dep3_gender', 'Dependent_3_Birthdate',
+    'Dependent_3_Relationship', 'Dependent_3_SSN_Last4', 'Dependent_3_Address',
     EE_ACK_GROUP_ID,
-    'sig:employee', 'Date', 'sig:manager', 'Date_2',
+    'sig:employee', 'Employee_Signature_Date', 'sig:manager', 'Manager_Signature_Date',
 ]
+
+EE_WIZARD_CHOICE_GROUP_BY_ACRO = dict(EE_ACRO_TO_CHOICE_GROUP)
+EE_INDEPENDENT_CHECKBOX_ACROS = frozenset(EE_ACK_ACROS)
 
 
 def ee_field_is_required(
@@ -247,7 +238,7 @@ def ee_field_is_required(
     if choice_group is not None:
         return choice_group in EE_REQUIRED_CHOICE_GROUPS
     if acro is not None:
-        if acro == 'Date_2':
+        if acro == 'Manager_Signature_Date':
             return False
         return acro in EE_REQUIRED_ACROS
     return True
@@ -260,20 +251,8 @@ def ee_id_by_acro(typed_fields: list) -> dict[str, list]:
     return id_by_acro
 
 
-# Correct choice_group per AcroForm name (fixes bad import grouping in existing DB rows).
-EE_WIZARD_CHOICE_GROUP_BY_ACRO: dict[str, str] = {}
-for _gid, (_lbl, _sec, _hint, _opts) in EE_CHOICE_GROUPS.items():
-    for _acro in _opts:
-        EE_WIZARD_CHOICE_GROUP_BY_ACRO[_acro] = _gid
-
-EE_INDEPENDENT_CHECKBOX_ACROS = frozenset(EE_ACK_CHECKBOXES.keys()) | frozenset(EE_GENDER_CHECKBOX_ACROS.keys())
-
-
 def repair_employee_information_field_groups(typed_fields: list) -> bool:
-    """
-    Fix PDF import mistakes where unrelated checkboxes share one choice_group
-    (e.g. Employee Handbook + Harassment Training, or Tobacco + Medicare Yes/No).
-    """
+    """Fix incorrect shared choice_groups on imported checkbox fields."""
     changed = False
     for tf in typed_fields:
         if tf.field_type != 'checkbox_choice':
@@ -296,19 +275,18 @@ def resolve_has_dependents_answer(
     typed_values: dict[int, str],
     typed_fields: list,
 ) -> Optional[str]:
-    """Session answer, or infer from saved dependent field values."""
     ans = (session_val or '').strip().lower()
     if ans in ('yes', 'no'):
         return ans
     id_by_acro = ee_id_by_acro(typed_fields)
-    for ak in ('Name5_es_:signer:fullname', 'Name6_es_:signer:fullname', 'Name7_es_:signer:fullname'):
+    for ak in ('Dependent_1_Name', 'Dependent_2_Name', 'Dependent_3_Name'):
         for tf in id_by_acro.get(ak, []):
             val = (typed_values.get(tf.id) or '').strip()
             if val and val.upper() != WIZARD_SKIP_NA:
                 return 'yes'
     dep_values = []
     for ak in EE_DEPENDENT_ACROS:
-        if ak in EE_INDEPENDENT_CHECKBOX_ACROS or ak.startswith('Male') or ak == 'Check Box40':
+        if ak in EE_INDEPENDENT_CHECKBOX_ACROS or 'Gender_' in ak:
             continue
         for tf in id_by_acro.get(ak, []):
             if tf.field_type == 'checkbox_choice':
@@ -336,7 +314,6 @@ def build_ee_ack_group_step(
     id_by_acro: dict[str, list],
     typed_values: dict[int, str],
 ) -> dict[str, Any]:
-    """Single wizard step for all training/handbook acknowledgements."""
     options: list[dict[str, Any]] = []
     page = 2
     sort_y = 0.0
@@ -368,9 +345,7 @@ def build_ee_ack_group_step(
         'sort_x': 0,
         'required': bool(required_opts),
         'skip_value': '',
-        'hint': (
-            'Check each item that applies to you. Required items are marked with an asterisk (*).'
-        ),
+        'hint': 'Check each item that applies to you. Required items are marked with an asterisk (*).',
         'value': '',
         'filled': filled,
         'options': options,
@@ -407,7 +382,6 @@ def filter_ee_wizard_steps(
     steps: list[dict[str, Any]],
     has_dependents: Optional[str],
 ) -> list[dict[str, Any]]:
-    """Hide dependent detail steps until user answers Yes; hide entirely after No."""
     ans = (has_dependents or '').strip().lower() if has_dependents else None
     if ans == 'yes':
         return steps
@@ -415,7 +389,6 @@ def filter_ee_wizard_steps(
 
 
 def apply_ee_dependents_not_applicable(persist_fn, id_by_acro: dict[str, list]) -> None:
-    """Mark all dependent PDF fields N/A (or blank for checkboxes) when user has no dependents."""
     seen: set[int] = set()
     for ak in EE_DEPENDENT_ACROS:
         for tf in id_by_acro.get(ak, []):
@@ -437,7 +410,6 @@ def apply_ee_dependents_not_applicable(persist_fn, id_by_acro: dict[str, list]) 
 
 
 def clear_ee_dependents_values(persist_fn, id_by_acro: dict[str, list]) -> None:
-    """Clear dependent fields when user changes answer from No to Yes."""
     seen: set[int] = set()
     for ak in EE_DEPENDENT_ACROS:
         for tf in id_by_acro.get(ak, []):
@@ -456,7 +428,6 @@ def clear_ee_dependents_values(persist_fn, id_by_acro: dict[str, list]) -> None:
 
 
 def wizard_skip_value_for_step(step: dict[str, Any]) -> str:
-    """Value stored when the user skips an optional wizard step."""
     if step.get('required'):
         return ''
     wt = step.get('wizard_type') or step.get('field_type') or ''
@@ -492,7 +463,6 @@ def build_ee_information_wizard_steps(
     phone_like_fn: Callable,
     has_dependents: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Build ordered, labeled wizard steps for the Employee Information PDF."""
     acro_by_id = {tf.id: acro_key(tf.placeholder) for tf in typed_fields}
     id_by_acro: dict[str, list] = {}
     for tf in typed_fields:
@@ -530,7 +500,6 @@ def build_ee_information_wizard_steps(
                 break
         page = min(tf.page_number for tf in members)
         sort_y = min(tf.y_position for tf in members)
-        required = ee_field_is_required(choice_group=group_id)
         return {
             'wizard_id': f'choice:{group_id}',
             'kind': 'choice_group',
@@ -539,7 +508,7 @@ def build_ee_information_wizard_steps(
             'page': page,
             'sort_y': sort_y,
             'sort_x': 0,
-            'required': required,
+            'required': ee_field_is_required(choice_group=group_id),
             'skip_value': '',
             'hint': hint,
             'options': options,
@@ -564,14 +533,12 @@ def build_ee_information_wizard_steps(
         elif not val and tf.field_type == 'typed_initials':
             val = user_initials
             auto = True
-        elif not val and tf.field_type == 'date' and ak == 'Date':
+        elif not val and tf.field_type == 'date' and ak == 'Employee_Signature_Date':
             val = today_date
             auto = True
         required = ee_field_is_required(acro=ak)
         skip_val = wizard_skip_value_for_step({
-            'required': required,
-            'wizard_type': wtype,
-            'field_type': tf.field_type,
+            'required': required, 'wizard_type': wtype, 'field_type': tf.field_type,
         })
         filled = wizard_value_counts_as_filled(val, wizard_type=wtype)
         if auto and tf.id in typed_values:
@@ -593,35 +560,6 @@ def build_ee_information_wizard_steps(
             'value': val,
             'filled': filled,
             'auto_value': val if auto else '',
-            'ee_acro': ak,
-        }
-
-    def _ack_step(tf) -> dict[str, Any]:
-        ak = acro_by_id[tf.id]
-        if ak in EE_GENDER_CHECKBOX_ACROS:
-            label, section, hint = EE_GENDER_CHECKBOX_ACROS[ak]
-        else:
-            label, hint = EE_ACK_CHECKBOXES.get(ak, (tf.field_label or 'Acknowledgement', ''))
-            section = 'Acknowledgements'
-        val = (typed_values.get(tf.id) or '').strip().upper()
-        required = ee_field_is_required(ack_acro=ak)
-        is_checked = val == 'X'
-        return {
-            'wizard_id': f'typed:{tf.id}',
-            'kind': 'typed',
-            'db_id': tf.id,
-            'field_type': 'checkbox_choice',
-            'wizard_type': 'checkbox',
-            'label': label,
-            'section': section,
-            'page': tf.page_number,
-            'sort_y': tf.y_position,
-            'sort_x': tf.x_position,
-            'required': required,
-            'skip_value': '',
-            'hint': hint,
-            'value': 'X' if is_checked else '',
-            'filled': is_checked,
             'ee_acro': ak,
         }
 
@@ -655,9 +593,7 @@ def build_ee_information_wizard_steps(
                 'sort_y': sf.y_position,
                 'sort_x': sf.x_position,
                 'required': ee_field_is_required(signature_role='employee'),
-                'skip_value': '',
-                'hint': '',
-                'value': '',
+                'skip_value': '', 'hint': '', 'value': '',
                 'filled': sf.id in signed_field_ids,
             })
             continue
@@ -683,17 +619,8 @@ def build_ee_information_wizard_steps(
             continue
         for tf in id_by_acro.get(step_key, []):
             if tf.field_type == 'checkbox_choice':
-                if tf.id in ee_choice_member_ids:
+                if tf.id in ee_choice_member_ids or acro_by_id[tf.id] in EE_ACK_ORDER:
                     continue
-                ak = acro_by_id[tf.id]
-                if ak in EE_ACK_ORDER:
-                    continue
-                if ak in EE_GENDER_CHECKBOX_ACROS:
-                    key = f'ack:{tf.id}'
-                    if key not in seen_step_keys:
-                        seen_step_keys.add(key)
-                        steps.append(_ack_step(tf))
-                continue
             key = f'typed:{tf.id}'
             if key not in seen_step_keys:
                 seen_step_keys.add(key)
