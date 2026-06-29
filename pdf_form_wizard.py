@@ -1526,17 +1526,23 @@ def _place_text_in_pdf_rect(page, rect, text: str, *, fontsize: int | None = Non
             pass
 
 
-def embed_typed_field_values_in_pdf(pdf_doc, typed_fields, typed_value_map: dict) -> None:
+def embed_typed_field_values_in_pdf(
+    pdf_doc,
+    typed_fields,
+    typed_value_map: dict,
+    typed_value_filled_at: dict | None = None,
+) -> None:
     """
-    Render saved typed/checkbox values onto the PDF.
-    Uses on-page widget updates plus text overlay so values appear in all viewers.
+    Render saved typed/checkbox values onto the PDF using a single text overlay per field.
+    When duplicate DB rows share an AcroForm name, only the most recently saved value is used.
     """
     try:
         from ee_pdf_field_map import canonical_acro
     except ImportError:
         canonical_acro = lambda n: (n or '').strip()  # noqa: E731
 
-    by_acro: dict[str, list[tuple]] = {}
+    # One entry per acro — newest filled_at wins (else highest field id).
+    best_by_acro: dict[str, tuple] = {}
     for tf in typed_fields:
         tid = getattr(tf, 'id', None)
         if tid is None or tid not in typed_value_map:
@@ -1545,31 +1551,42 @@ def embed_typed_field_values_in_pdf(pdf_doc, typed_fields, typed_value_map: dict
         if not val:
             continue
         ph = (getattr(tf, 'placeholder', None) or '').strip()
-        ak = canonical_acro(ph[len(ACRO_PLACEHOLDER_PREFIX):]) if ph.startswith(ACRO_PLACEHOLDER_PREFIX) else ''
-        if ak:
-            by_acro.setdefault(ak, []).append((tf, val))
+        if ph.startswith(ACRO_PLACEHOLDER_PREFIX):
+            ak = canonical_acro(ph[len(ACRO_PLACEHOLDER_PREFIX):])
+        else:
+            ak = f'_field_{tid}'
+        filled_at = (typed_value_filled_at or {}).get(tid)
+        ts = 0.0
+        if filled_at is not None:
+            try:
+                ts = filled_at.timestamp()
+            except Exception:
+                ts = 0.0
+        sort_key = (ts, tid or 0)
+        prev = best_by_acro.get(ak)
+        if prev is None or sort_key >= prev[2]:
+            best_by_acro[ak] = (tf, val, sort_key)
 
+    acros_to_render = {
+        canonical_acro((getattr(tf, 'placeholder', '') or '').replace(ACRO_PLACEHOLDER_PREFIX, ''))
+        for tf, _, _ in best_by_acro.values()
+        if (getattr(tf, 'placeholder', '') or '').startswith(ACRO_PLACEHOLDER_PREFIX)
+    }
+
+    # Clear native widget values so viewers do not show stale text under our overlay.
     for page in pdf_doc:
         for widget in page.widgets() or []:
             wname = canonical_acro((widget.field_name or '').strip())
-            entries = by_acro.get(wname)
-            if not entries:
+            if wname not in acros_to_render:
                 continue
-            tf, val = entries[0]
-            ft = getattr(tf, 'field_type', None) or 'text'
             try:
-                widget.field_value = acro_value_for_widget(widget, val, ft)
+                wtype = getattr(widget, 'field_type', None)
+                widget.field_value = 'Off' if wtype in (2, 5) else ''
                 widget.update()
             except Exception:
                 pass
 
-    for tf in typed_fields:
-        tid = getattr(tf, 'id', None)
-        if tid is None or tid not in typed_value_map:
-            continue
-        val = (typed_value_map[tid] or '').strip()
-        if not val:
-            continue
+    for tf, val, _sort_key in best_by_acro.values():
         page_num = int(getattr(tf, 'page_number', 1) or 1) - 1
         if page_num < 0 or page_num >= len(pdf_doc):
             continue
@@ -1581,6 +1598,13 @@ def embed_typed_field_values_in_pdf(pdf_doc, typed_fields, typed_value_map: dict
             getattr(tf, 'width', 200) or 200,
             getattr(tf, 'height', 30) or 30,
         )
+        if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+            continue
+        # Cover the field area so only one layer of text is visible.
+        try:
+            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+        except Exception:
+            pass
         ft = getattr(tf, 'field_type', None) or 'text'
         if ft == 'checkbox_choice':
             if val.upper() == 'X':
@@ -1598,9 +1622,16 @@ def embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields) -> None:
         sig_acros = {'employee': 'Employee_Signature', 'manager': 'Manager_Signature'}
 
     widget_rects: dict[str, tuple[int, object]] = {}
+    sig_acro_names = set(sig_acros.values())
     for page_idx, page in enumerate(pdf_doc):
         for widget in page.widgets() or []:
             wname = (widget.field_name or '').strip()
+            if wname in sig_acro_names:
+                try:
+                    widget.field_value = ''
+                    widget.update()
+                except Exception:
+                    pass
             for role, acro in sig_acros.items():
                 if wname == acro and widget.rect and not widget.rect.is_empty:
                     widget_rects[role] = (page_idx, widget.rect)
@@ -1638,6 +1669,7 @@ def embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields) -> None:
             continue
 
         try:
+            page.draw_rect(img_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
             from PIL import Image
             sig_image_data = base64.standard_b64decode(sig.signature_image)
             sig_img = Image.open(BytesIO(sig_image_data))

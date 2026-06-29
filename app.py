@@ -24252,8 +24252,10 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
                 username=username
             ).all()
             typed_value_map = {val.typed_field_id: val.field_value for val in user_typed_values}
+            typed_value_filled_at = {val.typed_field_id: val.filled_at for val in user_typed_values}
         except Exception:
             typed_value_map = {}
+            typed_value_filled_at = {}
 
         # Build a copy even if no fields are filled (keeps copy semantics explicit).
         if output_path:
@@ -24271,7 +24273,9 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
         signature_fields = DocumentSignatureField.query.filter_by(document_id=document.id).all()
 
         embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields)
-        embed_typed_field_values_in_pdf(pdf_doc, typed_fields, typed_value_map)
+        embed_typed_field_values_in_pdf(
+            pdf_doc, typed_fields, typed_value_map, typed_value_filled_at,
+        )
 
         pdf_doc.save(work_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
         pdf_doc.close()
