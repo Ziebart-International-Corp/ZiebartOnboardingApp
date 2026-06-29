@@ -1,4 +1,12 @@
-"""Rename EE PDF fields and sync document 14 DB rows to canonical names + new geometry."""
+"""Rename EE PDF fields and sync document 14 DB rows to canonical names + new geometry.
+
+After resizing or moving fields in Adobe Acrobat, save the truth PDF in place, then run:
+
+    .\\venv\\Scripts\\python.exe .\\scripts\\sync_ee_document_fields.py
+
+That updates database field positions/sizes used by the wizard and classic sign page.
+Completed PDF preview uses live widget geometry from the PDF file directly.
+"""
 from __future__ import annotations
 
 import sys

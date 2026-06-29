@@ -1482,6 +1482,28 @@ def acro_value_for_widget(widget, field_value: str, field_type: str) -> str:
     return val
 
 
+def checkbox_widget_value(widget, field_value: str) -> str:
+    """Value to set on a PDF checkbox/radio/marker widget for a checked choice."""
+    wtype = getattr(widget, 'field_type', 1)
+    val = (field_value or '').strip()
+    if val.upper() not in ('X', '1', 'TRUE', 'YES', 'ON'):
+        return 'Off' if wtype in (2, 5) else ''
+    if wtype in (2, 5):
+        return acro_value_for_widget(widget, val, 'checkbox_choice')
+    # Acrobat "Prepare Form" often uses small text fields as choice markers.
+    return 'X'
+
+
+def save_pdf_document_copy(pdf_doc, work_path: str) -> None:
+    """Save a modified PDF copy (PyMuPDF requires a new path for full rewrites)."""
+    import shutil
+
+    out_path = f'{work_path}.built'
+    pdf_doc.save(out_path, garbage=3, deflate=True)
+    pdf_doc.close()
+    shutil.move(out_path, work_path)
+
+
 def viewer_coords_to_pdf_rect(
     page,
     x_viewer: float,
@@ -1505,6 +1527,38 @@ def viewer_coords_to_pdf_rect(
     )
 
 
+def acro_widget_rect_map(pdf_doc) -> dict[str, tuple[int, fitz.Rect]]:
+    """Map canonical AcroForm name -> (page_index, widget rect) from the live PDF."""
+    try:
+        from ee_pdf_field_map import canonical_acro
+    except ImportError:
+        canonical_acro = lambda n: (n or '').strip()  # noqa: E731
+
+    out: dict[str, tuple[int, fitz.Rect]] = {}
+    for page_idx, page in enumerate(pdf_doc):
+        for widget in page.widgets() or []:
+            wname = canonical_acro((widget.field_name or '').strip())
+            if not wname or not widget.rect or widget.rect.is_empty:
+                continue
+            out[wname] = (page_idx, fitz.Rect(widget.rect))
+    return out
+
+
+def flatten_pdf_form_widgets(pdf_doc) -> None:
+    """Remove all AcroForm widgets so the PDF is a flat, non-editable document."""
+    for _pass in range(3):
+        any_left = False
+        for page in pdf_doc:
+            for widget in list(page.widgets() or []):
+                any_left = True
+                try:
+                    page.delete_widget(widget)
+                except Exception:
+                    pass
+        if not any_left:
+            break
+
+
 def _place_text_in_pdf_rect(page, rect, text: str, *, fontsize: int | None = None) -> None:
     val = (text or '').strip()
     if not val or rect.is_empty or rect.width <= 0 or rect.height <= 0:
@@ -1526,6 +1580,23 @@ def _place_text_in_pdf_rect(page, rect, text: str, *, fontsize: int | None = Non
             pass
 
 
+def _place_checkmark_in_pdf_rect(page, rect) -> None:
+    """Draw a centered X in a small checkbox/marker rect (fallback only)."""
+    if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        return
+    fs = max(7, min(int(rect.height * 0.85), int(rect.width * 0.85), 14))
+    try:
+        rc = page.insert_textbox(
+            rect, 'X', fontsize=fs, align=1, color=(0, 0, 0), render_mode=0,
+        )
+        if rc < 0:
+            cx = (rect.x0 + rect.x1) / 2
+            cy = (rect.y0 + rect.y1) / 2
+            page.insert_text((cx - fs * 0.3, cy + fs * 0.35), 'X', fontsize=fs, color=(0, 0, 0))
+    except Exception:
+        pass
+
+
 def embed_typed_field_values_in_pdf(
     pdf_doc,
     typed_fields,
@@ -1533,15 +1604,17 @@ def embed_typed_field_values_in_pdf(
     typed_value_filled_at: dict | None = None,
 ) -> None:
     """
-    Render saved typed/checkbox values onto the PDF using a single text overlay per field.
-    When duplicate DB rows share an AcroForm name, only the most recently saved value is used.
+    Bake saved typed/checkbox values into the PDF.
+
+    True PDF checkboxes use native widget values. Acrobat text-marker boxes (small
+    type-7 fields) get a centered X drawn on the widget rect after the widget is removed.
+    Text fields use native widget values when a matching AcroForm widget exists.
     """
     try:
         from ee_pdf_field_map import canonical_acro
     except ImportError:
         canonical_acro = lambda n: (n or '').strip()  # noqa: E731
 
-    # One entry per acro — newest filled_at wins (else highest field id).
     best_by_acro: dict[str, tuple] = {}
     for tf in typed_fields:
         tid = getattr(tf, 'id', None)
@@ -1567,48 +1640,81 @@ def embed_typed_field_values_in_pdf(
         if prev is None or sort_key >= prev[2]:
             best_by_acro[ak] = (tf, val, sort_key)
 
-    acros_to_render = {
-        canonical_acro((getattr(tf, 'placeholder', '') or '').replace(ACRO_PLACEHOLDER_PREFIX, ''))
-        for tf, _, _ in best_by_acro.values()
-        if (getattr(tf, 'placeholder', '') or '').startswith(ACRO_PLACEHOLDER_PREFIX)
-    }
-
-    # Clear native widget values so viewers do not show stale text under our overlay.
-    for page in pdf_doc:
+    widgets_by_acro: dict[str, tuple] = {}
+    for page_idx, page in enumerate(pdf_doc):
         for widget in page.widgets() or []:
             wname = canonical_acro((widget.field_name or '').strip())
-            if wname not in acros_to_render:
-                continue
-            try:
-                wtype = getattr(widget, 'field_type', None)
-                widget.field_value = 'Off' if wtype in (2, 5) else ''
-                widget.update()
-            except Exception:
-                pass
+            if wname:
+                widgets_by_acro[wname] = (page, widget)
 
-    for tf, val, _sort_key in best_by_acro.values():
-        page_num = int(getattr(tf, 'page_number', 1) or 1) - 1
-        if page_num < 0 or page_num >= len(pdf_doc):
+    handled_acros: set[str] = set()
+    for acro, (tf, val, _sort_key) in best_by_acro.items():
+        hit = widgets_by_acro.get(acro)
+        if not hit:
             continue
-        page = pdf_doc[page_num]
-        rect = viewer_coords_to_pdf_rect(
-            page,
-            getattr(tf, 'x_position', 0) or 0,
-            getattr(tf, 'y_position', 0) or 0,
-            getattr(tf, 'width', 200) or 200,
-            getattr(tf, 'height', 30) or 30,
-        )
-        if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        page, widget = hit
+        if not widget.rect or widget.rect.is_empty:
             continue
-        # Cover the field area so only one layer of text is visible.
+        rect = fitz.Rect(widget.rect)
+        ft = getattr(tf, 'field_type', None) or 'text'
+        wtype = getattr(widget, 'field_type', None)
         try:
-            page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+            if ft == 'checkbox_choice':
+                if val.upper() == 'X':
+                    if wtype in (2, 5):
+                        widget.field_value = checkbox_widget_value(widget, val)
+                        widget.update()
+                        page.delete_widget(widget)
+                    else:
+                        page.delete_widget(widget)
+                        _place_checkmark_in_pdf_rect(page, rect)
+                else:
+                    page.delete_widget(widget)
+            else:
+                page.delete_widget(widget)
+                _place_text_in_pdf_rect(page, rect, val)
+            handled_acros.add(acro)
+        except Exception:
+            pass
+
+    widget_rects = acro_widget_rect_map(pdf_doc)
+    for acro, (tf, val, _sort_key) in best_by_acro.items():
+        if acro in handled_acros:
+            continue
+        page = None
+        rect = None
+        if acro and acro in widget_rects:
+            page_idx, rect = widget_rects[acro]
+            if 0 <= page_idx < len(pdf_doc):
+                page = pdf_doc[page_idx]
+                rect = fitz.Rect(rect)
+        if page is None:
+            page_num = int(getattr(tf, 'page_number', 1) or 1) - 1
+            if page_num < 0 or page_num >= len(pdf_doc):
+                continue
+            page = pdf_doc[page_num]
+            rect = viewer_coords_to_pdf_rect(
+                page,
+                getattr(tf, 'x_position', 0) or 0,
+                getattr(tf, 'y_position', 0) or 0,
+                getattr(tf, 'width', 200) or 200,
+                getattr(tf, 'height', 30) or 30,
+            )
+        if rect is None or rect.is_empty or rect.width <= 0 or rect.height <= 0:
+            continue
+        pad = fitz.Rect(rect)
+        pad.x0 -= 0.5
+        pad.y0 -= 0.5
+        pad.x1 += 0.5
+        pad.y1 += 0.5
+        try:
+            page.draw_rect(pad, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
         except Exception:
             pass
         ft = getattr(tf, 'field_type', None) or 'text'
         if ft == 'checkbox_choice':
             if val.upper() == 'X':
-                _place_text_in_pdf_rect(page, rect, 'X', fontsize=max(8, int(rect.height * 0.85)))
+                _place_checkmark_in_pdf_rect(page, rect)
         else:
             _place_text_in_pdf_rect(page, rect, val)
 

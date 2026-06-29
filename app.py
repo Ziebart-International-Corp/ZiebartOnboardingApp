@@ -35,6 +35,8 @@ from pdf_form_wizard import (
     delete_wizard_state,
     embed_signatures_in_pdf,
     embed_typed_field_values_in_pdf,
+    flatten_pdf_form_widgets,
+    save_pdf_document_copy,
     extract_fields_from_layout,
     is_test_form_signature_value,
     load_wizard_state,
@@ -24272,13 +24274,13 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
         typed_fields = DocumentTypedField.query.filter_by(document_id=document.id).all()
         signature_fields = DocumentSignatureField.query.filter_by(document_id=document.id).all()
 
-        embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields)
         embed_typed_field_values_in_pdf(
             pdf_doc, typed_fields, typed_value_map, typed_value_filled_at,
         )
+        embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields)
+        flatten_pdf_form_widgets(pdf_doc)
 
-        pdf_doc.save(work_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-        pdf_doc.close()
+        save_pdf_document_copy(pdf_doc, work_path)
         return True, work_path
     except Exception as e:
         return False, str(e)
@@ -24800,6 +24802,7 @@ def view_document_completed(doc_id):
         <title>{{ document.name_for_users }} — Completed PDF</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta name="color-scheme" content="dark">
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
             body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; display: flex; flex-direction: column; }
@@ -24809,7 +24812,7 @@ def view_document_completed(doc_id):
             }
             .header-title { font-weight: 600; }
             .header-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-            .header a, .btn-link { color: #fff; text-decoration: none; opacity: 0.9; }
+            .header a { color: #fff; text-decoration: none; opacity: 0.9; }
             .btn {
                 display: inline-block; padding: 10px 18px; background: #FE0100; color: #fff;
                 text-decoration: none; border-radius: 6px; border: none; font-size: 0.95em; cursor: pointer;
@@ -24817,10 +24820,17 @@ def view_document_completed(doc_id):
             .btn-ghost {
                 background: transparent; border: 1px solid rgba(255,255,255,0.25); color: #f2f5fb;
             }
-            .viewer-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0; }
-            .pdf-frame {
-                flex: 1; width: 100%; min-height: calc(100vh - 64px); border: none; background: #1a1f28;
+            .viewer-wrap {
+                flex: 1; overflow: auto; padding: 16px; background: #1a1f28;
+                display: flex; flex-direction: column; align-items: center; gap: 16px;
             }
+            .pdf-page {
+                box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+                background: #fff;
+                max-width: 100%;
+            }
+            .pdf-page canvas { display: block; max-width: 100%; height: auto; }
+            .viewer-status { color: #b7c1d3; padding: 24px; }
             {{ global_theme_css|safe }}
         </style>
     </head>
@@ -24833,13 +24843,52 @@ def view_document_completed(doc_id):
                 <a href="{{ url_for('view_documents') }}" class="btn btn-ghost">← Files</a>
             </div>
         </div>
-        <div class="viewer-wrap">
-            <iframe
-                class="pdf-frame"
-                title="Completed PDF"
-                src="{{ url_for('document_completed_pdf', doc_id=doc_id) }}"
-            ></iframe>
+        <div class="viewer-wrap" id="pdfViewer">
+            <p class="viewer-status" id="pdfStatus">Loading completed PDF…</p>
         </div>
+        <script>
+        (function() {
+            var pdfUrl = {{ url_for('document_completed_pdf', doc_id=doc_id)|tojson }};
+            var viewer = document.getElementById('pdfViewer');
+            var status = document.getElementById('pdfStatus');
+            if (typeof pdfjsLib === 'undefined') {
+                status.textContent = 'PDF viewer failed to load.';
+                return;
+            }
+            pdfjsLib.GlobalWorkerOptions.workerSrc =
+                'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+                status.remove();
+                var renderNext = function(pageNum) {
+                    if (pageNum > pdf.numPages) return Promise.resolve();
+                    return pdf.getPage(pageNum).then(function(page) {
+                        var baseVp = page.getViewport({ scale: 1 });
+                        var maxWidth = Math.min(viewer.clientWidth - 32, 920);
+                        var scale = maxWidth / baseVp.width;
+                        var viewport = page.getViewport({ scale: scale });
+                        var wrap = document.createElement('div');
+                        wrap.className = 'pdf-page';
+                        var canvas = document.createElement('canvas');
+                        canvas.width = viewport.width;
+                        canvas.height = viewport.height;
+                        wrap.appendChild(canvas);
+                        viewer.appendChild(wrap);
+                        return page.render({
+                            canvasContext: canvas.getContext('2d'),
+                            viewport: viewport,
+                            intent: 'display',
+                            renderInteractiveForms: false,
+                            annotationMode: pdfjsLib.AnnotationMode ? pdfjsLib.AnnotationMode.DISABLE : 0
+                        }).promise.then(function() { return renderNext(pageNum + 1); });
+                    });
+                };
+                return renderNext(1);
+            }).catch(function(err) {
+                console.error(err);
+                status.textContent = 'Could not load completed PDF. Try Download PDF or refresh the page.';
+            });
+        })();
+        </script>
     </body>
     </html>
     ''',
@@ -24869,12 +24918,15 @@ def document_completed_pdf(doc_id):
         abort(500)
 
     download_name = _signed_pdf_download_filename(document, current_user.username)
-    return send_file(
+    response = send_file(
         result,
         mimetype='application/pdf',
         as_attachment=False,
         download_name=download_name,
     )
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return response
 
 
 @app.route('/documents/<int:doc_id>/download')
@@ -24931,171 +24983,19 @@ def download_document(doc_id):
                 typed_value_map = {}
             
             if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
-                # Create a temporary signed copy
-                import tempfile
-                import shutil
-                
-                # Create temp file
-                temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
-                os.close(temp_fd)
-                
-                # Copy original PDF
-                shutil.copy2(document.file_path, temp_path)
-                
-                # Embed signatures and typed field values into temp copy
-                pdf_doc = fitz.open(temp_path)
-                
-                # Embed signatures
-                for sig in user_signatures:
-                    if not sig.signature_image:
-                        continue
-                    
-                    # Get signature field
-                    field = DocumentSignatureField.query.get(sig.signature_field_id)
-                    if not field:
-                        continue
-                    
-                    # Embed this signature
-                    try:
-                        from PIL import Image
-                        import base64
-                        from io import BytesIO
-                        
-                        page_num = field.page_number - 1
-                        if page_num < 0 or page_num >= len(pdf_doc):
-                            continue
-                        
-                        page = pdf_doc[page_num]
-                        page_rect = page.rect
-                        page_width = page_rect.width
-                        page_height = page_rect.height
-                        
-                        # Convert coordinates (same logic as embed_signature_in_pdf)
-                        viewer_height_px = 800.0
-                        scale_y = page_height / viewer_height_px
-                        viewer_width_px = viewer_height_px * (page_width / page_height)
-                        scale_x = page_width / viewer_width_px
-                        
-                        x_pdf = field.x_position * scale_x
-                        y_pdf = field.y_position * scale_y
-                        width_pdf = (field.width or 200) * scale_x
-                        height_pdf = (field.height or 80) * scale_y
-                        
-                        # Clamp to page bounds
-                        x_pdf = max(0, min(x_pdf, page_width - width_pdf))
-                        y_pdf = max(0, min(y_pdf, page_height - height_pdf))
-                        
-                        # Decode and embed signature
-                        sig_image_data = base64.b64decode(sig.signature_image)
-                        sig_img = Image.open(BytesIO(sig_image_data))
-                        
-                        img_bytes = BytesIO()
-                        sig_img.save(img_bytes, format='PNG')
-                        img_bytes.seek(0)
-                        
-                        img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
-                        page.insert_image(img_rect, stream=img_bytes.getvalue())
-                    except Exception as e:
-                        print(f"Error embedding signature {sig.id}: {e}")
-                        continue
-                
-                # Embed typed field values as text
-                try:
-                    for typed_field_id, field_value in typed_value_map.items():
-                        try:
-                            typed_field = DocumentTypedField.query.get(typed_field_id)
-                            if not typed_field:
-                                continue
-                            
-                            page_num = typed_field.page_number - 1
-                            if page_num < 0 or page_num >= len(pdf_doc):
-                                continue
-                            
-                            page = pdf_doc[page_num]
-                            page_rect = page.rect
-                            page_width = page_rect.width
-                            page_height = page_rect.height
-                            
-                            # Convert coordinates
-                            viewer_height_px = 800.0
-                            scale_y = page_height / viewer_height_px
-                            viewer_width_px = viewer_height_px * (page_width / page_height)
-                            scale_x = page_width / viewer_width_px
-                            
-                            x_pdf = typed_field.x_position * scale_x
-                            y_pdf = typed_field.y_position * scale_y
-                            width_pdf = (typed_field.width or 200) * scale_x
-                            height_pdf = (typed_field.height or 30) * scale_y
-                            
-                            # Clamp to page bounds
-                            x_pdf = max(0, min(x_pdf, page_width - width_pdf))
-                            y_pdf = max(0, min(y_pdf, page_height - height_pdf))
-                            
-                            # Create text rectangle
-                            text_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
-                            
-                            # Calculate font size
-                            font_size = int(height_pdf * 0.7)
-                            if font_size < 8:
-                                font_size = 8
-                            elif font_size > 72:
-                                font_size = 72
-                            
-                            # Insert text using insert_textbox
-                            try:
-                                if text_rect.width > 0 and text_rect.height > 0:
-                                    rc = page.insert_textbox(
-                                        text_rect,
-                                        field_value,
-                                        fontsize=font_size,
-                                        align=0,
-                                        color=(0, 0, 0),
-                                        render_mode=0
-                                    )
-                                    if rc < 0:
-                                        # Fallback to insert_text
-                                        text_y = y_pdf + font_size + 2
-                                        page.insert_text(
-                                            (x_pdf + 2, text_y),
-                                            field_value[:100],
-                                            fontsize=font_size,
-                                            color=(0, 0, 0)
-                                        )
-                            except Exception as text_error:
-                                # Fallback to insert_text
-                                try:
-                                    text_y = y_pdf + font_size + 2
-                                    page.insert_text(
-                                        (x_pdf + 2, text_y),
-                                        field_value[:100],
-                                        fontsize=font_size,
-                                        color=(0, 0, 0)
-                                    )
-                                except Exception:
-                                    pass
-                        except Exception as e:
-                            print(f"Error embedding typed field {typed_field_id}: {e}")
-                            continue
-                except Exception as e:
-                    print(f"Error processing typed fields: {e}")
-                
-                # Save the PDF
-                pdf_doc.save(temp_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-                pdf_doc.close()
-                
-                # Generate download filename with user's name
+                ok, temp_path = _build_signed_pdf_copy_for_user(document, current_user.username)
+                if not ok:
+                    raise RuntimeError(temp_path)
+
                 base_name = os.path.splitext(document.original_filename)[0]
                 ext = os.path.splitext(document.original_filename)[1]
                 download_filename = f"{base_name}_signed_{current_user.username}{ext}"
-                
-                # Send the signed PDF
-                # Note: Temp file will be cleaned up by OS, but we could implement
-                # a background cleanup task if needed for production
+
                 return send_file(
                     temp_path,
                     as_attachment=True,
                     download_name=download_filename,
-                    mimetype=document.file_type or 'application/pdf'
+                    mimetype=document.file_type or 'application/pdf',
                 )
             else:
                 # No signatures or typed fields, just download original
