@@ -1207,22 +1207,63 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
                         union[2] = max(union[2], r[2])
                         union[3] = max(union[3], r[3])
                     labels = [(c.get('field_label') or '').strip() for c in sub]
+                    labels_lower = [l.lower() for l in labels]
                     if 'Single' in labels and 'Married' in labels:
-                        group_label = 'Marital status'
+                        default_group_label = 'Marital status'
+                        pair_clusters = [sub]
                     elif 'Male' in labels and 'Female' in labels:
-                        group_label = 'Gender'
-                    elif all(l.lower() in ('yes', 'no') for l in labels):
-                        group_label = 'Yes / No'
+                        default_group_label = 'Gender'
+                        pair_clusters = [sub]
+                    elif all(l in ('yes', 'no') for l in labels_lower) and len(sub) > 2:
+                        sub.sort(key=lambda c: c['_rect_pdf'][0])
+                        pair_clusters = [sub[i:i + 2] for i in range(0, len(sub), 2)]
+                        default_group_label = 'Yes / No'
+                    elif all(l in ('yes', 'no') for l in labels_lower):
+                        default_group_label = 'Yes / No'
+                        pair_clusters = [sub]
                     else:
-                        group_label = _label_left_of_rect(lines, union) or _label_above_rect(lines, union) or 'Select one'
-                    group_key = _slug_group_name(group_label, page_num, str(int(round(union[1]))))
-                    for c in sub:
-                        c['field_type'] = 'checkbox_choice'
-                        c['choice_group'] = group_key
-                        opt_label = (c.get('field_label') or 'Option').strip()
-                        c['field_label'] = opt_label[:200]
-                        c['is_required'] = False
-                        _append_marker_field(c)
+                        default_group_label = (
+                            _label_left_of_rect(lines, union)
+                            or _label_above_rect(lines, union)
+                            or 'Select one'
+                        )
+                        pair_clusters = [sub]
+                    for pair in pair_clusters:
+                        if len(pair) < 2:
+                            pair[0]['field_type'] = 'checkbox_choice'
+                            pair[0]['is_required'] = False
+                            _append_marker_field(pair[0])
+                            continue
+                        pair_union = pair[0]['_rect_pdf'][:]
+                        for c in pair[1:]:
+                            r = c['_rect_pdf']
+                            pair_union[0] = min(pair_union[0], r[0])
+                            pair_union[1] = min(pair_union[1], r[1])
+                            pair_union[2] = max(pair_union[2], r[2])
+                            pair_union[3] = max(pair_union[3], r[3])
+                        pair_labels = [(c.get('field_label') or '').strip() for c in pair]
+                        if 'Single' in pair_labels and 'Married' in pair_labels:
+                            gl = 'Marital status'
+                        elif 'Male' in pair_labels and 'Female' in pair_labels:
+                            gl = 'Gender'
+                        elif all(l.lower() in ('yes', 'no') for l in pair_labels):
+                            gl = (
+                                _label_left_of_rect(lines, pair_union)
+                                or _label_above_rect(lines, pair_union)
+                                or default_group_label
+                            )
+                        else:
+                            gl = default_group_label
+                        group_key = _slug_group_name(
+                            gl, page_num, str(int(round(pair_union[1]))) + str(int(round(pair_union[0]))),
+                        )
+                        for c in pair:
+                            c['field_type'] = 'checkbox_choice'
+                            c['choice_group'] = group_key
+                            opt_label = (c.get('field_label') or 'Option').strip()
+                            c['field_label'] = opt_label[:200]
+                            c['is_required'] = False
+                            _append_marker_field(c)
 
         # Race fields that landed as singles — regroup if enough remain
         race_labels = {

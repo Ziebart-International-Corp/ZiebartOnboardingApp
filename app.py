@@ -14693,10 +14693,14 @@ def _load_document_wizard_steps(document, username):
     return steps, signature_fields, typed_fields
 
 
-def _persist_typed_field_for_user(doc_id, typed_field, field_value, username):
+def _persist_typed_field_for_user(doc_id, typed_field, field_value, username, manage_choice_group=True):
     _ensure_document_typed_field_columns()
     cleared_field_ids = []
-    if typed_field.field_type == 'checkbox_choice' and field_value == 'X':
+    if (
+        manage_choice_group
+        and typed_field.field_type == 'checkbox_choice'
+        and field_value == 'X'
+    ):
         cleared_field_ids = clear_choice_group_selections_except(
             doc_id, username, typed_field.choice_group, typed_field.id
         )
@@ -15213,9 +15217,13 @@ def document_wizard_save_field(doc_id):
                                 flash(err, 'error')
                                 session[_document_wizard_index_key(doc_id)] = idx
                                 return redirect(url_for('view_documents', wizard=doc_id))
-                            _persist_typed_field_for_user(doc_id, tf, 'X', username)
+                            _persist_typed_field_for_user(
+                                doc_id, tf, 'X', username, manage_choice_group=False,
+                            )
                         else:
-                            _persist_typed_field_for_user(doc_id, tf, '', username)
+                            _persist_typed_field_for_user(
+                                doc_id, tf, '', username, manage_choice_group=False,
+                            )
             elif step['kind'] == 'signature':
                 if direction != 'skip':
                     if not request.form.get('consent'):
@@ -15278,13 +15286,17 @@ def document_wizard_save_field(doc_id):
             session[_document_wizard_index_key(doc_id)] = max(0, idx - 1)
         elif direction == 'skip' or direction == 'next':
             steps_next, _, _ = _load_document_wizard_steps(document, username)
-            if step.get('kind') == 'gate':
+            cur_idx = next(
+                (i for i, s in enumerate(steps_next) if s['wizard_id'] == wizard_id),
+                idx,
+            )
+            if cur_idx + 1 >= len(steps_next):
+                if wizard_required_steps_complete(steps_next):
+                    session.pop(_document_wizard_index_key(doc_id), None)
+                    return redirect(url_for('view_documents', wizard=doc_id, done=1))
                 next_idx = first_incomplete_wizard_index(steps_next)
-            elif idx + 1 >= len(steps_next):
-                session.pop(_document_wizard_index_key(doc_id), None)
-                return redirect(url_for('view_documents', wizard=doc_id, done=1))
             else:
-                next_idx = idx + 1
+                next_idx = cur_idx + 1
             session[_document_wizard_index_key(doc_id)] = next_idx
         db.session.commit()
     except Exception as e:
