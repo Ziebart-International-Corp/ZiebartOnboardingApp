@@ -427,6 +427,36 @@ def _signed_pdf_download_filename(document, username):
     return f"{base_name}_signed_{username}{ext}"
 
 
+def _send_built_user_pdf(document, username, *, as_attachment=False):
+    """Build filled PDF for a user and return a Flask send_file response, or (None, error)."""
+    from io import BytesIO
+
+    ok, path_or_err = _build_signed_pdf_copy_for_user(document, username)
+    if not ok:
+        return None, path_or_err
+    try:
+        with open(path_or_err, 'rb') as f:
+            data = f.read()
+    finally:
+        try:
+            os.unlink(path_or_err)
+        except OSError:
+            pass
+    if not data:
+        return None, 'Built PDF was empty'
+    buf = BytesIO(data)
+    buf.seek(0)
+    response = send_file(
+        buf,
+        as_attachment=as_attachment,
+        download_name=_signed_pdf_download_filename(document, username),
+        mimetype=document.file_type or 'application/pdf',
+    )
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return response, None
+
+
 def onboarding_base_url():
     """Public base URL for onboarding links in outbound emails."""
     base = (
@@ -21191,7 +21221,11 @@ def _view_documents_impl():
                                 {% endif %}
                             {% endif %}
                             <a href="{{ url_for('download_document', doc_id=doc.id) }}" class="btn">⬇️ Download</a>
-                            <a href="{{ url_for('view_document_embed', doc_id=doc.id, username=current_user.username) }}" class="btn" target="_blank" title="Open in new tab to print">🖨️ Print</a>
+                            {% if doc.has_form_fields %}
+                            <a href="{{ user_document_completed_view_url(doc.id) }}" class="btn" target="_blank" title="View completed form to print">🖨️ Print</a>
+                            {% else %}
+                            <a href="{{ url_for('view_document_embed', doc_id=doc.id) }}" class="btn" target="_blank" title="Open in new tab to print">🖨️ Print</a>
+                            {% endif %}
                         </div>
                     </div>
                     {% endfor %}
@@ -21331,276 +21365,16 @@ def view_document_embed(doc_id, username=None):
         if current_user.is_admin() or username == current_user.username:
             show_signed = True
     
-    # If showing signed version, create a temporary PDF with signatures embedded
-    if show_signed:
-        try:
-            # Get user's signatures for this document
-            try:
-                user_signatures = DocumentSignature.query.filter_by(
-                    document_id=doc_id,
-                    username=username
-                ).all()
-            except Exception as e:
-                # If query fails (columns don't exist), use empty list
-                user_signatures = []
-            
-            # Get typed field values for this user (handle case where table might not exist yet)
-            try:
-                user_typed_values = DocumentTypedFieldValue.query.filter_by(
-                    document_id=doc_id,
-                    username=username
-                ).all()
-                typed_value_map = {val.typed_field_id: val.field_value for val in user_typed_values}
-            except Exception:
-                typed_value_map = {}
-            
-            if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
-                
-                # Create a temporary signed copy
-                import tempfile
-                import shutil
-                
-                # Create temp file
-                temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
-                os.close(temp_fd)
-                
-                # Copy original PDF
-                shutil.copy2(file_path, temp_path)
-                
-                # Embed signatures and typed field values into temp copy
-                pdf_doc = fitz.open(temp_path)
-                
-                # Embed signatures
-                for sig in user_signatures:
-                    if not sig.signature_image:
-                        continue
-                    
-                    # Get signature field (may be None if field was deleted)
-                    field = None
-                    if sig.signature_field_id:
-                        field = DocumentSignatureField.query.get(sig.signature_field_id)
-                    
-                    # Use stored field metadata if field doesn't exist (field was deleted)
-                    # This preserves signatures even when admin deletes and recreates fields
-                    # Safely access new fields (may not exist if database not migrated)
-                    try:
-                        sig_field_page = getattr(sig, 'field_page_number', None)
-                        sig_field_x = getattr(sig, 'field_x_position', None)
-                        sig_field_y = getattr(sig, 'field_y_position', None)
-                        sig_field_width = getattr(sig, 'field_width', None)
-                        sig_field_height = getattr(sig, 'field_height', None)
-                    except Exception:
-                        sig_field_page = None
-                        sig_field_x = None
-                        sig_field_y = None
-                        sig_field_width = None
-                        sig_field_height = None
-                    
-                    if not field:
-                        if not sig_field_page or not sig_field_x or not sig_field_y:
-                            # Missing metadata, skip this signature
-                            continue
-                        # Use stored metadata
-                        page_number = sig_field_page
-                        x_position = sig_field_x
-                        y_position = sig_field_y
-                        width = sig_field_width or 200
-                        height = sig_field_height or 80
-                    else:
-                        # Use current field data (prefer stored metadata if available for consistency)
-                        page_number = sig_field_page if sig_field_page else field.page_number
-                        x_position = sig_field_x if sig_field_x else field.x_position
-                        y_position = sig_field_y if sig_field_y else field.y_position
-                        width = sig_field_width if sig_field_width else (field.width or 200)
-                        height = sig_field_height if sig_field_height else (field.height or 80)
-                    
-                    # Embed this signature
-                    try:
-                        from PIL import Image
-                        import base64
-                        from io import BytesIO
-                        
-                        page_num = page_number - 1
-                        if page_num < 0 or page_num >= len(pdf_doc):
-                            continue
-                        
-                        page = pdf_doc[page_num]
-                        page_rect = page.rect
-                        page_width = page_rect.width
-                        page_height = page_rect.height
-                        
-                        # Convert coordinates (same logic as embed_signature_in_pdf)
-                        viewer_height_px = 800.0
-                        scale_y = page_height / viewer_height_px
-                        viewer_width_px = viewer_height_px * (page_width / page_height)
-                        scale_x = page_width / viewer_width_px
-                        
-                        x_pdf = x_position * scale_x
-                        y_pdf = y_position * scale_y
-                        width_pdf = width * scale_x
-                        height_pdf = height * scale_y
-                        
-                        # Clamp to page bounds
-                        x_pdf = max(0, min(x_pdf, page_width - width_pdf))
-                        y_pdf = max(0, min(y_pdf, page_height - height_pdf))
-                        
-                        # Decode and embed signature
-                        sig_image_data = base64.b64decode(sig.signature_image)
-                        sig_img = Image.open(BytesIO(sig_image_data))
-                        
-                        img_bytes = BytesIO()
-                        sig_img.save(img_bytes, format='PNG')
-                        img_bytes.seek(0)
-                        
-                        img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
-                        page.insert_image(img_rect, stream=img_bytes.getvalue())
-                    except Exception as e:
-                        print(f"Error embedding signature {sig.id}: {e}")
-                        continue
-                
-                # Embed typed field values as text (handle case where table might not exist yet)
-                try:
-                    for typed_field_id, field_value in typed_value_map.items():
-                        try:
-                            typed_field = DocumentTypedField.query.get(typed_field_id)
-                            if not typed_field:
-                                continue
-                            
-                            page_num = typed_field.page_number - 1
-                            if page_num < 0 or page_num >= len(pdf_doc):
-                                continue
-                            
-                            page = pdf_doc[page_num]
-                            page_rect = page.rect
-                            page_width = page_rect.width
-                            page_height = page_rect.height
-                            
-                            # Convert coordinates
-                            viewer_height_px = 800.0
-                            scale_y = page_height / viewer_height_px
-                            viewer_width_px = viewer_height_px * (page_width / page_height)
-                            scale_x = page_width / viewer_width_px
-                            
-                            x_pdf = typed_field.x_position * scale_x
-                            y_pdf = typed_field.y_position * scale_y
-                            width_pdf = (typed_field.width or 200) * scale_x
-                            height_pdf = (typed_field.height or 30) * scale_y
-                            
-                            # Clamp to page bounds
-                            x_pdf = max(0, min(x_pdf, page_width - width_pdf))
-                            y_pdf = max(0, min(y_pdf, page_height - height_pdf))
-                            
-                            # Create text rectangle
-                            text_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
-                            
-                            # Insert text
-                            # Calculate font size based on height (roughly 70% of height)
-                            font_size = int(height_pdf * 0.7)
-                            if font_size < 8:
-                                font_size = 8
-                            elif font_size > 72:
-                                font_size = 72
-                            
-                            # Debug output
-                            print(f"\n=== Typed Field Embedding ===")
-                            print(f"Field ID: {typed_field_id}, Value: {field_value}")
-                            print(f"Browser coords: x={typed_field.x_position:.1f}, y={typed_field.y_position:.1f}")
-                            print(f"PDF coords: x={x_pdf:.2f}, y={y_pdf:.2f}")
-                            print(f"Size: {width_pdf:.2f} x {height_pdf:.2f}, Font: {font_size}")
-                            print(f"Text rect: {text_rect}")
-                            print(f"========================\n")
-                            
-                            # Insert text using insert_textbox (handles wrapping and clipping)
-                            try:
-                                # Ensure text rect is valid
-                                if text_rect.width <= 0 or text_rect.height <= 0:
-                                    print(f"Invalid text rect: {text_rect}, using insert_text instead")
-                                    raise ValueError("Invalid text rectangle")
-                                
-                                rc = page.insert_textbox(
-                                    text_rect,
-                                    field_value,
-                                    fontsize=font_size,
-                                    align=0,  # Left align
-                                    color=(0, 0, 0),  # Black text
-                                    render_mode=0  # Fill text
-                                )
-                                # insert_textbox returns the number of characters that didn't fit
-                                # Negative return means error, 0 means all text fit
-                                if rc < 0:
-                                    print(f"Textbox insertion failed (rc={rc}), trying insert_text")
-                                    # Use insert_text as fallback (single line, no wrapping)
-                                    # Position text at top of box with some padding
-                                    # Use insert_text with proper baseline positioning
-                                    # y_pdf is top of box, need to add font_size for baseline
-                                    # Also add small padding from left edge
-                                    text_y = y_pdf + font_size + 2  # Baseline position with padding
-                                    page.insert_text(
-                                        (x_pdf + 2, text_y),  # Position at baseline with small padding
-                                        field_value[:100],  # Limit to 100 chars to avoid overflow
-                                        fontsize=font_size,
-                                        color=(0, 0, 0)  # Black text
-                                    )
-                                    print(f"Used insert_text fallback at ({x_pdf + 2:.2f}, {text_y:.2f})")
-                                elif rc > 0:
-                                    print(f"Warning: {rc} characters did not fit in textbox")
-                                else:
-                                    print(f"Textbox inserted successfully")
-                            except Exception as textbox_error:
-                                print(f"Textbox insertion error: {textbox_error}, trying insert_text")
-                                # Fallback to insert_text
-                                try:
-                                    # Use insert_text with proper baseline positioning
-                                    # y_pdf is top of box, need to add font_size for baseline
-                                    text_y = y_pdf + font_size + 2  # Baseline position with padding
-                                    page.insert_text(
-                                        (x_pdf + 2, text_y),  # Position at baseline with small padding
-                                        field_value[:100],  # Limit to 100 chars
-                                        fontsize=font_size,
-                                        color=(0, 0, 0)  # Black text
-                                    )
-                                    print(f"Used insert_text fallback in exception handler at ({x_pdf + 2:.2f}, {text_y:.2f})")
-                                except Exception as text_error:
-                                    print(f"Text insertion also failed: {text_error}")
-                                    import traceback
-                                    traceback.print_exc()
-                                    raise
-                        except Exception as e:
-                            print(f"Error embedding typed field {typed_field_id}: {e}")
-                            continue
-                except Exception as e:
-                    print(f"Error processing typed fields: {e}")
-                    # Continue without typed fields
-                
-                # Save the PDF with all modifications
-                pdf_doc.save(temp_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-                pdf_doc.close()
-                
-                # Verify the file was saved
-                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                    raise Exception("Failed to save PDF with typed fields")
-                
-                # Serve the temp file
-                file_type = document.file_type or 'application/pdf'
-                response = send_file(
-                    temp_path,
-                    as_attachment=False,
-                    mimetype=file_type
-                )
-                response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-                response.headers['Content-Security-Policy'] = "frame-ancestors 'self'"
-                # Prevent caching to ensure fresh PDF with typed fields
-                response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-                response.headers['Pragma'] = 'no-cache'
-                response.headers['Expires'] = '0'
-                
-                return response
-        except Exception as e:
-            print(f"Error creating signed copy: {e}")
-            import traceback
-            traceback.print_exc()
-            # Fall through to serve original
-    
+    if show_signed and FITZ_AVAILABLE:
+        response, err = _send_built_user_pdf(document, username, as_attachment=False)
+        if response:
+            response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+            response.headers['Content-Security-Policy'] = "frame-ancestors 'self'"
+            return response
+        app.logger.warning(
+            'signed embed build failed doc_id=%s user=%s: %s', doc_id, username, err,
+        )
+
     # Serve original blank document (file_path resolved above)
     file_type = document.file_type or 'application/octet-stream'
     
@@ -24234,7 +24008,8 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
     """
     if not FITZ_AVAILABLE:
         return False, "PyMuPDF not available"
-    if not document or not document.file_path or not os.path.exists(document.file_path):
+    pdf_source = resolve_document_file_path(document)
+    if not pdf_source:
         return False, "Original document file not found"
 
     import tempfile
@@ -24264,11 +24039,11 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
         if output_path:
             work_path = str(output_path)
             Path(work_path).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(document.file_path, work_path)
+            shutil.copy2(pdf_source, work_path)
         else:
             temp_fd, work_path = tempfile.mkstemp(suffix='.pdf')
             os.close(temp_fd)
-            shutil.copy2(document.file_path, work_path)
+            shutil.copy2(pdf_source, work_path)
 
         pdf_doc = fitz.open(work_path)
 
@@ -24288,9 +24063,16 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
                 remaining_widgets, document.id, username,
             )
 
-        flat_doc = rasterize_pdf_pages(pdf_doc)
-        pdf_doc.close()
-        save_pdf_document_copy(flat_doc, work_path)
+        try:
+            flat_doc = rasterize_pdf_pages(pdf_doc)
+            pdf_doc.close()
+            save_pdf_document_copy(flat_doc, work_path)
+        except Exception as raster_err:
+            app.logger.warning(
+                'rasterize failed doc_id=%s user=%s, saving vector PDF: %s',
+                document.id, username, raster_err,
+            )
+            save_pdf_document_copy(pdf_doc, work_path)
         return True, work_path
     except Exception as e:
         return False, str(e)
@@ -24918,26 +24700,16 @@ def document_completed_pdf(doc_id):
         abort(404)
     if not _user_can_fill_document(document, current_user.username):
         abort(403)
-    if not os.path.exists(document.file_path):
+    if not resolve_document_file_path(document):
         abort(404)
 
-    ok, result = _build_signed_pdf_copy_for_user(document, current_user.username)
-    if not ok:
+    response, err = _send_built_user_pdf(document, current_user.username, as_attachment=False)
+    if not response:
         app.logger.warning(
-            'completed PDF build failed doc_id=%s user=%s: %s',
-            doc_id, current_user.username, result,
+            'completed PDF stream failed doc_id=%s user=%s: %s',
+            doc_id, current_user.username, err,
         )
         abort(500)
-
-    download_name = _signed_pdf_download_filename(document, current_user.username)
-    response = send_file(
-        result,
-        mimetype='application/pdf',
-        as_attachment=False,
-        download_name=download_name,
-    )
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
     return response
 
 
@@ -24969,7 +24741,7 @@ def download_document(doc_id):
             return redirect(url_for('dashboard'))
     
     # Check if file exists
-    if not os.path.exists(document.file_path):
+    if not resolve_document_file_path(document):
         flash('Document not found on server.', 'error')
         return redirect(url_for('dashboard'))
     
@@ -24995,20 +24767,17 @@ def download_document(doc_id):
                 typed_value_map = {}
             
             if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
-                ok, temp_path = _build_signed_pdf_copy_for_user(document, current_user.username)
-                if not ok:
-                    raise RuntimeError(temp_path)
-
-                base_name = os.path.splitext(document.original_filename)[0]
-                ext = os.path.splitext(document.original_filename)[1]
-                download_filename = f"{base_name}_signed_{current_user.username}{ext}"
-
-                return send_file(
-                    temp_path,
-                    as_attachment=True,
-                    download_name=download_filename,
-                    mimetype=document.file_type or 'application/pdf',
+                response, err = _send_built_user_pdf(
+                    document, current_user.username, as_attachment=True,
                 )
+                if response:
+                    return response
+                app.logger.error(
+                    'download signed PDF failed doc_id=%s user=%s: %s',
+                    doc_id, current_user.username, err,
+                )
+                flash('Could not generate your filled PDF. Please try again or use View PDF from the form.', 'error')
+                return redirect(url_for('view_documents'))
             else:
                 # No signatures or typed fields, just download original
                 return send_file(
