@@ -8,10 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'scripts'))
 
-from ee_pdf_field_map import canonical_acro
+from ee_pdf_field_map import EE_DOCUMENT_ID, EE_TRUTH_PDF_REL_PATH, canonical_acro
 from rename_ee_pdf_fields import rename_pdf_fields
 
-DOC_ID = 14
+DOC_ID = EE_DOCUMENT_ID
+DEFAULT_PDF = ROOT / EE_TRUTH_PDF_REL_PATH
 
 
 def sync_document_fields(doc_id: int = DOC_ID, pdf_path: Path | None = None) -> None:
@@ -25,7 +26,7 @@ def sync_document_fields(doc_id: int = DOC_ID, pdf_path: Path | None = None) -> 
         if not document:
             raise SystemExit(f'Document {doc_id} not found')
 
-        path = pdf_path or Path(_document_pdf_path(document) or '')
+        path = pdf_path or Path(_document_pdf_path(document) or '') or DEFAULT_PDF
         if not path.is_file():
             raise SystemExit(f'PDF not found: {path}')
 
@@ -101,6 +102,23 @@ def sync_document_fields(doc_id: int = DOC_ID, pdf_path: Path | None = None) -> 
                 sf.field_label = spec['field_label']
 
         db.session.flush()
+        valid_acros = {
+            canonical_acro((s.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, ''))
+            for s in (specs.get('typed_fields') or [])
+        }
+        from models import DocumentTypedFieldValue
+        all_typed = DocumentTypedField.query.filter_by(document_id=doc_id).all()
+        seen_acro: set[str] = set()
+        for tf in sorted(all_typed, key=lambda t: t.id or 0):
+            ak = canonical_acro((tf.placeholder or '').replace(ACRO_PLACEHOLDER_PREFIX, ''))
+            if ak not in valid_acros or ak in seen_acro:
+                reason = 'orphan' if ak not in valid_acros else 'duplicate'
+                print(f'  Remove {reason} field: {ak} (id={tf.id})')
+                DocumentTypedFieldValue.query.filter_by(typed_field_id=tf.id).delete()
+                db.session.delete(tf)
+                continue
+            seen_acro.add(ak)
+
         all_typed = DocumentTypedField.query.filter_by(document_id=doc_id).all()
         if repair_employee_information_field_groups(all_typed):
             print('  Repaired choice_group assignments')

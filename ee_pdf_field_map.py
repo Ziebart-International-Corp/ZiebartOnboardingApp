@@ -1,12 +1,17 @@
 """
 Employee Information Form (doc 14) — canonical AcroForm field names and wizard config.
 
+Document of truth (fillable PDF template):
+  uploads/20260626_172617_EE_Information_Form_Editable.pdf
+
 All PDF widgets use semantic names (e.g. Employee_Email, Dependent_1_Name).
 Legacy Acrobat names are listed in EE_PDF_FIELD_RENAMES for PDF/DB migration.
 """
 from __future__ import annotations
 
-# old widget name -> canonical name (apply to PDF + DB placeholders)
+EE_DOCUMENT_ID = 14
+EE_TRUTH_PDF_FILENAME = '20260626_172617_EE_Information_Form_Editable.pdf'
+EE_TRUTH_PDF_REL_PATH = f'uploads/{EE_TRUTH_PDF_FILENAME}'
 EE_PDF_FIELD_RENAMES: dict[str, str] = {
     # Personal
     'Hire Date': 'Employee_Hire_Date',

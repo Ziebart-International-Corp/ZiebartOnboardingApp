@@ -7,6 +7,8 @@ from pathlib import Path
 
 import fitz
 
+from ee_pdf_field_map import EE_TRUTH_PDF_REL_PATH
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -52,7 +54,7 @@ def rename_pdf_fields(pdf_path: Path, *, backup: bool = True) -> tuple[int, list
 
 
 if __name__ == '__main__':
-    default = ROOT / 'uploads' / '20260626_172617_EE_Information_Form_Editable.pdf'
+    default = ROOT / EE_TRUTH_PDF_REL_PATH
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else default
     count, lines = rename_pdf_fields(path)
     print(f'Renamed {count} field(s) in {path}')
