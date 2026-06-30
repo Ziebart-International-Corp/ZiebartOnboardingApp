@@ -1737,33 +1737,59 @@ def embed_typed_field_values_in_pdf(
             _place_text_in_pdf_rect(page, rect, val)
 
 
-def _signature_image_rect(pdf_doc, page_idx: int, widget_rect, field) -> fitz.Rect | None:
-    """
-    Target rect for a drawn signature image.
+# Gap between signature image bottom and the printed underline (PDF points).
+_SIGNATURE_LINE_GAP = 2.0
+# Keep image ink above printed labels on the EE form (page text bbox + padding).
+_EE_EMPLOYEE_SIG_MIN_TOP = 619.0
+_EE_MANAGER_SIG_MIN_TOP = 689.0
 
-    Acrobat signature widgets often report a short widget.rect while the visible
-    box (and DB sync geometry) is taller — use the union of PDF widget + DB field.
+
+def _signature_image_rect(
+    pdf_doc,
+    page_idx: int,
+    widget_rect,
+    field,
+    *,
+    role: str | None = None,
+) -> fitz.Rect | None:
     """
-    rects: list[fitz.Rect] = []
-    if widget_rect is not None and not widget_rect.is_empty:
-        rects.append(fitz.Rect(widget_rect))
-    if field is not None and 0 <= page_idx < len(pdf_doc):
+    Target rect for a drawn signature image — above the printed underline.
+
+    Uses field.height only as a desired signing height, capped so ink does not
+    cover the underline or the label row below the previous signature.
+    """
+    if widget_rect is None or widget_rect.is_empty:
+        if field is None or page_idx < 0 or page_idx >= len(pdf_doc):
+            return None
         page = pdf_doc[page_idx]
-        rects.append(
-            viewer_coords_to_pdf_rect(
-                page,
-                getattr(field, 'x_position', 0) or 0,
-                getattr(field, 'y_position', 0) or 0,
-                getattr(field, 'width', 200) or 200,
-                getattr(field, 'height', 50) or 50,
-            )
+        return viewer_coords_to_pdf_rect(
+            page,
+            getattr(field, 'x_position', 0) or 0,
+            getattr(field, 'y_position', 0) or 0,
+            getattr(field, 'width', 200) or 200,
+            getattr(field, 'height', 50) or 50,
         )
-    if not rects:
-        return None
-    out = rects[0]
-    for rect in rects[1:]:
-        out |= rect
-    return out
+
+    base = fitz.Rect(widget_rect)
+    line_top = base.y0 + 0.8
+    image_bottom = line_top - _SIGNATURE_LINE_GAP
+
+    page = pdf_doc[page_idx]
+    scale_y = page.rect.height / SIGN_VIEWER_HEIGHT
+    desired_height = max(base.height * 3.0, 24.0)
+    if field is not None:
+        desired_height = max(
+            desired_height,
+            float(getattr(field, 'height', 50) or 50) * scale_y,
+        )
+
+    min_top = _EE_EMPLOYEE_SIG_MIN_TOP
+    if role == 'manager':
+        min_top = _EE_MANAGER_SIG_MIN_TOP
+
+    image_height = min(desired_height, max(8.0, image_bottom - min_top))
+    image_top = image_bottom - image_height
+    return fitz.Rect(base.x0, image_top, base.x1, image_bottom)
 
 
 def embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields) -> None:
@@ -1813,12 +1839,11 @@ def embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields) -> None:
         if page_idx is None or page_idx < 0 or page_idx >= len(pdf_doc):
             continue
         page = pdf_doc[page_idx]
-        img_rect = _signature_image_rect(pdf_doc, page_idx, widget_rect, field)
+        img_rect = _signature_image_rect(pdf_doc, page_idx, widget_rect, field, role=role)
         if not img_rect or img_rect.is_empty:
             continue
 
         try:
-            page.draw_rect(img_rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
             from PIL import Image
             sig_image_data = base64.standard_b64decode(sig.signature_image)
             sig_img = Image.open(BytesIO(sig_image_data))
