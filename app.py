@@ -417,6 +417,11 @@ def user_sign_document_classic_url(doc_id):
 
 
 @app.template_global()
+def user_document_completed_print_url(doc_id):
+    return url_for('print_document_completed', doc_id=doc_id)
+
+
+@app.template_global()
 def user_document_completed_view_url(doc_id):
     return url_for('view_document_completed', doc_id=doc_id)
 
@@ -14666,6 +14671,213 @@ def _user_can_fill_document(document, username, is_admin=None):
     ).first() is not None
 
 
+def _staff_can_view_user_documents(target_username):
+    """Org-wide admin or store-scoped staff may view another user's signed documents."""
+    try:
+        if not current_user.is_authenticated:
+            return False
+    except Exception:
+        return False
+    if current_user.username == target_username:
+        return True
+    if current_user.is_admin() and not uses_manager_console_scope():
+        return True
+    if current_user.is_admin() or current_user.is_manager():
+        store_id = get_current_user_store_id()
+        if store_id is None:
+            return False
+        nh = NewHire.query.filter(
+            NewHire.username == target_username,
+            NewHire.store_id == store_id,
+            NewHire.status != 'removed',
+        ).first()
+        return nh is not None
+    return False
+
+
+def _staff_new_hire_details_url(username):
+    if uses_manager_console_scope():
+        return url_for('manager_view_new_hire_details', username=username)
+    return url_for('view_new_hire_details', username=username)
+
+
+def _render_completed_pdf_viewer(document, doc_id, *, pdf_url, download_url, print_url='', header_actions_html=''):
+    """Shared PDF.js viewer for user and staff completed-document pages."""
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <title>{{ document.name_for_users }} — Completed PDF</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="dark">
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; display: flex; flex-direction: column; }
+            .header {
+                background: #000; padding: 12px 20px; display: flex; flex-wrap: wrap;
+                justify-content: space-between; align-items: center; gap: 12px;
+            }
+            .header-title { font-weight: 600; }
+            .header-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+            .header a { color: #fff; text-decoration: none; opacity: 0.9; }
+            .btn {
+                display: inline-block; padding: 10px 18px; background: #FE0100; color: #fff;
+                text-decoration: none; border-radius: 6px; border: none; font-size: 0.95em; cursor: pointer;
+            }
+            .btn-ghost {
+                background: transparent; border: 1px solid rgba(255,255,255,0.25); color: #f2f5fb;
+            }
+            .viewer-wrap {
+                flex: 1; overflow: auto; padding: 16px; background: #1a1f28;
+                display: flex; flex-direction: column; align-items: center; gap: 16px;
+            }
+            .pdf-page {
+                box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+                background: #fff;
+                max-width: 100%;
+            }
+            .pdf-page canvas { display: block; max-width: 100%; height: auto; }
+            .viewer-status { color: #b7c1d3; padding: 24px; }
+            {{ global_theme_css|safe }}
+        </style>
+    </head>
+    <body class="user-app-shell">
+        <div class="header">
+            <span class="header-title">{{ document.name_for_users }}</span>
+            <div class="header-actions">
+                <a href="{{ download_url }}" class="btn">Download PDF</a>
+                {% if print_url %}
+                <a href="{{ print_url }}" class="btn btn-ghost" target="_blank" rel="noopener" title="Open print dialog for the completed PDF">Print</a>
+                {% endif %}
+                {{ header_actions_html|safe }}
+            </div>
+        </div>
+        <div class="viewer-wrap" id="pdfViewer"><!-- completed-view:v3 --></div>
+        <script>
+        (function() {
+            var pdfUrl = {{ pdf_url|tojson }} + '?t=' + Date.now();
+            var printPageUrl = {{ print_url|tojson }};
+            if (printPageUrl) {
+                window.addEventListener('keydown', function(e) {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+                        e.preventDefault();
+                        window.open(printPageUrl, '_blank', 'noopener');
+                    }
+                });
+            }
+            var viewer = document.getElementById('pdfViewer');
+            var status = document.createElement('p');
+            status.className = 'viewer-status';
+            status.id = 'pdfStatus';
+            status.textContent = 'Loading completed PDF…';
+            viewer.appendChild(status);
+            if (typeof pdfjsLib === 'undefined') {
+                status.textContent = 'PDF viewer failed to load.';
+                return;
+            }
+            pdfjsLib.GlobalWorkerOptions.workerSrc =
+                'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+                status.remove();
+                var renderNext = function(pageNum) {
+                    if (pageNum > pdf.numPages) return Promise.resolve();
+                    return pdf.getPage(pageNum).then(function(page) {
+                        var baseVp = page.getViewport({ scale: 1 });
+                        var maxWidth = Math.min(viewer.clientWidth - 32, 920);
+                        var scale = maxWidth / baseVp.width;
+                        var viewport = page.getViewport({ scale: scale });
+                        var wrap = document.createElement('div');
+                        wrap.className = 'pdf-page';
+                        var canvas = document.createElement('canvas');
+                        canvas.width = viewport.width;
+                        canvas.height = viewport.height;
+                        wrap.appendChild(canvas);
+                        viewer.appendChild(wrap);
+                        return page.render({
+                            canvasContext: canvas.getContext('2d'),
+                            viewport: viewport,
+                            intent: 'display',
+                            renderInteractiveForms: false,
+                            annotationMode: pdfjsLib.AnnotationMode ? pdfjsLib.AnnotationMode.DISABLE : 0
+                        }).promise.then(function() { return renderNext(pageNum + 1); });
+                    });
+                };
+                return renderNext(1);
+            }).catch(function(err) {
+                console.error(err);
+                status.textContent = 'Could not load completed PDF. Try Download PDF or refresh the page.';
+            });
+        })();
+        </script>
+    </body>
+    </html>
+    ''',
+        document=document,
+        doc_id=doc_id,
+        pdf_url=pdf_url,
+        download_url=download_url,
+        print_url=print_url,
+        header_actions_html=header_actions_html,
+    )
+
+
+def _render_completed_pdf_print_page(document, pdf_url):
+    """Minimal page that embeds the built PDF and opens the browser print dialog."""
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <title>Print — {{ document.name_for_users }}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #fff; }
+            .print-frame {
+                position: fixed; inset: 0; width: 100%; height: 100%; border: 0;
+            }
+            .print-hint {
+                position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+                background: rgba(0, 0, 0, 0.8); color: #fff; padding: 10px 18px;
+                border-radius: 6px; font-family: Arial, sans-serif; font-size: 14px; z-index: 2;
+            }
+            @media print { .print-hint { display: none !important; } }
+        </style>
+    </head>
+    <body>
+        <p class="print-hint" id="printHint">Loading PDF for printing…</p>
+        <iframe class="print-frame" id="pdfPrintFrame" src="{{ pdf_url }}"></iframe>
+        <script>
+        (function() {
+            var frame = document.getElementById('pdfPrintFrame');
+            var hint = document.getElementById('printHint');
+            var printed = false;
+            function tryPrint() {
+                if (printed) return;
+                try {
+                    if (frame.contentWindow) {
+                        frame.contentWindow.focus();
+                        frame.contentWindow.print();
+                        printed = true;
+                        hint.textContent = 'If the print dialog did not open, press Ctrl+P in this tab.';
+                    }
+                } catch (e) {
+                    hint.textContent = 'Press Ctrl+P to print the PDF.';
+                }
+            }
+            frame.addEventListener('load', function() {
+                hint.textContent = 'Opening print dialog…';
+                setTimeout(tryPrint, 600);
+            });
+            setTimeout(function() {
+                if (!printed) tryPrint();
+            }, 2500);
+        })();
+        </script>
+    </body>
+    </html>
+    ''', document=document, pdf_url=pdf_url)
+
+
 def _document_wizard_user_defaults(username):
     user_display_name = username
     user_initials = (username[:2] if len(username) >= 2 else username).upper()
@@ -21222,7 +21434,7 @@ def _view_documents_impl():
                             {% endif %}
                             <a href="{{ url_for('download_document', doc_id=doc.id) }}" class="btn">⬇️ Download</a>
                             {% if doc.has_form_fields %}
-                            <a href="{{ user_document_completed_view_url(doc.id) }}" class="btn" target="_blank" title="View completed form to print">🖨️ Print</a>
+                            <a href="{{ user_document_completed_print_url(doc.id) }}" class="btn" target="_blank" title="Print completed form">🖨️ Print</a>
                             {% else %}
                             <a href="{{ url_for('view_document_embed', doc_id=doc.id) }}" class="btn" target="_blank" title="Open in new tab to print">🖨️ Print</a>
                             {% endif %}
@@ -24587,108 +24799,106 @@ def view_document_completed(doc_id):
         flash('Preview is only available for PDF documents.', 'error')
         return redirect(url_for('view_documents'))
 
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <title>{{ document.name_for_users }} — Completed PDF</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta name="color-scheme" content="dark">
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
-            body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; display: flex; flex-direction: column; }
-            .header {
-                background: #000; padding: 12px 20px; display: flex; flex-wrap: wrap;
-                justify-content: space-between; align-items: center; gap: 12px;
-            }
-            .header-title { font-weight: 600; }
-            .header-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-            .header a { color: #fff; text-decoration: none; opacity: 0.9; }
-            .btn {
-                display: inline-block; padding: 10px 18px; background: #FE0100; color: #fff;
-                text-decoration: none; border-radius: 6px; border: none; font-size: 0.95em; cursor: pointer;
-            }
-            .btn-ghost {
-                background: transparent; border: 1px solid rgba(255,255,255,0.25); color: #f2f5fb;
-            }
-            .viewer-wrap {
-                flex: 1; overflow: auto; padding: 16px; background: #1a1f28;
-                display: flex; flex-direction: column; align-items: center; gap: 16px;
-            }
-            .pdf-page {
-                box-shadow: 0 4px 24px rgba(0,0,0,0.45);
-                background: #fff;
-                max-width: 100%;
-            }
-            .pdf-page canvas { display: block; max-width: 100%; height: auto; }
-            .viewer-status { color: #b7c1d3; padding: 24px; }
-            {{ global_theme_css|safe }}
-        </style>
-    </head>
-    <body class="user-app-shell">
-        <div class="header">
-            <span class="header-title">{{ document.name_for_users }}</span>
-            <div class="header-actions">
-                <a href="{{ url_for('download_document', doc_id=doc_id) }}" class="btn">Download PDF</a>
-                <a href="{{ url_for('view_documents', wizard=doc_id) }}" class="btn btn-ghost">Edit form</a>
-                <a href="{{ url_for('view_documents') }}" class="btn btn-ghost">← Files</a>
-            </div>
-        </div>
-        <div class="viewer-wrap" id="pdfViewer"><!-- completed-view:v3 --></div>
-        <script>
-        (function() {
-            var pdfUrl = {{ url_for('document_completed_pdf', doc_id=doc_id)|tojson }} + '?t=' + Date.now();
-            var viewer = document.getElementById('pdfViewer');
-            var status = document.createElement('p');
-            status.className = 'viewer-status';
-            status.id = 'pdfStatus';
-            status.textContent = 'Loading completed PDF…';
-            viewer.appendChild(status);
-            if (typeof pdfjsLib === 'undefined') {
-                status.textContent = 'PDF viewer failed to load.';
-                return;
-            }
-            pdfjsLib.GlobalWorkerOptions.workerSrc =
-                'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-            pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
-                status.remove();
-                var renderNext = function(pageNum) {
-                    if (pageNum > pdf.numPages) return Promise.resolve();
-                    return pdf.getPage(pageNum).then(function(page) {
-                        var baseVp = page.getViewport({ scale: 1 });
-                        var maxWidth = Math.min(viewer.clientWidth - 32, 920);
-                        var scale = maxWidth / baseVp.width;
-                        var viewport = page.getViewport({ scale: scale });
-                        var wrap = document.createElement('div');
-                        wrap.className = 'pdf-page';
-                        var canvas = document.createElement('canvas');
-                        canvas.width = viewport.width;
-                        canvas.height = viewport.height;
-                        wrap.appendChild(canvas);
-                        viewer.appendChild(wrap);
-                        return page.render({
-                            canvasContext: canvas.getContext('2d'),
-                            viewport: viewport,
-                            intent: 'display',
-                            renderInteractiveForms: false,
-                            annotationMode: pdfjsLib.AnnotationMode ? pdfjsLib.AnnotationMode.DISABLE : 0
-                        }).promise.then(function() { return renderNext(pageNum + 1); });
-                    });
-                };
-                return renderNext(1);
-            }).catch(function(err) {
-                console.error(err);
-                status.textContent = 'Could not load completed PDF. Try Download PDF or refresh the page.';
-            });
-        })();
-        </script>
-    </body>
-    </html>
-    ''',
-        document=document,
-        doc_id=doc_id,
+    pdf_url = url_for('document_completed_pdf', doc_id=doc_id)
+    download_url = url_for('document_completed_pdf', doc_id=doc_id, download=1)
+    print_url = url_for('print_document_completed', doc_id=doc_id)
+    header_actions_html = (
+        f'<a href="{url_for("view_documents", wizard=doc_id)}" class="btn btn-ghost">Edit form</a>'
+        f'<a href="{url_for("view_documents")}" class="btn btn-ghost">← Files</a>'
     )
+    return _render_completed_pdf_viewer(
+        document, doc_id,
+        pdf_url=pdf_url, download_url=download_url, print_url=print_url,
+        header_actions_html=header_actions_html,
+    )
+
+
+@app.route('/admin/documents/<int:doc_id>/user/<username>/completed')
+@manager_required
+def staff_view_user_document_completed(doc_id, username):
+    """Staff read-only view of a user's completed PDF (same flat filled copy as the employee sees)."""
+    document = Document.query.get(doc_id)
+    if not document:
+        abort(404)
+    if not _staff_can_view_user_documents(username):
+        abort(403)
+    if not resolve_document_file_path(document):
+        abort(404)
+
+    is_pdf = (
+        document.file_type == 'application/pdf'
+        or (document.original_filename or '').lower().endswith('.pdf')
+    )
+    if not is_pdf:
+        flash('Preview is only available for PDF documents.', 'error')
+        return redirect(_staff_new_hire_details_url(username))
+
+    pdf_url = url_for('staff_user_document_completed_pdf', doc_id=doc_id, username=username)
+    download_url = url_for(
+        'staff_user_document_completed_pdf', doc_id=doc_id, username=username, download=1,
+    )
+    print_url = url_for('staff_print_user_document_completed', doc_id=doc_id, username=username)
+    header_actions_html = (
+        f'<a href="{_staff_new_hire_details_url(username)}" class="btn btn-ghost">← Back to {username}</a>'
+    )
+    return _render_completed_pdf_viewer(
+        document, doc_id,
+        pdf_url=pdf_url, download_url=download_url, print_url=print_url,
+        header_actions_html=header_actions_html,
+    )
+
+
+@app.route('/admin/documents/<int:doc_id>/user/<username>/print')
+@manager_required
+def staff_print_user_document_completed(doc_id, username):
+    """Open the built PDF in a print-ready page for staff."""
+    document = Document.query.get(doc_id)
+    if not document:
+        abort(404)
+    if not _staff_can_view_user_documents(username):
+        abort(403)
+    if not resolve_document_file_path(document):
+        abort(404)
+    pdf_url = url_for('staff_user_document_completed_pdf', doc_id=doc_id, username=username)
+    return _render_completed_pdf_print_page(document, pdf_url)
+
+
+@app.route('/documents/<int:doc_id>/print-completed')
+@login_required
+def print_document_completed(doc_id):
+    """Open the built PDF in a print-ready page for the current user."""
+    document = Document.query.get(doc_id)
+    if not document:
+        abort(404)
+    if not _user_can_fill_document(document, current_user.username):
+        abort(403)
+    if not resolve_document_file_path(document):
+        abort(404)
+    pdf_url = url_for('document_completed_pdf', doc_id=doc_id)
+    return _render_completed_pdf_print_page(document, pdf_url)
+
+
+@app.route('/admin/documents/<int:doc_id>/user/<username>/completed-pdf')
+@manager_required
+def staff_user_document_completed_pdf(doc_id, username):
+    """Stream a user's completed PDF for staff (inline view or download)."""
+    document = Document.query.get(doc_id)
+    if not document:
+        abort(404)
+    if not _staff_can_view_user_documents(username):
+        abort(403)
+    if not resolve_document_file_path(document):
+        abort(404)
+
+    as_attachment = request.args.get('download', '').lower() in ('1', 'true', 'yes')
+    response, err = _send_built_user_pdf(document, username, as_attachment=as_attachment)
+    if not response:
+        app.logger.warning(
+            'staff completed PDF failed doc_id=%s user=%s: %s',
+            doc_id, username, err,
+        )
+        abort(500)
+    return response
 
 
 @app.route('/documents/<int:doc_id>/completed-pdf')
@@ -24703,7 +24913,10 @@ def document_completed_pdf(doc_id):
     if not resolve_document_file_path(document):
         abort(404)
 
-    response, err = _send_built_user_pdf(document, current_user.username, as_attachment=False)
+    as_attachment = request.args.get('download', '').lower() in ('1', 'true', 'yes')
+    response, err = _send_built_user_pdf(
+        document, current_user.username, as_attachment=as_attachment,
+    )
     if not response:
         app.logger.warning(
             'completed PDF stream failed doc_id=%s user=%s: %s',
@@ -24766,7 +24979,8 @@ def download_document(doc_id):
             except Exception:
                 typed_value_map = {}
             
-            if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
+            has_form_fields = _document_configured_field_count(doc_id) > 0
+            if FITZ_AVAILABLE and (has_form_fields or user_signatures or typed_value_map):
                 response, err = _send_built_user_pdf(
                     document, current_user.username, as_attachment=True,
                 )
@@ -24778,25 +24992,19 @@ def download_document(doc_id):
                 )
                 flash('Could not generate your filled PDF. Please try again or use View PDF from the form.', 'error')
                 return redirect(url_for('view_documents'))
-            else:
-                # No signatures or typed fields, just download original
-                return send_file(
-                    document.file_path,
-                    as_attachment=True,
-                    download_name=document.original_filename,
-                    mimetype=document.file_type or 'application/octet-stream'
-                )
-        except Exception as e:
-            print(f"Error generating signed PDF: {e}")
-            import traceback
-            traceback.print_exc()
-            # Fall through to download original
             return send_file(
-                document.file_path,
+                resolve_document_file_path(document),
                 as_attachment=True,
                 download_name=document.original_filename,
                 mimetype=document.file_type or 'application/octet-stream'
             )
+        except Exception as e:
+            app.logger.exception(
+                'Error generating signed PDF doc_id=%s user=%s: %s',
+                doc_id, current_user.username, e,
+            )
+            flash('Could not generate your filled PDF. Please try again or use View PDF from the form.', 'error')
+            return redirect(url_for('view_documents'))
     else:
         # Admin downloads original document
         return send_file(
@@ -25551,235 +25759,47 @@ def view_form_signatures(doc_id):
 
 
 @app.route('/admin/documents/<int:doc_id>/signed-copy/<username>')
-@admin_required
+@manager_required
 def download_signed_document(doc_id, username):
-    """Download a signed copy of a document for a specific user"""
+    """Download a signed copy of a document for a specific user (staff or self)."""
     document = Document.query.get(doc_id)
     if not document:
         flash('Document not found.', 'error')
         return redirect(url_for('manage_documents'))
-    
-    # On error, return to form signatures if they were trying to print (inline); else signed-copies page
+
+    if not _staff_can_view_user_documents(username):
+        abort(403)
+
     def _error_redirect():
-        return redirect(url_for('view_form_signatures', doc_id=doc_id)) if request.args.get('inline') else redirect(url_for('view_signed_documents', doc_id=doc_id))
-    
-    # Check if file exists
-    if not os.path.exists(document.file_path):
+        if _staff_can_view_user_documents(username):
+            return redirect(_staff_new_hire_details_url(username))
+        if request.args.get('inline'):
+            return redirect(url_for('view_form_signatures', doc_id=doc_id))
+        return redirect(url_for('view_signed_documents', doc_id=doc_id))
+
+    if not resolve_document_file_path(document):
         flash('File not found on server.', 'error')
         return _error_redirect()
-    
-    # Check if document is a PDF
+
     is_pdf = document.file_type == 'application/pdf' or document.original_filename.lower().endswith('.pdf')
-    
     if not is_pdf:
         flash('Signed copies can only be generated for PDF documents.', 'error')
         return _error_redirect()
-    
-    # Get all signatures by this user for this document
-    try:
-        user_signatures = DocumentSignature.query.filter_by(
-            document_id=doc_id,
-            username=username
-        ).all()
-    except Exception as e:
-        # If query fails (columns don't exist), use empty list
-        user_signatures = []
-    
-    # Get typed field values for this user (handle case where table might not exist yet)
-    try:
-        user_typed_values = DocumentTypedFieldValue.query.filter_by(
-            document_id=doc_id,
-            username=username
-        ).all()
-        typed_value_map = {val.typed_field_id: val.field_value for val in user_typed_values}
-    except Exception:
-        typed_value_map = {}
-    
-    if not user_signatures and not typed_value_map:
-        flash('No signatures or typed fields found for this user.', 'error')
+
+    if not FITZ_AVAILABLE:
+        flash('PDF processing library not available. Please install PyMuPDF.', 'error')
         return _error_redirect()
-    
-    try:
-        if (user_signatures or typed_value_map) and FITZ_AVAILABLE:
-            # Create a temporary signed copy
-            import tempfile
-            import shutil
-            
-            # Create temp file
-            temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf')
-            os.close(temp_fd)
-            
-            # Copy original PDF
-            shutil.copy2(document.file_path, temp_path)
-            
-            # Embed signatures and typed field values into temp copy
-            pdf_doc = fitz.open(temp_path)
-            
-            # Embed signatures
-            for sig in user_signatures:
-                if not sig.signature_image:
-                    continue
-                
-                # Get signature field
-                field = DocumentSignatureField.query.get(sig.signature_field_id)
-                if not field:
-                    continue
-                
-                # Embed this signature
-                try:
-                    from PIL import Image
-                    import base64
-                    from io import BytesIO
-                    
-                    page_num = field.page_number - 1
-                    if page_num < 0 or page_num >= len(pdf_doc):
-                        continue
-                    
-                    page = pdf_doc[page_num]
-                    page_rect = page.rect
-                    page_width = page_rect.width
-                    page_height = page_rect.height
-                    
-                    # Convert coordinates (same logic as embed_signature_in_pdf)
-                    viewer_height_px = 800.0
-                    scale_y = page_height / viewer_height_px
-                    viewer_width_px = viewer_height_px * (page_width / page_height)
-                    scale_x = page_width / viewer_width_px
-                    
-                    x_pdf = field.x_position * scale_x
-                    y_pdf = field.y_position * scale_y
-                    width_pdf = (field.width or 200) * scale_x
-                    height_pdf = (field.height or 80) * scale_y
-                    
-                    # Clamp to page bounds
-                    x_pdf = max(0, min(x_pdf, page_width - width_pdf))
-                    y_pdf = max(0, min(y_pdf, page_height - height_pdf))
-                    
-                    # Decode and embed signature
-                    sig_image_data = base64.b64decode(sig.signature_image)
-                    sig_img = Image.open(BytesIO(sig_image_data))
-                    
-                    img_bytes = BytesIO()
-                    sig_img.save(img_bytes, format='PNG')
-                    img_bytes.seek(0)
-                    
-                    img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
-                    page.insert_image(img_rect, stream=img_bytes.getvalue())
-                except Exception as e:
-                    print(f"Error embedding signature {sig.id}: {e}")
-                    continue
-            
-            # Embed typed field values as text
-            try:
-                for typed_field_id, field_value in typed_value_map.items():
-                    try:
-                        typed_field = DocumentTypedField.query.get(typed_field_id)
-                        if not typed_field:
-                            continue
-                        
-                        page_num = typed_field.page_number - 1
-                        if page_num < 0 or page_num >= len(pdf_doc):
-                            continue
-                        
-                        page = pdf_doc[page_num]
-                        page_rect = page.rect
-                        page_width = page_rect.width
-                        page_height = page_rect.height
-                        
-                        # Convert coordinates
-                        viewer_height_px = 800.0
-                        scale_y = page_height / viewer_height_px
-                        viewer_width_px = viewer_height_px * (page_width / page_height)
-                        scale_x = page_width / viewer_width_px
-                        
-                        x_pdf = typed_field.x_position * scale_x
-                        y_pdf = typed_field.y_position * scale_y
-                        width_pdf = (typed_field.width or 200) * scale_x
-                        height_pdf = (typed_field.height or 30) * scale_y
-                        
-                        # Clamp to page bounds
-                        x_pdf = max(0, min(x_pdf, page_width - width_pdf))
-                        y_pdf = max(0, min(y_pdf, page_height - height_pdf))
-                        
-                        # Create text rectangle
-                        text_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
-                        
-                        # Calculate font size
-                        font_size = int(height_pdf * 0.7)
-                        if font_size < 8:
-                            font_size = 8
-                        elif font_size > 72:
-                            font_size = 72
-                        
-                        # Insert text using insert_textbox
-                        try:
-                            if text_rect.width > 0 and text_rect.height > 0:
-                                rc = page.insert_textbox(
-                                    text_rect,
-                                    field_value,
-                                    fontsize=font_size,
-                                    align=0,
-                                    color=(0, 0, 0),
-                                    render_mode=0
-                                )
-                                if rc < 0:
-                                    # Fallback to insert_text
-                                    text_y = y_pdf + font_size + 2
-                                    page.insert_text(
-                                        (x_pdf + 2, text_y),
-                                        field_value[:100],
-                                        fontsize=font_size,
-                                        color=(0, 0, 0)
-                                    )
-                        except Exception as text_error:
-                            # Fallback to insert_text
-                            try:
-                                text_y = y_pdf + font_size + 2
-                                page.insert_text(
-                                    (x_pdf + 2, text_y),
-                                    field_value[:100],
-                                    fontsize=font_size,
-                                    color=(0, 0, 0)
-                                )
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        print(f"Error embedding typed field {typed_field_id}: {e}")
-                        continue
-            except Exception as e:
-                print(f"Error processing typed fields: {e}")
-            
-            # Save the PDF
-            pdf_doc.save(temp_path, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-            pdf_doc.close()
-            
-            # Generate download filename with user's name
-            base_name = os.path.splitext(document.original_filename)[0]
-            ext = os.path.splitext(document.original_filename)[1]
-            download_filename = f"{base_name}_signed_by_{username}{ext}"
-            
-            # inline=1: open in browser for printing; otherwise download
-            as_attachment = not request.args.get('inline')
-            return send_file(
-                temp_path,
-                as_attachment=as_attachment,
-                download_name=download_filename,
-                mimetype=document.file_type or 'application/pdf'
-            )
-        else:
-            # No signatures or typed fields, or PyMuPDF not available
-            if not FITZ_AVAILABLE:
-                flash('PDF processing library not available. Please install PyMuPDF.', 'error')
-            else:
-                flash('No signatures or typed fields found for this user.', 'error')
-            return _error_redirect()
-        
-    except Exception as e:
-        print(f"Error generating signed PDF: {e}")
-        import traceback
-        traceback.print_exc()
-        flash(f'Error generating signed PDF: {str(e)}', 'error')
+
+    as_attachment = not request.args.get('inline')
+    response, err = _send_built_user_pdf(document, username, as_attachment=as_attachment)
+    if not response:
+        app.logger.error(
+            'download signed PDF failed doc_id=%s user=%s: %s',
+            doc_id, username, err,
+        )
+        flash('Could not generate signed PDF. Please try again.', 'error')
         return _error_redirect()
+    return response
 
 
 @app.route('/manager/new-hire/<username>/details')
@@ -26579,7 +26599,10 @@ def _view_new_hire_details_impl(username, force_manager_console=False):
                             Signed on: {{ doc_data.signatures[0].signed_at.strftime('%B %d, %Y at %I:%M %p') if doc_data.signatures and doc_data.signatures[0] and doc_data.signatures[0].signed_at else 'Unknown date' }}
                         </p>
                         {% endif %}
-                        <a href="{{ url_for('download_signed_document', doc_id=doc_data.document.id, username=username) }}" class="btn" style="margin-top: 10px;">📥 Download Signed Copy</a>
+                        <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px;">
+                            <a href="{{ url_for('download_signed_document', doc_id=doc_data.document.id, username=username) }}" class="btn">📥 Download</a>
+                            <a href="{{ url_for('staff_print_user_document_completed', doc_id=doc_data.document.id, username=username) }}" class="btn" style="background: #333;" target="_blank" title="Open print dialog for completed PDF">🖨️ Print</a>
+                        </div>
                     </div>
                     {% endfor %}
                 {% else %}
