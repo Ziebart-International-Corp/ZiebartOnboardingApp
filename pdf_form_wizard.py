@@ -1738,7 +1738,9 @@ def embed_typed_field_values_in_pdf(
 
 
 # Gap between signature image bottom and the printed underline (PDF points).
-_SIGNATURE_LINE_GAP = 2.0
+_SIGNATURE_LINE_GAP = 0.5
+# Nudge ink downward so signatures sit on the line (not floating above it).
+_SIGNATURE_DOWN_NUDGE = 5.0
 # Keep image ink above printed labels on the EE form (page text bbox + padding).
 _EE_EMPLOYEE_SIG_MIN_TOP = 619.0
 _EE_MANAGER_SIG_MIN_TOP = 689.0
@@ -1772,7 +1774,7 @@ def _signature_image_rect(
 
     base = fitz.Rect(widget_rect)
     line_top = base.y0 + 0.8
-    image_bottom = line_top - _SIGNATURE_LINE_GAP
+    image_bottom = line_top - _SIGNATURE_LINE_GAP + _SIGNATURE_DOWN_NUDGE
 
     page = pdf_doc[page_idx]
     scale_y = page.rect.height / SIGN_VIEWER_HEIGHT
