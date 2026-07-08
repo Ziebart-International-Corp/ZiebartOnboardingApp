@@ -16407,6 +16407,8 @@ def manage_documents():
     """Manage documents - upload and manage new hire paperwork. Admin or manager with manage_documents permission. Managers see only forms for their store, view/download only."""
     if not current_user.is_admin() and not manager_has_permission('manage_documents'):
         abort(403)
+    # Field-editor success flashes aren't shown on that page, so purge leftovers here
+    _drop_field_editor_noise_flashes()
     is_manager_view = uses_manager_console_scope()
     try:
         store_id = get_current_user_store_id()
@@ -20447,6 +20449,30 @@ def _signature_fields_redirect(doc_id, page=None):
     return redirect(url_for('set_signature_fields', doc_id=doc_id, page=page))
 
 
+_FIELD_EDITOR_NOISE_FLASH_PREFIXES = (
+    'Field updated successfully',
+    'Field converted to signature successfully',
+    'Typed field deleted successfully',
+    'Typed field added successfully',
+    'Signature field added successfully',
+    'Signature field deleted successfully',
+)
+
+
+def _drop_field_editor_noise_flashes():
+    """Consume leftover field-editor success flashes so they don't stack on Manage Documents."""
+    from flask import get_flashed_messages
+    messages = get_flashed_messages(with_categories=True)
+    keep = []
+    for category, msg in messages:
+        text = (msg or '').strip()
+        if category == 'success' and any(text.startswith(p) for p in _FIELD_EDITOR_NOISE_FLASH_PREFIXES):
+            continue
+        keep.append((category, msg))
+    for category, msg in keep:
+        flash(msg, category)
+
+
 @app.route('/admin/documents/<int:doc_id>/signature-fields/add', methods=['POST'])
 @admin_required
 def add_signature_field(doc_id):
@@ -20473,8 +20499,6 @@ def add_signature_field(doc_id):
         
         db.session.add(signature_field)
         db.session.commit()
-        
-        flash('Signature field added successfully.', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error adding signature field: {str(e)}', 'error')
@@ -20573,7 +20597,6 @@ def add_typed_field(doc_id):
                 }
             })
         
-        flash('Typed field added successfully.', 'success')
     except Exception as e:
         db.session.rollback()
         import traceback
@@ -20622,7 +20645,6 @@ def update_typed_field(field_id):
             DocumentTypedFieldValue.query.filter_by(typed_field_id=field_id).delete()
             db.session.delete(typed_field)
             db.session.commit()
-            flash('Field converted to signature successfully.', 'success')
             return _signature_fields_redirect(doc_id, request.form.get('return_page'))
 
         field_type = normalize_typed_field_type(requested_field_type)
@@ -20640,7 +20662,6 @@ def update_typed_field(field_id):
             typed_field.field_label = field_label
         typed_field.field_type = field_type
         db.session.commit()
-        flash('Field updated successfully.', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error updating field: {str(e)}', 'error')
@@ -20665,7 +20686,6 @@ def delete_typed_field(field_id):
             DocumentTypedFieldValue.query.filter_by(typed_field_id=field_id).delete()
             db.session.delete(typed_field)
             db.session.commit()
-            flash('Typed field deleted successfully.', 'success')
         except Exception as e:
             db.session.rollback()
             flash(f'Error deleting typed field: {str(e)}', 'error')
@@ -20769,8 +20789,6 @@ def delete_signature_field(field_id):
         # Delete the field
         db.session.delete(field)
         db.session.commit()
-        
-        flash('Signature field deleted successfully. Existing signatures have been preserved.', 'success')
     except Exception as e:
         db.session.rollback()
         flash(f'Error deleting signature field: {str(e)}', 'error')

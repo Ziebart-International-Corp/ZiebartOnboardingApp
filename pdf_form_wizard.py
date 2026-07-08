@@ -882,6 +882,39 @@ def _acro_choice_group(field_name: str) -> str | None:
     return name[:100]
 
 
+def _radio_option_label_from_widget(widget) -> str | None:
+    """Yes/No (or On) label from Acrobat radio on-state export values like Yes_7 / No_7."""
+    try:
+        on = widget.on_state()
+    except Exception:
+        on = None
+    if callable(on):
+        try:
+            on = on()
+        except Exception:
+            on = None
+    text = str(on or '').strip()
+    if not text or text.lower() == 'off':
+        return None
+    low = text.lower()
+    if low.startswith('yes'):
+        return 'Yes'
+    if low.startswith('no'):
+        return 'No'
+    # Strip trailing _digits used by Acrobat export values
+    cleaned = re.sub(r'_\d+$', '', text).strip()
+    return (cleaned or text)[:80] or None
+
+
+def _pdf_looks_like_ee_form(widget_names: set[str]) -> bool:
+    """True only for the Employee Information Form — never remap other Acrobat PDFs."""
+    try:
+        from ee_pdf_field_map import is_ee_form_acro_set
+        return is_ee_form_acro_set(widget_names)
+    except ImportError:
+        return False
+
+
 def _widget_to_app_typed_field_type(widget, label: str) -> str:
     wtype = getattr(widget, 'field_type', 1)
     if wtype == 2 or wtype == 5:
@@ -896,9 +929,12 @@ def _widget_to_app_typed_field_type(widget, label: str) -> str:
     if _SSN_LABEL_RE.search(label):
         return 'last4'
     label_lower = label.lower()
-    if any(k in label_lower for k in ('date', 'dob', 'birth date', 'hire date')):
+    # Prefer name fields for common employment-app labels
+    if label_lower in ('first name', 'last name', 'middle name', 'middle initial', 'full name', 'applicant name'):
+        return 'name' if 'first' in label_lower or 'last' in label_lower or 'full' in label_lower or 'applicant' in label_lower else 'text'
+    if any(k in label_lower for k in ('date', 'dob', 'birth date', 'hire date', 'discharge date')):
         return 'date'
-    if 'phone' in label_lower or 'tel' in label_lower:
+    if 'phone' in label_lower or 'tel' in label_lower or 'telephone' in label_lower:
         return 'phone'
     return 'text'
 
@@ -1028,6 +1064,139 @@ def _apply_ee_canonical_choice_groups(typed_fields: list) -> None:
             spec['choice_group'] = group
 
 
+def _yes_no_base(name: str) -> str | None:
+    """Return 'yes'/'no' if Acrobat name/label is Yes, No, Yes_2, No_4, else None."""
+    n = (name or '').strip()
+    if re.match(r'^yes(_\d+)?$', n, re.I):
+        return 'yes'
+    if re.match(r'^no(_\d+)?$', n, re.I):
+        return 'no'
+    return None
+
+
+def _group_standalone_yes_no_checkboxes(typed_fields: list, page_lines: dict, page_heights: dict) -> None:
+    """
+    Acrobat often names exclusive options Yes / No / Yes_2 as separate checkbox fields.
+    Pair nearby Yes+No markers and share one choice_group labeled from surrounding PDF text.
+    Leave multi-select rows (Walk In / Employee Referral / etc.) ungrouped.
+    """
+    # Normalize radio pairs that already share one Acrobat field name
+    by_ph: dict[str, list] = {}
+    for spec in typed_fields:
+        if spec.get('field_type') != 'checkbox_choice':
+            continue
+        ph = (spec.get('placeholder') or '')
+        g = (spec.get('choice_group') or '').strip()
+        if not ph or not g:
+            continue
+        by_ph.setdefault(ph, []).append(spec)
+    for ph, specs in by_ph.items():
+        if len(specs) < 2:
+            continue
+        # Same placeholder + 2+ widgets => radio group; normalize Yes/No labels from on-state naming
+        for spec in specs:
+            wname = ph.replace(ACRO_PLACEHOLDER_PREFIX, '')
+            yn = _yes_no_base(spec.get('field_label') or '') or _yes_no_base(wname)
+            if yn == 'yes':
+                spec['field_label'] = 'Yes'
+            elif yn == 'no':
+                spec['field_label'] = 'No'
+
+    candidates = []
+    for spec in typed_fields:
+        if spec.get('field_type') != 'checkbox_choice':
+            continue
+        ph = (spec.get('placeholder') or '')
+        # Skip already-shared radio groups
+        if ph and len(by_ph.get(ph, [])) >= 2:
+            continue
+        wname = ph.replace(ACRO_PLACEHOLDER_PREFIX, '')
+        yn = _yes_no_base(wname)
+        label_low = (spec.get('field_label') or '').strip().lower()
+        if yn is None and label_low not in ('yes', 'no'):
+            if not re.match(r'^check box\d+$', wname, re.I) and not re.match(r'^undefined(_\d+)?$', wname, re.I):
+                continue
+        page_h = page_heights.get(spec['page_number'], 792)
+        scale = SIGN_VIEWER_HEIGHT / float(page_h)
+        pw = (spec.get('width') or 24) / scale
+        ph_h = (spec.get('height') or 18) / scale
+        if pw > 45 or ph_h > 30:
+            continue
+        rect_pdf = [
+            spec['x_position'] / scale,
+            spec['y_position'] / scale,
+            spec['x_position'] / scale + pw,
+            spec['y_position'] / scale + ph_h,
+        ]
+        candidates.append({
+            'spec': spec,
+            'yn': yn or (label_low if label_low in ('yes', 'no') else None),
+            'rect': rect_pdf,
+        })
+
+    by_page: dict[int, list] = {}
+    for c in candidates:
+        by_page.setdefault(c['spec']['page_number'], []).append(c)
+
+    used: set[int] = set()
+    for page_num, items in by_page.items():
+        lines = page_lines.get(page_num - 1, [])
+        items.sort(key=lambda c: (c['rect'][1], c['rect'][0]))
+        for i, a in enumerate(items):
+            if id(a['spec']) in used:
+                continue
+            best = None
+            best_dx = 9999.0
+            for b in items[i + 1:]:
+                if id(b['spec']) in used:
+                    continue
+                if abs(a['rect'][1] - b['rect'][1]) > 10:
+                    if b['rect'][1] - a['rect'][1] > 10:
+                        break
+                    continue
+                if a['yn'] and b['yn'] and a['yn'] != b['yn']:
+                    dx = abs(a['rect'][0] - b['rect'][0])
+                    if dx < best_dx and dx < 120:
+                        best_dx = dx
+                        best = b
+                elif a['yn'] is None and b['yn'] is None:
+                    dx = abs(a['rect'][0] - b['rect'][0])
+                    if dx < best_dx and 15 < dx < 90:
+                        best_dx = dx
+                        best = b
+            if not best:
+                continue
+            pair = sorted([a, best], key=lambda c: c['rect'][0])
+            union = pair[0]['rect'][:]
+            for c in pair[1:]:
+                r = c['rect']
+                union[0] = min(union[0], r[0])
+                union[1] = min(union[1], r[1])
+                union[2] = max(union[2], r[2])
+                union[3] = max(union[3], r[3])
+            question = (
+                _label_left_of_rect(lines, union)
+                or _label_above_rect(lines, union)
+                or 'Yes / No'
+            )
+            group_key = _slug_group_name(
+                question, page_num, str(int(round(union[1]))) + str(int(round(union[0]))),
+            )
+            for idx, c in enumerate(pair):
+                used.add(id(c['spec']))
+                c['spec']['field_type'] = 'checkbox_choice'
+                c['spec']['choice_group'] = group_key
+                c['spec']['is_required'] = False
+                if c['yn'] == 'yes':
+                    c['spec']['field_label'] = 'Yes'
+                elif c['yn'] == 'no':
+                    c['spec']['field_label'] = 'No'
+                elif idx == 0:
+                    c['spec']['field_label'] = 'Yes'
+                else:
+                    c['spec']['field_label'] = 'No'
+
+
 def _is_exclusive_choice_pair(labels: list[str]) -> bool:
     """True when labels are a mutually exclusive pair (not independent checkboxes)."""
     if len(labels) != 2:
@@ -1067,8 +1236,12 @@ def _slug_group_name(label: str, page: int, suffix: str = '') -> str:
     return key[:100]
 
 
-def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_fields: list) -> None:
-    """Improve labels and group radio/checkbox markers using PDF text context."""
+def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_fields: list, is_ee_form: bool = False) -> None:
+    """Improve labels and group radio/checkbox markers using PDF text context.
+
+    EE-specific renames and canonical choice groups only run when is_ee_form is True.
+    Other Acrobat PDFs (e.g. Employment Application) keep native field names/labels.
+    """
     if not FITZ_AVAILABLE or not typed_fields:
         return
 
@@ -1077,11 +1250,10 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
         page_lines = {i: _page_text_lines(doc[i]) for i in range(doc.page_count)}
         page_heights = {i + 1: doc[i].rect.height for i in range(doc.page_count)}
 
-        # Promote signature-named text widgets to signature fields.
+        # Promote signature-named text widgets to signature fields (Adobe Sign style only).
         remaining_typed = []
         for spec in typed_fields:
             wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
-            label = (spec.get('field_label') or '').strip()
             if 'signature' in wname.lower() and 'signer' in wname.lower():
                 signature_fields.append({
                     'page_number': spec['page_number'],
@@ -1096,13 +1268,15 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
             remaining_typed.append(spec)
         typed_fields[:] = remaining_typed
 
-        # Resolve human labels for unnamed/generic fields.
+        # Resolve human labels only for unnamed/generic fields — keep Acrobat names otherwise.
+        generic_names = {
+            'undefined', 'yes', 'no', 'male', 'female', 'single', 'married',
+            'text1', 'text2', 'text3', 'check box1', 'check box2', 'check box3', 'check box4',
+        }
         for spec in typed_fields:
             page_num = spec['page_number']
             page_h = page_heights.get(page_num, 792)
             wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
-            rect_pdf = None
-            # Reconstruct approximate PDF rect from viewer coords
             scale = SIGN_VIEWER_HEIGHT / float(page_h)
             x = spec['x_position'] / scale
             y = spec['y_position'] / scale
@@ -1111,8 +1285,17 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
             rect_pdf = [x, y, x + w, y + h]
 
             lines = page_lines.get(page_num - 1, [])
+            current_label = (spec.get('field_label') or '').strip()
+            keep_option_label = current_label.lower() in _KNOWN_ACRO_OPTION_LABELS
+            # Named Acrobat fields already have good labels — don't overwrite with nearby OCR text
+            named_well = bool(wname) and wname.lower() not in generic_names and not re.match(r'^(text|check box)\d+$', wname, re.I)
+            if named_well and current_label and current_label.lower() not in ('undefined',):
+                # Still fix types from label keywords
+                if _SSN_LABEL_RE.search(current_label):
+                    spec['field_type'] = 'last4'
+                continue
+
             human = _humanize_acro_widget_name(wname)
-            keep_option_label = (spec.get('field_label') or '').strip().lower() in _KNOWN_ACRO_OPTION_LABELS
             if not keep_option_label:
                 if not human or human.lower() in ('undefined', 'yes', 'no', 'male', 'female', 'single', 'married'):
                     left = _label_left_of_rect(lines, rect_pdf)
@@ -1125,7 +1308,7 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
                         human = above
                 if human and human.lower() not in ('undefined',):
                     spec['field_label'] = human[:200]
-                elif spec.get('field_label', '').lower() in ('undefined', 'yes', 'no', ''):
+                elif current_label.lower() in ('undefined', 'yes', 'no', ''):
                     if left := _label_left_of_rect(lines, rect_pdf):
                         spec['field_label'] = left[:200]
 
@@ -1152,6 +1335,10 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
                 spec['y_position'] / scale + ph,
             ]
             label = (spec.get('field_label') or '').strip()
+            # Radios already grouped by Acrobat field name — leave them alone
+            if spec.get('field_type') == 'checkbox_choice' and spec.get('choice_group'):
+                texts.append(spec)
+                continue
             option_like = label.lower() in {
                 'single', 'married', 'male', 'female', 'yes', 'no',
                 'black/african american', 'american indian', 'asian',
@@ -1324,37 +1511,40 @@ def _enrich_acroform_import_specs(pdf_path: str, signature_fields: list, typed_f
             for s in race_fields:
                 s['choice_group'] = gkey
 
-        # Auto typed_name for primary employee name field
-        for spec in typed_fields:
-            wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
-            if wname == 'Employee_Name':
-                spec['field_type'] = 'typed_name'
-                spec['field_label'] = 'Employee name'
-            elif wname == 'Employee_SSN_Last4':
-                spec['field_type'] = 'last4'
-                spec['field_label'] = 'Social Security Number (last 4)'
-            elif wname in ('Employee_Birthdate', 'Employee_Signature_Date', 'Manager_Signature_Date'):
-                spec['field_type'] = 'date'
-            elif wname in (
-                'Dependent_1_Birthdate', 'Dependent_2_Birthdate', 'Dependent_3_Birthdate',
-            ):
-                spec['field_type'] = 'date'
-            elif wname in (
-                'Employee_Phone_Number',
-                'Emergency_Contact_1_Home_Phone', 'Emergency_Contact_1_Cell_Phone',
-                'Emergency_Contact_1_Work_Phone', 'Emergency_Contact_2_Home_Phone',
-                'Emergency_Contact_2_Cell_Phone', 'Emergency_Contact_2_Work_Phone',
-            ):
-                spec['field_type'] = 'phone'
-            elif ':signer:fullname' in wname.lower() and spec.get('field_type') == 'text':
-                if not spec.get('field_label') or spec['field_label'].lower() == 'name':
-                    spec['field_label'] = 'Name'
+        # EE-only typed_name / date / phone canonical fields
+        if is_ee_form:
+            for spec in typed_fields:
+                wname = (spec.get('placeholder') or '').replace(ACRO_PLACEHOLDER_PREFIX, '')
+                if wname == 'Employee_Name':
+                    spec['field_type'] = 'typed_name'
+                    spec['field_label'] = 'Employee name'
+                elif wname == 'Employee_SSN_Last4':
+                    spec['field_type'] = 'last4'
+                    spec['field_label'] = 'Social Security Number (last 4)'
+                elif wname in ('Employee_Birthdate', 'Employee_Signature_Date', 'Manager_Signature_Date'):
+                    spec['field_type'] = 'date'
+                elif wname in (
+                    'Dependent_1_Birthdate', 'Dependent_2_Birthdate', 'Dependent_3_Birthdate',
+                ):
+                    spec['field_type'] = 'date'
+                elif wname in (
+                    'Employee_Phone_Number',
+                    'Emergency_Contact_1_Home_Phone', 'Emergency_Contact_1_Cell_Phone',
+                    'Emergency_Contact_1_Work_Phone', 'Emergency_Contact_2_Home_Phone',
+                    'Emergency_Contact_2_Cell_Phone', 'Emergency_Contact_2_Work_Phone',
+                ):
+                    spec['field_type'] = 'phone'
+                elif ':signer:fullname' in wname.lower() and spec.get('field_type') == 'text':
+                    if not spec.get('field_label') or spec['field_label'].lower() == 'name':
+                        spec['field_label'] = 'Name'
 
-        _apply_ee_canonical_choice_groups(typed_fields)
+            _apply_ee_canonical_choice_groups(typed_fields)
+        else:
+            _group_standalone_yes_no_checkboxes(typed_fields, page_lines, page_heights)
 
         # Strip choice groups from non-choice field types.
         for spec in typed_fields:
-            if spec.get('field_type') in ('last4', 'typed_name', 'date', 'text', 'number', 'phone'):
+            if spec.get('field_type') in ('last4', 'typed_name', 'date', 'text', 'number', 'phone', 'name'):
                 spec['choice_group'] = None
 
         typed_fields.sort(key=lambda s: (s.get('page_number') or 1, s.get('y_position') or 0, s.get('x_position') or 0))
@@ -1379,6 +1569,14 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
 
     doc = fitz.open(pdf_path)
     try:
+        raw_names: set[str] = set()
+        for page in doc:
+            for w in page.widgets() or []:
+                n = (w.field_name or '').strip()
+                if n:
+                    raw_names.add(n)
+        is_ee = _pdf_looks_like_ee_form(raw_names)
+
         for page_index in range(doc.page_count):
             page = doc[page_index]
             page_h = page.rect.height
@@ -1390,23 +1588,38 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
                 if dedupe_key in seen_keys:
                     continue
                 seen_keys.add(dedupe_key)
-                wname = (w.field_name or '').strip()
-                try:
-                    from ee_pdf_field_map import canonical_acro
-                    wname = canonical_acro(wname)
-                except ImportError:
-                    pass
+                raw_wname = (w.field_name or '').strip()
+                wname = raw_wname
+                if is_ee:
+                    try:
+                        from ee_pdf_field_map import canonical_acro
+                        wname = canonical_acro(raw_wname)
+                    except ImportError:
+                        pass
                 rect = list(w.rect) if w.rect else None
                 if not rect or len(rect) != 4:
                     continue
                 x, y, width, height = pdf_rect_to_viewer_coords(rect, page_h)
                 page_number = page_index + 1
                 placeholder = f'{ACRO_PLACEHOLDER_PREFIX}{wname}' if wname else None
-                label = (w.field_label or wname or '').strip()
-                if not label or label.lower() == 'undefined':
-                    label = wname or f'Field on page {page_index + 1}'
-                if wname in ('Employee_Signature', 'Manager_Signature') or (
-                    'signature' in wname.lower() and 'signer' in wname.lower()
+
+                # Prefer Acrobat's tool-tip / field_label, then raw name (not EE remaps on other forms)
+                acrobat_label = (getattr(w, 'field_label', None) or '').strip()
+                label = acrobat_label or raw_wname or f'Field on page {page_index + 1}'
+                if wtype == 5:
+                    opt = _radio_option_label_from_widget(w)
+                    if opt:
+                        # Keep question name as choice_group; option becomes Yes/No label
+                        label = opt
+                    elif label.lower() in ('undefined',) or not acrobat_label:
+                        label = raw_wname or label
+                elif label.lower() == 'undefined':
+                    label = raw_wname if raw_wname and raw_wname.lower() != 'undefined' else f'Field on page {page_index + 1}'
+
+                # EE signature widgets (Acrobat signature or known names)
+                if is_ee and (
+                    wname in ('Employee_Signature', 'Manager_Signature')
+                    or ('signature' in wname.lower() and 'signer' in wname.lower())
                 ):
                     role = 'Employee' if 'Employee' in wname or wname.endswith('1') else 'Manager'
                     if wname == 'Manager_Signature':
@@ -1439,9 +1652,11 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
                 field_type = _widget_to_app_typed_field_type(w, label)
                 choice_group = None
                 if field_type == 'checkbox_choice':
-                    choice_group = _acro_choice_group(wname) or label[:100]
-                    if wtype == 5 and wname and '.' not in wname:
-                        choice_group = wname[:100]
+                    # Radios: group by the shared Acrobat field name
+                    if wtype == 5 and raw_wname:
+                        choice_group = raw_wname[:100]
+                    else:
+                        choice_group = _acro_choice_group(raw_wname) or label[:100]
                 typed_fields.append({
                     'page_number': page_number,
                     'x_position': x,
@@ -1457,7 +1672,7 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
     finally:
         doc.close()
 
-    _enrich_acroform_import_specs(pdf_path, signature_fields, typed_fields)
+    _enrich_acroform_import_specs(pdf_path, signature_fields, typed_fields, is_ee_form=is_ee)
 
     widget_count = len(signature_fields) + len(typed_fields)
     return {
@@ -1465,6 +1680,7 @@ def collect_acroform_import_specs(pdf_path: str) -> dict:
         'signature_fields': signature_fields,
         'typed_fields': typed_fields,
         'widget_count': widget_count,
+        'is_ee_form': is_ee,
     }
 
 
