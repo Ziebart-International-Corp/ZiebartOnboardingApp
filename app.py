@@ -3208,6 +3208,31 @@ def documents_visible_to_store_query(store_id, base_filter=None):
     return q
 
 
+def documents_assignable_to_store_query(store_id, base_filter=None):
+    """Return Document query for staff assignment (onboarding, assign task, role defaults).
+
+    Unlike documents_visible_to_store_query, does NOT require is_visible / In library —
+    assigned forms must be selectable even when Not in library. Store scope still applies
+    when store_id is set (no document_stores rows = all stores).
+    """
+    q = Document.query
+    if store_id is not None:
+        no_stores = ~exists().where(document_stores.c.document_id == Document.id)
+        in_store = exists().where(and_(document_stores.c.document_id == Document.id, document_stores.c.store_id == store_id))
+        q = q.filter(or_(no_stores, in_store))
+    if base_filter is not None:
+        q = q.filter(base_filter)
+    return q
+
+
+def _document_has_assignable_fields_filter():
+    """Forms that can be filled/signed: signature fields and/or typed fields."""
+    return or_(
+        exists().where(DocumentSignatureField.document_id == Document.id),
+        exists().where(DocumentTypedField.document_id == Document.id),
+    )
+
+
 def _stores_for_document(document_id):
     """Store rows linked to a document via document_stores (empty = all stores)."""
     if not document_id:
@@ -9218,10 +9243,10 @@ def add_new_hire():
         store_id,
         base_filter=(TrainingVideo.is_active == True),
     ).order_by(TrainingVideo.title).all()
-    # Get documents visible to this store (or all visible for admin) that have signature fields
-    documents = documents_visible_to_store_query(
+    # Assignable forms for this store (or all for admin) — includes Not in library
+    documents = documents_assignable_to_store_query(
         store_id,
-        base_filter=exists().where(DocumentSignatureField.document_id == Document.id)
+        base_filter=_document_has_assignable_fields_filter(),
     ).order_by(Document.original_filename).all()
     checklist_items = ChecklistItem.query.filter_by(is_active=True).order_by(ChecklistItem.order).all()
     # Roles for default-document pre-selection
@@ -9902,7 +9927,7 @@ def add_new_hire():
                             </div>
                             
                             <div class="form-group">
-                                <label>Documents with Signature Fields</label>
+                                <label>Documents to Assign</label>
                                 {% if documents %}
                                 <div class="document-group">
                                     {% for doc in documents %}
@@ -9919,11 +9944,11 @@ def add_new_hire():
                                 </div>
                                 {% else %}
                                 <p style="padding: 20px; text-align: center; color: #666;">
-                                    No documents with signature fields available. 
+                                    No forms with signature or fillable fields available.
                                     <a href="{{ url_for('manage_documents') }}" style="color: #FE0100;">Upload documents first</a>.
                                 </p>
                                 {% endif %}
-                                <small>Optional: Select documents that need to be signed during onboarding</small>
+                                <small>Optional: Select documents that need to be signed during onboarding. Forms do not need to be "In library" to assign here.</small>
                             </div>
                             
                             <div class="wizard-actions">
@@ -15692,11 +15717,11 @@ def role_default_documents(role_id):
     if not role:
         flash('Position/Title not found.', 'error')
         return redirect(url_for('manage_roles'))
-    # Documents visible to this store (or all visible for admin) that have signature fields
+    # Assignable forms for this store (or all for admin) — includes Not in library
     store_id = staff_store_scope_id()
-    documents = documents_visible_to_store_query(
+    documents = documents_assignable_to_store_query(
         store_id,
-        base_filter=exists().where(DocumentSignatureField.document_id == Document.id)
+        base_filter=_document_has_assignable_fields_filter(),
     ).order_by(Document.original_filename).all()
     default_doc_ids = set(d.id for d in role.default_documents.all())
     if request.method == 'POST':
@@ -15760,7 +15785,7 @@ def role_default_documents(role_id):
                     </div>
                     {% endfor %}
                     {% else %}
-                    <p style="color: #666;">No documents with signature fields available. <a href="{{ url_for('manage_documents') }}">Manage Forms</a> first.</p>
+                    <p style="color: #666;">No forms with signature or fillable fields available. <a href="{{ url_for('manage_documents') }}">Manage Forms</a> first.</p>
                     {% endif %}
                     {% if documents %}
                     <div style="margin-top: 20px;">
@@ -26724,8 +26749,9 @@ def _assign_task_impl(force_manager=False):
         all_stores = []
 
     try:
+        # Assignment lists include Not in library forms (is_visible only affects the user library)
         if scope_store_id is not None:
-            all_documents = documents_visible_to_store_query(scope_store_id).order_by(Document.original_filename).all()
+            all_documents = documents_assignable_to_store_query(scope_store_id).order_by(Document.original_filename).all()
         else:
             all_documents = Document.query.order_by(Document.original_filename).all()
     except Exception:
