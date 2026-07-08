@@ -2419,19 +2419,32 @@ def send_password_reset_email(user, temporary_password):
 
 def send_onboarding_welcome_email(first_name, last_name, to_email, password):
     """Email new hire a get-started link plus login credentials after onboarding is created."""
+    import html as html_module
     to_email = normalize_email(to_email)
     if not to_email or not password:
         return False
     login_url = onboarding_login_url()
     display_name = (f'{first_name or ""} {last_name or ""}').strip() or 'there'
-    subject = 'Welcome to Ziebart Onboarding — get started'
+    safe_name = html_module.escape(display_name)
+    safe_email = html_module.escape(to_email)
+    safe_password = html_module.escape(password)
+    safe_login_url = html_module.escape(login_url, quote=True)
+    subject = 'Welcome to Ziebart Onboarding - get started'
+    # Table-based CTA: inline-block/button styles often fail in Outlook/desktop clients
     body_html = f'''
-    <p>Hello {display_name},</p>
+    <p>Hello {safe_name},</p>
     <p>Your Ziebart onboarding account is ready. Use the link below to log in and get started with your training and forms.</p>
-    <p><strong>Email:</strong> {to_email}<br>
-    <strong>Password:</strong> {password}</p>
-    <p><a href="{login_url}" style="display:inline-block;padding:10px 18px;background:#FE0100;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Get started</a></p>
-    <p>If the button does not work, copy and paste this link into your browser:<br>{login_url}</p>
+    <p><strong>Email:</strong> {safe_email}<br>
+    <strong>Password:</strong> {safe_password}</p>
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0;">
+      <tr>
+        <td align="center" bgcolor="#FE0100" style="background-color:#FE0100;border-radius:6px;">
+          <a href="{safe_login_url}" target="_blank" style="display:inline-block;padding:12px 20px;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none;">Get started</a>
+        </td>
+      </tr>
+    </table>
+    <p><a href="{safe_login_url}" target="_blank">Or open the login page here</a></p>
+    <p>If the links do not work, copy and paste this into your browser:<br>{html_module.escape(login_url)}</p>
     <p>If you have questions, contact your manager or onboarding administrator.</p>
     <p>Welcome aboard,<br>Onboarding Team</p>
     '''
@@ -4899,10 +4912,19 @@ def dashboard():
             all_user_tasks = UserTask.query.filter_by(username=current_user.username).all()
         except Exception as e:
             all_user_tasks = []
-        # Only show tasks that are visible (dependency satisfied); then filter to incomplete for display
+        # Actionable now: dependency unlocked. Upcoming: still blocked so Home matches total progress count.
         visible_ordered = get_visible_ordered_user_tasks(all_user_tasks)
         user_tasks = [t for t in visible_ordered if t.status != 'completed']
         attach_training_video_ids_to_tasks(user_tasks)
+        incomplete_ids = {t.id for t in user_tasks}
+        upcoming_tasks = [
+            t for t in sorted(
+                all_user_tasks,
+                key=lambda x: (getattr(x, 'display_order', None) is None, getattr(x, 'display_order', 0) or 0, x.id or 0),
+            )
+            if t.status != 'completed' and t.id not in incomplete_ids
+        ]
+        attach_training_video_ids_to_tasks(upcoming_tasks)
 
         work = dashboard_onboarding_work(required_videos, all_user_tasks, completed_required_videos)
         incomplete_training = work['incomplete_standalone_training']
@@ -4910,8 +4932,24 @@ def dashboard():
         completed_tasks = work['completed_tasks']
         progress_percentage = work['progress_percentage']
         
-        # Check if all tasks are completed
-        all_tasks_completed = (len(incomplete_training) == 0 and len(user_tasks) == 0) if (required_videos or all_user_tasks) else False
+        # Check if all tasks are completed (include locked upcoming so progress denom matches Home)
+        all_tasks_completed = (
+            len(incomplete_training) == 0 and len(user_tasks) == 0 and len(upcoming_tasks) == 0
+        ) if (required_videos or all_user_tasks) else False
+        
+        # Soft welcome note on Home while onboarding is still open
+        welcome_headline = ''
+        welcome_body_html = Markup('')
+        show_home_welcome = False
+        if not all_tasks_completed:
+            try:
+                welcome_headline, welcome_body_raw = get_welcome_messages(user_full_name)
+                welcome_body_html = Markup(render_onboarding_message_html(welcome_body_raw, for_email=False))
+                show_home_welcome = bool((welcome_headline or '').strip() or (welcome_body_raw or '').strip())
+            except Exception:
+                show_home_welcome = False
+                welcome_headline = ''
+                welcome_body_html = Markup('')
         
         # Build notifications list
         notifications = []
@@ -5483,21 +5521,45 @@ def dashboard():
                 50% { opacity: 0.9; transform: scale(1.02); }
             }
             .welcome-section {
-                text-align: center;
-                margin-bottom: 40px;
+                text-align: left;
+                margin-bottom: 20px;
+                padding: 1.25rem 1.5rem;
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.08);
+                border-radius: 1rem;
             }
             .welcome-section h1 {
-                font-size: 3em;
+                font-size: 1.45em;
                 font-weight: 800;
                 font-family: 'URW Form', Arial, sans-serif;
-                color: #000000;
-                margin-bottom: 10px;
+                color: var(--text-primary, #f2f5fb);
+                margin-bottom: 8px;
             }
-            .welcome-section p {
-                font-size: 1.2em;
+            .welcome-section p,
+            .welcome-section .welcome-body {
+                font-size: 0.98em;
                 font-family: 'URW Form', Arial, sans-serif;
-                color: #808080;
+                color: var(--text-muted, #b7c1d3);
                 font-weight: 400;
+                line-height: 1.55;
+            }
+            .welcome-section .welcome-body p { margin: 0 0 0.6em; }
+            .welcome-section .welcome-body p:last-child { margin-bottom: 0; }
+            .dashboard-progress-hint {
+                text-align: center;
+                margin-top: 4px;
+                font-size: 0.8em;
+                color: var(--text-muted, #b7c1d3);
+            }
+            .task-card.task-card-locked {
+                opacity: 0.72;
+            }
+            .task-card-locked .task-btn,
+            .task-lock-badge {
+                background: #4a5568 !important;
+                color: #e2e8f0 !important;
+                cursor: default;
+                pointer-events: none;
             }
             .section {
                 background: #FFFFFF;
@@ -6148,6 +6210,12 @@ def dashboard():
         <div class="dashboard-view">
         <div class="dashboard-container">
         <div class="dashboard-page-wrap">
+            {% if show_home_welcome and not show_finale %}
+            <div class="welcome-section" style="max-width: 1100px; margin: 0 auto 20px;">
+                <h1>{{ welcome_headline }}</h1>
+                <div class="welcome-body">{{ welcome_body_html|safe }}</div>
+            </div>
+            {% endif %}
             <div class="main-content{% if not external_links %} main-content-two-col{% endif %}">
                 {% if show_finale %}
                 <div class="dashboard-tasks-col">
@@ -6168,7 +6236,7 @@ def dashboard():
                 </div>
                 {% else %}
                 <div class="dashboard-tasks-col">
-                    {% if required_videos or user_tasks %}
+                    {% if required_videos or user_tasks or upcoming_tasks %}
                     <div class="section dashboard-tasks-card">
                         <div class="dashboard-card-header">
                             <h2 class="section-title-dash">Tasks</h2>
@@ -6186,8 +6254,11 @@ def dashboard():
                         <div class="dashboard-progress-meta" style="text-align: center; margin-top: 8px; font-size: 0.85em; flex-shrink: 0;">
                         {{ completed_tasks }} of {{ total_tasks }} tasks completed
                     </div>
+                    {% if upcoming_tasks %}
+                    <p class="dashboard-progress-hint">Complete your current step to unlock the next items in order.</p>
+                    {% endif %}
                     
-                    {% if incomplete_training or user_tasks %}
+                    {% if incomplete_training or user_tasks or upcoming_tasks %}
                     <div class="task-cards">
                         {% for video in incomplete_training %}
                         <div class="task-card">
@@ -6215,12 +6286,22 @@ def dashboard():
                                 <p>{{ task.task_description or 'Complete this task' }}</p>
                             </div>
                             {% if task.task_type == 'document' and task.document_id %}
-                            <a href="{{ user_sign_document_url(task.document_id) }}" class="task-btn">Sign Document ></a>
+                            <a href="{{ user_sign_document_url(task.document_id) }}" class="task-btn">Fill &amp; Sign ></a>
                             {% elif task.task_type == 'training' and task.video_id %}
                             <a href="{{ url_for('view_training_video', video_id=task.video_id) }}" class="task-btn">Watch Training ></a>
                             {% else %}
                             <a href="{{ url_for('user_tasks') }}" class="task-btn">View Task ></a>
                             {% endif %}
+                        </div>
+                        {% endfor %}
+                        {% for task in upcoming_tasks %}
+                        <div class="task-card task-card-locked">
+                            <div class="task-icon">&#128274;</div>
+                            <div class="task-content">
+                                <h3>{{ task.task_title }}</h3>
+                                <p>Unlocks after you finish the step above</p>
+                            </div>
+                            <span class="task-btn task-lock-badge">Up next</span>
                         </div>
                         {% endfor %}
                     </div>
@@ -6429,11 +6510,12 @@ def dashboard():
          required_videos=required_videos, completed_required_videos=completed_required_videos,
          incomplete_training=incomplete_training, all_tasks_completed=all_tasks_completed,
          progress_percentage=progress_percentage, all_videos=all_videos, visible_documents=visible_documents,
-         user_tasks=user_tasks, total_tasks=total_tasks, completed_tasks=completed_tasks,
+         user_tasks=user_tasks, upcoming_tasks=upcoming_tasks, total_tasks=total_tasks, completed_tasks=completed_tasks,
          pending_count=pending_count, notifications=notifications, external_links=external_links,
          hero_media_url=hero_media_url, hero_media_type=hero_media_type,
          show_finale=show_finale, finale_message=finale_message, finale_message_html=finale_message_html, finale_document=finale_document,
-         has_new_assigned_work=has_new_assigned_work)
+         has_new_assigned_work=has_new_assigned_work,
+         show_home_welcome=show_home_welcome, welcome_headline=welcome_headline, welcome_body_html=welcome_body_html)
     except Exception as e:
         # Log the error for debugging
         import traceback
@@ -18369,7 +18451,7 @@ def set_signature_fields(doc_id):
             body.signature-fields-page.select-field-mode .existing-field-marker,
             body.signature-fields-page.select-field-mode .existing-typed-field-marker {
                 pointer-events: auto;
-                cursor: pointer;
+                cursor: move;
             }
             body.signature-fields-page.select-field-mode .existing-field-marker:hover,
             body.signature-fields-page.select-field-mode .existing-typed-field-marker:hover,
@@ -18378,6 +18460,17 @@ def set_signature_fields(doc_id):
                 border-color: #fe0100;
                 background: rgba(254, 1, 0, 0.18);
                 box-shadow: 0 0 0 3px rgba(254, 1, 0, 0.25);
+            }
+            body.signature-fields-page.select-field-mode .existing-field-marker.dragging-existing-field,
+            body.signature-fields-page.select-field-mode .existing-typed-field-marker.dragging-existing-field {
+                cursor: grabbing;
+                opacity: 0.92;
+                z-index: 40;
+            }
+            body.signature-fields-page.select-field-mode .existing-field-marker .resize-handle,
+            body.signature-fields-page.select-field-mode .existing-typed-field-marker .resize-handle {
+                pointer-events: auto;
+                display: block;
             }
             body.signature-fields-page.hide-field-boxes .existing-field-marker,
             body.signature-fields-page.hide-field-boxes .existing-typed-field-marker {
@@ -18628,7 +18721,7 @@ def set_signature_fields(doc_id):
                 <div class="configured-fields-toolbar">
                     <input type="search" id="configuredFieldsSearch" class="configured-fields-search" placeholder="Search fields by PDF name, label, type, or page...">
                     <button type="button" id="clearConfiguredSelection" class="clear-configured-selection">Show All Fields</button>
-                    <span style="font-size: 0.85em; color: #cbd5e1;">Tip: Select/Edit mode scrolls clicked PDF fields here.</span>
+                    <span style="font-size: 0.85em; color: #cbd5e1;">Tip: In Select/Edit mode, click a field in the list/PDF to highlight it, or drag a box on the PDF to move it.</span>
                 </div>
                 <div id="configuredFieldsScroller" style="max-height: 220px; overflow: auto; border: 1px solid #ddd; border-radius: 4px;">
                     <table style="width: 100%; font-size: 0.85em; border-collapse: collapse;">
@@ -18795,7 +18888,8 @@ def set_signature_fields(doc_id):
                                 3. Click and hold at the top-left corner where you want the field<br>
                                 4. Drag to the bottom-right corner to set the size<br>
                                 5. Release to create the field<br>
-                                6. You can then drag the field to move it, or drag the corner handles to resize it
+                                6. You can then drag the new field to move it, or drag the corner handles to resize it<br>
+                                7. To move an existing field: switch to <strong>Select/Edit</strong>, then drag the blue/yellow box on the PDF
                             </div>
                         </div>
                         <button type="submit" class="btn btn-success" style="width: 100%;" id="submitButton">Add Field</button>
@@ -19054,18 +19148,11 @@ def set_signature_fields(doc_id):
                 });
             }
             
-            // Display existing signature fields on the canvas
-            function displayExistingFields() {
-                // Remove ONLY the saved field markers, NOT the temporary indicators being created/edited
-                var existing = document.querySelectorAll('.existing-field-marker, .existing-typed-field-marker');
-                existing.forEach(function(el) { el.remove(); });
-                
-                var viewer = document.getElementById('documentViewer');
-                var canvas = document.getElementById('pdfCanvas');
-                if (!viewer || !canvas) return;
-                
-                // Get signature fields for current page
-                var fields = [
+            var isDraggingExistingField = false;
+            var existingFieldDragMoved = false;
+
+            // Mutable field geometry for the current editor session (survives drag/redraw without page reload)
+            var signatureFieldsState = [
                     {% for field in existing_fields %}
                     {
                         id: {{ field.id }},
@@ -19077,7 +19164,37 @@ def set_signature_fields(doc_id):
                         page: {{ field.page_number }}
                     }{% if not loop.last %},{% endif %}
                     {% endfor %}
-                ];
+            ];
+            var typedFieldsState = [
+                    {% if existing_typed_fields %}
+                    {% for field in existing_typed_fields %}
+                    {
+                        id: {{ field.id }},
+                        label: '{{ field.field_label or "Typed Field" }}',
+                        type: '{{ field.field_type }}',
+                        group: '{{ field.choice_group or "" }}',
+                        x: {{ field.x_position }},
+                        y: {{ field.y_position }},
+                        width: {{ field.width or 200 }},
+                        height: {{ field.height or 30 }},
+                        page: {{ field.page_number }}
+                    }{% if not loop.last %},{% endif %}
+                    {% endfor %}
+                    {% endif %}
+            ];
+
+            // Display existing signature fields on the canvas
+            function displayExistingFields() {
+                // Remove ONLY the saved field markers, NOT the temporary indicators being created/edited
+                var existing = document.querySelectorAll('.existing-field-marker, .existing-typed-field-marker');
+                existing.forEach(function(el) { el.remove(); });
+                
+                var viewer = document.getElementById('documentViewer');
+                var canvas = document.getElementById('pdfCanvas');
+                if (!viewer || !canvas) return;
+                
+                // Signature fields for current page (from live session state)
+                var fields = signatureFieldsState;
                 
                 fields.forEach(function(field) {
                     if (field.page !== currentPage) return;
@@ -19092,6 +19209,12 @@ def set_signature_fields(doc_id):
                     }
                     marker.addEventListener('click', function(e) {
                         if (fieldMode !== 'select') return;
+                        if (existingFieldDragMoved) {
+                            existingFieldDragMoved = false;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return;
+                        }
                         e.preventDefault();
                         e.stopPropagation();
                         selectConfiguredField('signature', field.id);
@@ -19124,26 +19247,11 @@ def set_signature_fields(doc_id):
                         marker.style.height = (field.height / pdfScale) + 'px';
                     }
                     viewer.appendChild(marker);
+                    enableExistingFieldDrag(marker, 'signature', field);
                 });
                 
-                // Get typed fields for current page
-                var typedFields = [
-                    {% if existing_typed_fields %}
-                    {% for field in existing_typed_fields %}
-                    {
-                        id: {{ field.id }},
-                        label: '{{ field.field_label or "Typed Field" }}',
-                        type: '{{ field.field_type }}',
-                        group: '{{ field.choice_group or "" }}',
-                        x: {{ field.x_position }},
-                        y: {{ field.y_position }},
-                        width: {{ field.width or 200 }},
-                        height: {{ field.height or 30 }},
-                        page: {{ field.page_number }}
-                    }{% if not loop.last %},{% endif %}
-                    {% endfor %}
-                    {% endif %}
-                ];
+                // Typed fields for current page (from live session state)
+                var typedFields = typedFieldsState;
                 
                 typedFields.forEach(function(field) {
                     if (field.page !== currentPage) return;
@@ -19160,6 +19268,12 @@ def set_signature_fields(doc_id):
                     }
                     marker.addEventListener('click', function(e) {
                         if (fieldMode !== 'select') return;
+                        if (existingFieldDragMoved) {
+                            existingFieldDragMoved = false;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return;
+                        }
                         e.preventDefault();
                         e.stopPropagation();
                         selectConfiguredField('typed', field.id);
@@ -19192,6 +19306,224 @@ def set_signature_fields(doc_id):
                         marker.style.height = (field.height / pdfScale) + 'px';
                     }
                     viewer.appendChild(marker);
+                    enableExistingFieldDrag(marker, 'typed', field);
+                });
+            }
+
+            function syncExistingFieldSidebarPosition(kind, fieldId, x, y) {
+                var sidebarItems = document.querySelectorAll('.signature-field-item');
+                // Best-effort: refresh configured list row later via data attributes if present
+                var row = document.getElementById('configured-field-' + kind + '-' + fieldId);
+                if (row) {
+                    row.setAttribute('data-x', String(Math.round(x)));
+                    row.setAttribute('data-y', String(Math.round(y)));
+                }
+                if (kind === 'signature') {
+                    sidebarItems.forEach(function(item) {
+                        // Keep visual sidebar simple; page reload not required for drag
+                    });
+                }
+            }
+
+            function saveExistingFieldGeometry(kind, fieldId, x, y, width, height) {
+                var url = kind === 'typed'
+                    ? '/admin/documents/typed-fields/' + fieldId + '/geometry'
+                    : '/admin/documents/signature-fields/' + fieldId + '/geometry';
+                return fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: JSON.stringify({
+                        x_position: x,
+                        y_position: y,
+                        width: width,
+                        height: height,
+                        page_number: currentPage
+                    })
+                }).then(function(resp) {
+                    return resp.json().then(function(data) {
+                        if (!resp.ok || !data.success) {
+                            throw new Error((data && data.message) || 'Could not save field position');
+                        }
+                        return data;
+                    });
+                });
+            }
+
+            function enableExistingFieldDrag(marker, kind, field) {
+                marker.dataset.x = field.x;
+                marker.dataset.y = field.y;
+                marker.dataset.width = field.width;
+                marker.dataset.height = field.height;
+                marker.dataset.fieldKind = kind;
+                marker.dataset.fieldId = field.id;
+
+                // Add resize handles for Select/Edit adjustments
+                ['bottom-right', 'bottom-left', 'top-right', 'top-left'].forEach(function(handleClass) {
+                    if (marker.querySelector('.resize-handle.' + handleClass)) return;
+                    var handle = document.createElement('div');
+                    handle.className = 'resize-handle ' + handleClass;
+                    handle.style.display = (fieldMode === 'select') ? 'block' : 'none';
+                    marker.appendChild(handle);
+                });
+
+                marker.addEventListener('mousedown', function(e) {
+                    if (fieldMode !== 'select') return;
+                    if (e.target.classList.contains('resize-handle') || e.target.closest('.resize-handle')) {
+                        return;
+                    }
+                    if (isCreatingField || isDraggingIndicator || isResizing) return;
+
+                    isDraggingExistingField = true;
+                    existingFieldDragMoved = false;
+                    marker.classList.add('dragging-existing-field');
+                    selectConfiguredField(kind, field.id);
+
+                    var startX = e.clientX;
+                    var startY = e.clientY;
+                    var startLeft = parseFloat(marker.dataset.x) || field.x || 0;
+                    var startTop = parseFloat(marker.dataset.y) || field.y || 0;
+                    var startWidth = parseFloat(marker.dataset.width) || field.width || 200;
+                    var startHeight = parseFloat(marker.dataset.height) || field.height || 80;
+
+                    function onMove(ev) {
+                        if (!isDraggingExistingField) return;
+                        var canvasEl = document.getElementById('pdfCanvas');
+                        var viewerEl = document.getElementById('documentViewer');
+                        if (!canvasEl || !viewerEl) return;
+                        var canvasRect = canvasEl.getBoundingClientRect();
+                        var viewerRect = viewerEl.getBoundingClientRect();
+                        var scaleX = canvasEl.width / canvasRect.width;
+                        var scaleY = canvasEl.height / canvasRect.height;
+                        var deltaX = (ev.clientX - startX) * scaleX;
+                        var deltaY = (ev.clientY - startY) * scaleY;
+                        if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+                            existingFieldDragMoved = true;
+                        }
+                        var newLeft = Math.max(0, Math.min(startLeft + deltaX, canvasEl.width - startWidth));
+                        var newTop = Math.max(0, Math.min(startTop + deltaY, canvasEl.height - startHeight));
+                        marker.style.left = (canvasRect.left - viewerRect.left + (newLeft / scaleX)) + 'px';
+                        marker.style.top = (canvasRect.top - viewerRect.top + (newTop / scaleY)) + 'px';
+                        marker.dataset.x = newLeft;
+                        marker.dataset.y = newTop;
+                        updatePositionDisplay(newLeft, newTop, startWidth, startHeight);
+                        ev.preventDefault();
+                    }
+
+                    function onUp(ev) {
+                        document.removeEventListener('mousemove', onMove);
+                        document.removeEventListener('mouseup', onUp);
+                        marker.classList.remove('dragging-existing-field');
+                        isDraggingExistingField = false;
+                        if (!existingFieldDragMoved) {
+                            return;
+                        }
+                        var x = parseFloat(marker.dataset.x);
+                        var y = parseFloat(marker.dataset.y);
+                        var w = parseFloat(marker.dataset.width);
+                        var h = parseFloat(marker.dataset.height);
+                        field.x = x;
+                        field.y = y;
+                        saveExistingFieldGeometry(kind, field.id, x, y, w, h).then(function() {
+                            syncExistingFieldSidebarPosition(kind, field.id, x, y);
+                        }).catch(function(err) {
+                            alert(err.message || 'Could not save field position');
+                            displayExistingFields();
+                        });
+                    }
+
+                    document.addEventListener('mousemove', onMove);
+                    document.addEventListener('mouseup', onUp);
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+
+                // Resize existing fields in Select/Edit
+                marker.querySelectorAll('.resize-handle').forEach(function(handle) {
+                    handle.addEventListener('mousedown', function(e) {
+                        if (fieldMode !== 'select') return;
+                        e.stopPropagation();
+                        e.preventDefault();
+                        isResizing = true;
+                        var resizeHandleName = handle.className.split(' ')[1];
+                        var resizeStartClientX = e.clientX;
+                        var resizeStartClientY = e.clientY;
+                        var resizeStartW = parseFloat(marker.dataset.width) || field.width || 200;
+                        var resizeStartH = parseFloat(marker.dataset.height) || field.height || 80;
+                        var resizeStartLeft = parseFloat(marker.dataset.x) || field.x || 0;
+                        var resizeStartTop = parseFloat(marker.dataset.y) || field.y || 0;
+                        marker.classList.add('dragging-existing-field');
+
+                        function onResizeMove(ev) {
+                            if (!isResizing) return;
+                            var canvasEl = document.getElementById('pdfCanvas');
+                            var viewerEl = document.getElementById('documentViewer');
+                            if (!canvasEl || !viewerEl) return;
+                            var canvasRect = canvasEl.getBoundingClientRect();
+                            var viewerRect = viewerEl.getBoundingClientRect();
+                            var scaleX = canvasEl.width / canvasRect.width;
+                            var scaleY = canvasEl.height / canvasRect.height;
+                            var dx = (ev.clientX - resizeStartClientX) * scaleX;
+                            var dy = (ev.clientY - resizeStartClientY) * scaleY;
+                            var minW = kind === 'typed' ? 40 : 50;
+                            var minH = kind === 'typed' ? 18 : 30;
+                            var newW = resizeStartW;
+                            var newH = resizeStartH;
+                            var newL = resizeStartLeft;
+                            var newT = resizeStartTop;
+                            if (resizeHandleName === 'bottom-right') {
+                                newW = Math.max(minW, resizeStartW + dx);
+                                newH = Math.max(minH, resizeStartH + dy);
+                            } else if (resizeHandleName === 'bottom-left') {
+                                newW = Math.max(minW, resizeStartW - dx);
+                                newH = Math.max(minH, resizeStartH + dy);
+                                newL = resizeStartLeft + (resizeStartW - newW);
+                            } else if (resizeHandleName === 'top-right') {
+                                newW = Math.max(minW, resizeStartW + dx);
+                                newH = Math.max(minH, resizeStartH - dy);
+                                newT = resizeStartTop + (resizeStartH - newH);
+                            } else if (resizeHandleName === 'top-left') {
+                                newW = Math.max(minW, resizeStartW - dx);
+                                newH = Math.max(minH, resizeStartH - dy);
+                                newL = resizeStartLeft + (resizeStartW - newW);
+                                newT = resizeStartTop + (resizeStartH - newH);
+                            }
+                            newL = Math.max(0, Math.min(newL, canvasEl.width - newW));
+                            newT = Math.max(0, Math.min(newT, canvasEl.height - newH));
+                            newW = Math.min(newW, canvasEl.width - newL);
+                            newH = Math.min(newH, canvasEl.height - newT);
+                            marker.style.left = (canvasRect.left - viewerRect.left + (newL / scaleX)) + 'px';
+                            marker.style.top = (canvasRect.top - viewerRect.top + (newT / scaleY)) + 'px';
+                            marker.style.width = (newW / scaleX) + 'px';
+                            marker.style.height = (newH / scaleY) + 'px';
+                            marker.dataset.x = newL;
+                            marker.dataset.y = newT;
+                            marker.dataset.width = newW;
+                            marker.dataset.height = newH;
+                            updatePositionDisplay(newL, newT, newW, newH);
+                        }
+
+                        function onResizeUp() {
+                            document.removeEventListener('mousemove', onResizeMove);
+                            document.removeEventListener('mouseup', onResizeUp);
+                            isResizing = false;
+                            marker.classList.remove('dragging-existing-field');
+                            var x = parseFloat(marker.dataset.x);
+                            var y = parseFloat(marker.dataset.y);
+                            var w = parseFloat(marker.dataset.width);
+                            var h = parseFloat(marker.dataset.height);
+                            field.x = x; field.y = y; field.width = w; field.height = h;
+                            saveExistingFieldGeometry(kind, field.id, x, y, w, h).catch(function(err) {
+                                alert(err.message || 'Could not save field size');
+                                displayExistingFields();
+                            });
+                        }
+
+                        document.addEventListener('mousemove', onResizeMove);
+                        document.addEventListener('mouseup', onResizeUp);
+                    });
                 });
             }
             
@@ -19808,6 +20140,9 @@ def set_signature_fields(doc_id):
             function setFieldMode(mode) {
                 fieldMode = mode;
                 document.body.classList.toggle('select-field-mode', mode === 'select');
+                document.querySelectorAll('.existing-field-marker .resize-handle, .existing-typed-field-marker .resize-handle').forEach(function(h) {
+                    h.style.display = mode === 'select' ? 'block' : 'none';
+                });
 
                 var sigBtn = document.getElementById('modeSignature');
                 var typedBtn = document.getElementById('modeTyped');
@@ -20035,7 +20370,7 @@ def set_signature_fields(doc_id):
                     modeContainer.innerHTML = '<label style="font-size: 0.9em; font-weight: bold; margin-right: 10px; color: #f2f5fb;">Mode:</label>' +
                         '<button type="button" id="modeSignature" style="padding: 5px 15px; margin-right: 5px; background: #fe0100; color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 3px; cursor: pointer;">Signature</button>' +
                         '<button type="button" id="modeTyped" style="padding: 5px 15px; margin-right: 5px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Typed Field</button>' +
-                        '<button type="button" id="modeSelect" title="Click an existing field on the PDF to edit it above" style="padding: 5px 15px; margin-right: 5px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Select/Edit</button>' +
+                        '<button type="button" id="modeSelect" title="Drag existing fields to move them, or click a field to edit it in the list" style="padding: 5px 15px; margin-right: 5px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Select/Edit</button>' +
                         '<button type="button" id="toggleFieldBoxes" title="Hide or show saved field boxes on the PDF preview" style="padding: 5px 15px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Hide Boxes</button>';
                     viewerContainer.appendChild(modeContainer);
                     
@@ -20339,6 +20674,64 @@ def delete_typed_field(field_id):
     except Exception as e:
         flash(f'Error: {str(e)}. Typed fields feature may not be available.', 'error')
         return redirect(url_for('manage_documents'))
+
+
+@app.route('/admin/documents/signature-fields/<int:field_id>/geometry', methods=['POST'])
+@admin_required
+def update_signature_field_geometry(field_id):
+    """Update position/size of an existing signature field (drag/resize on editor)."""
+    field = DocumentSignatureField.query.get(field_id)
+    if not field:
+        return jsonify({'success': False, 'message': 'Signature field not found.'}), 404
+    try:
+        data = request.get_json(silent=True) or {}
+        field.x_position = float(data.get('x_position', field.x_position) or 0)
+        field.y_position = float(data.get('y_position', field.y_position) or 0)
+        field.width = float(data.get('width', field.width) or 200)
+        field.height = float(data.get('height', field.height) or 80)
+        if data.get('page_number') is not None:
+            field.page_number = max(1, int(data.get('page_number')))
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'x_position': field.x_position,
+            'y_position': field.y_position,
+            'width': field.width,
+            'height': field.height,
+            'page_number': field.page_number,
+        })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/admin/documents/typed-fields/<int:field_id>/geometry', methods=['POST'])
+@admin_required
+def update_typed_field_geometry(field_id):
+    """Update position/size of an existing typed field (drag/resize on editor)."""
+    field = DocumentTypedField.query.get(field_id)
+    if not field:
+        return jsonify({'success': False, 'message': 'Typed field not found.'}), 404
+    try:
+        data = request.get_json(silent=True) or {}
+        field.x_position = float(data.get('x_position', field.x_position) or 0)
+        field.y_position = float(data.get('y_position', field.y_position) or 0)
+        field.width = float(data.get('width', field.width) or 200)
+        field.height = float(data.get('height', field.height) or 30)
+        if data.get('page_number') is not None:
+            field.page_number = max(1, int(data.get('page_number')))
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'x_position': field.x_position,
+            'y_position': field.y_position,
+            'width': field.width,
+            'height': field.height,
+            'page_number': field.page_number,
+        })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 
 @app.route('/admin/documents/signature-fields/<int:field_id>/delete', methods=['POST'])
@@ -21465,7 +21858,7 @@ def _view_documents_impl():
                         <div class="document-info">
                             <h3>
                                 {% if doc.needs_signature %}
-                                <a href="{{ url_for('view_documents', sign=doc.id) }}" style="color: inherit; text-decoration: none;">{{ doc.name_for_users }}</a>
+                                <a href="{{ user_sign_document_url(doc.id) }}" style="color: inherit; text-decoration: none;">{{ doc.name_for_users }}</a>
                                 {% else %}
                                 {{ doc.name_for_users }}
                                 {% endif %}
@@ -21475,7 +21868,7 @@ def _view_documents_impl():
                             {% endif %}
                             {% if doc.is_assigned and doc.assignment and doc.needs_signature %}
                             <p style="color: #FE0100; font-weight: 600;">
-                                Required Signature
+                                Needs to be completed
                                 {% if doc.assignment.due_date %}
                                 • Due: {{ doc.assignment.due_date.strftime('%B %d, %Y') }}
                                 {% endif %}
@@ -21492,11 +21885,11 @@ def _view_documents_impl():
                             </p>
                         </div>
                         <div class="document-actions">
-                            {% if doc.has_signature_fields %}
+                            {% if doc.has_form_fields %}
                                 {% if doc.all_signed %}
-                                    <span class="badge">✓ Signed</span>
-                                {% else %}
-                                    <a href="{{ url_for('view_documents', sign=doc.id) }}" class="btn btn-sign" title="Open document to sign">✍️ Sign Document</a>
+                                    <span class="badge">✓ Completed</span>
+                                {% elif doc.needs_signature %}
+                                    <a href="{{ user_sign_document_url(doc.id) }}" class="btn btn-sign" title="Open document to fill and sign">✍️ Fill &amp; Sign</a>
                                 {% endif %}
                             {% endif %}
                             <a href="{{ url_for('download_document', doc_id=doc.id) }}" class="btn">⬇️ Download</a>
