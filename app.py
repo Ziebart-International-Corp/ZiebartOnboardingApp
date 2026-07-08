@@ -2417,6 +2417,38 @@ def send_password_reset_email(user, temporary_password):
     return send_email(to_email, subject, body_html, body_text=body_text)
 
 
+def send_onboarding_welcome_email(first_name, last_name, to_email, password):
+    """Email new hire a get-started link plus login credentials after onboarding is created."""
+    to_email = normalize_email(to_email)
+    if not to_email or not password:
+        return False
+    login_url = onboarding_login_url()
+    display_name = (f'{first_name or ""} {last_name or ""}').strip() or 'there'
+    subject = 'Welcome to Ziebart Onboarding — get started'
+    body_html = f'''
+    <p>Hello {display_name},</p>
+    <p>Your Ziebart onboarding account is ready. Use the link below to log in and get started with your training and forms.</p>
+    <p><strong>Email:</strong> {to_email}<br>
+    <strong>Password:</strong> {password}</p>
+    <p><a href="{login_url}" style="display:inline-block;padding:10px 18px;background:#FE0100;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Get started</a></p>
+    <p>If the button does not work, copy and paste this link into your browser:<br>{login_url}</p>
+    <p>If you have questions, contact your manager or onboarding administrator.</p>
+    <p>Welcome aboard,<br>Onboarding Team</p>
+    '''
+    body_text = (
+        f"Hello {display_name},\n\n"
+        "Your Ziebart onboarding account is ready. Use the link below to log in and get started "
+        "with your training and forms.\n\n"
+        f"Email: {to_email}\n"
+        f"Password: {password}\n\n"
+        f"Get started:\n{login_url}\n\n"
+        "If you have questions, contact your manager or onboarding administrator.\n\n"
+        "Welcome aboard,\n"
+        "Onboarding Team"
+    )
+    return send_email(to_email, subject, body_html, body_text=body_text)
+
+
 def send_email_with_attachment(to_email, subject, body_html, attachment_filename, attachment_bytes, body_text=None):
     """Send email with a single PDF (or other) attachment. Uses same config as send_email."""
     if not MAIL_AVAILABLE or not to_email or not to_email.strip():
@@ -9831,6 +9863,7 @@ def add_new_hire():
                             <div class="form-group">
                                 <label for="email">Email Address</label>
                                 <input type="email" name="email" id="email" placeholder="Will auto-generate if left blank">
+                                <small>If provided, they’ll get a welcome email with a get-started login link and their password.</small>
                             </div>
                             
                             <div class="form-row">
@@ -10272,6 +10305,7 @@ def create_new_hire():
     first_name = request.form.get('first_name', '').strip()
     last_name = request.form.get('last_name', '').strip()
     email = normalize_email(request.form.get('email'))
+    email_provided_by_staff = bool(email)
     password = request.form.get('password', '').strip()
     department_id_raw = request.form.get('department_id', '').strip()
     dept_id, dept_name = resolve_department_from_form(department_id_raw)
@@ -10491,6 +10525,14 @@ def create_new_hire():
         if required_documents:
             msg_parts.append(f'and {len(required_documents)} document(s) to sign')
         msg_parts.append('.')
+
+        # Send get-started email with login link (best-effort; hire creation already succeeded)
+        if email_provided_by_staff and send_onboarding_welcome_email(first_name, last_name, email, password):
+            msg_parts.append(f'Welcome email sent to {email}.')
+        elif email_provided_by_staff:
+            msg_parts.append(f'Could not send welcome email to {email} — share the login link manually.')
+        else:
+            msg_parts.append('No email entered — welcome link was not sent.')
         
         flash(' '.join(msg_parts), 'success')
         if uses_manager_new_hires_home():
