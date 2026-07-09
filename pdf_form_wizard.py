@@ -1953,6 +1953,30 @@ def embed_typed_field_values_in_pdf(
             _place_text_in_pdf_rect(page, rect, val)
 
 
+def embed_employment_overlay_values(pdf_doc, overlay_values: dict[str, str]) -> None:
+    """Draw employment-application date overlays (no AcroForm widget on the PDF)."""
+    if not overlay_values:
+        return
+    try:
+        from employment_pdf_field_map import EMP_OVERLAY_FIELDS
+    except ImportError:
+        return
+    for key, val in overlay_values.items():
+        text = (val or '').strip()
+        if not text or text.upper() == 'N/A':
+            continue
+        spec = EMP_OVERLAY_FIELDS.get(key)
+        if not spec:
+            continue
+        page_num, (x, y, w, h) = spec
+        page_idx = int(page_num) - 1
+        if page_idx < 0 or page_idx >= len(pdf_doc):
+            continue
+        page = pdf_doc[page_idx]
+        rect = viewer_coords_to_pdf_rect(page, x, y, w, h)
+        _place_text_in_pdf_rect(page, rect, text)
+
+
 # Gap between signature image bottom and the printed underline (PDF points).
 _SIGNATURE_LINE_GAP = 0.5
 # Nudge ink downward so signatures sit on the line (not floating above it).

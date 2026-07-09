@@ -35,6 +35,7 @@ from pdf_form_wizard import (
     delete_wizard_state,
     embed_signatures_in_pdf,
     embed_typed_field_values_in_pdf,
+    embed_employment_overlay_values,
     flatten_pdf_form_widgets,
     rasterize_pdf_pages,
     save_pdf_document_copy,
@@ -4549,13 +4550,19 @@ def document_fully_completed_for_user(document_id, username):
 
     try:
         from document_wizard_labels import is_employee_information_form
+        from employment_wizard_labels import is_employment_application_form
         if is_employee_information_form(typed_fields):
             document = Document.query.get(document_id)
             if document:
                 steps, _, _ = _load_document_wizard_steps(document, username)
                 return wizard_required_steps_complete(steps)
+        if is_employment_application_form(typed_fields):
+            document = Document.query.get(document_id)
+            if document:
+                steps, _, _ = _load_document_wizard_steps(document, username)
+                return wizard_required_steps_complete(steps)
     except Exception:
-        app.logger.exception('EE wizard completion check failed doc_id=%s', document_id)
+        app.logger.exception('wizard completion check failed doc_id=%s', document_id)
 
     required_sig = sig_fields
     if required_sig and not all(
@@ -14810,6 +14817,14 @@ def _document_wizard_has_dependents_key(doc_id):
     return f'doc_wizard_deps_{doc_id}'
 
 
+def _document_wizard_overlay_key(doc_id):
+    return f'doc_wizard_overlay_{doc_id}'
+
+
+def _document_wizard_emp_parts_key(doc_id):
+    return f'doc_wizard_emp_parts_{doc_id}'
+
+
 def _user_can_fill_document(document, username, is_admin=None):
     if is_admin is None:
         is_admin = current_user.is_admin() if current_user else False
@@ -15086,16 +15101,26 @@ def _load_document_wizard_steps(document, username):
             repair_employee_information_field_groups,
             resolve_has_dependents_answer,
         )
+        from employment_wizard_labels import (
+            filter_employment_wizard_steps,
+            is_employment_application_form,
+            repair_employment_application_field_groups,
+        )
         if is_employee_information_form(typed_fields):
             if repair_employee_information_field_groups(typed_fields):
                 db.session.commit()
+        elif is_employment_application_form(typed_fields):
+            if repair_employment_application_field_groups(typed_fields):
+                db.session.commit()
     except Exception:
-        app.logger.exception('repair EE field groups failed doc_id=%s', document.id)
+        app.logger.exception('repair form field groups failed doc_id=%s', document.id)
     has_dependents = session.get(_document_wizard_has_dependents_key(document.id))
     try:
         has_dependents = resolve_has_dependents_answer(has_dependents, typed_values, typed_fields)
     except Exception:
         pass
+    overlay_values = session.get(_document_wizard_overlay_key(document.id)) or {}
+    composite_parts = session.get(_document_wizard_emp_parts_key(document.id)) or {}
     steps = build_wizard_fields_for_document(
         document.id,
         signature_fields,
@@ -15107,13 +15132,18 @@ def _load_document_wizard_steps(document, username):
         today_date,
         typed_field_is_phone_like,
         has_dependents=has_dependents,
+        overlay_values=overlay_values,
+        composite_parts=composite_parts,
     )
     try:
         from document_wizard_labels import filter_ee_wizard_steps, is_employee_information_form
+        from employment_wizard_labels import filter_employment_wizard_steps, is_employment_application_form
         if is_employee_information_form(typed_fields):
             steps = filter_ee_wizard_steps(steps, has_dependents)
+        elif is_employment_application_form(typed_fields):
+            steps = filter_employment_wizard_steps(steps, typed_fields, typed_values)
     except Exception:
-        app.logger.exception('filter EE wizard steps failed doc_id=%s', document.id)
+        app.logger.exception('filter wizard steps failed doc_id=%s', document.id)
     return steps, signature_fields, typed_fields
 
 
@@ -15605,12 +15635,32 @@ def document_wizard_save_field(doc_id):
                 session[_document_wizard_index_key(doc_id)] = idx
                 return redirect(url_for('view_documents', wizard=doc_id))
 
-            def _persist_skipped_field(field_id, value):
-                tf = DocumentTypedField.query.get(field_id)
-                if tf and tf.document_id == doc_id:
-                    _wizard_persist_typed(doc_id, tf, value, username)
+            if step.get('kind') == 'overlay':
+                overlay_key = step.get('overlay_key') or ''
+                overlays = dict(session.get(_document_wizard_overlay_key(doc_id)) or {})
+                overlays[overlay_key] = step.get('skip_value') or ''
+                session[_document_wizard_overlay_key(doc_id)] = overlays
+            elif step.get('kind') == 'emp_part':
+                pk = step.get('part_key') or ''
+                role = step.get('part_role') or ''
+                parts = dict(session.get(_document_wizard_emp_parts_key(doc_id)) or {})
+                if pk and role:
+                    parts[f'{pk}:{role}'] = step.get('skip_value') or ''
+                    session[_document_wizard_emp_parts_key(doc_id)] = parts
+            elif step.get('kind') == 'gate' and step.get('emp_composite'):
+                pk = step.get('part_key') or ''
+                role = step.get('part_role') or ''
+                parts = dict(session.get(_document_wizard_emp_parts_key(doc_id)) or {})
+                if pk and role:
+                    parts[f'{pk}:{role}'] = ''
+                    session[_document_wizard_emp_parts_key(doc_id)] = parts
+            else:
+                def _persist_skipped_field(field_id, value):
+                    tf = DocumentTypedField.query.get(field_id)
+                    if tf and tf.document_id == doc_id:
+                        _wizard_persist_typed(doc_id, tf, value, username)
 
-            apply_wizard_field_skip(step, _persist_skipped_field)
+                apply_wizard_field_skip(step, _persist_skipped_field)
             db.session.commit()
             _finalize_document_completion(doc_id, username)
         elif direction != 'back':
@@ -15620,25 +15670,59 @@ def document_wizard_save_field(doc_id):
                     flash('Please select Yes or No.', 'error')
                     session[_document_wizard_index_key(doc_id)] = idx
                     return redirect(url_for('view_documents', wizard=doc_id))
-                deps_key = _document_wizard_has_dependents_key(doc_id)
-                prev = session.get(deps_key)
-                session[deps_key] = ans
-                from document_wizard_labels import (
-                    apply_ee_dependents_not_applicable,
-                    clear_ee_dependents_values,
-                    ee_id_by_acro,
-                )
-                id_by_acro = ee_id_by_acro(typed_fields)
+                if step.get('emp_composite'):
+                    parts = dict(session.get(_document_wizard_emp_parts_key(doc_id)) or {})
+                    pk = step.get('part_key') or ''
+                    role = step.get('part_role') or ''
+                    if pk and role:
+                        parts[f'{pk}:{role}'] = ans
+                        session[_document_wizard_emp_parts_key(doc_id)] = parts
+                        from employment_wizard_labels import persist_employment_composites_to_db
+                        persist_employment_composites_to_db(
+                            doc_id, typed_fields, parts, username, _wizard_persist_typed,
+                        )
+                else:
+                    deps_key = _document_wizard_has_dependents_key(doc_id)
+                    prev = session.get(deps_key)
+                    session[deps_key] = ans
+                    from document_wizard_labels import (
+                        apply_ee_dependents_not_applicable,
+                        clear_ee_dependents_values,
+                        ee_id_by_acro,
+                    )
+                    id_by_acro = ee_id_by_acro(typed_fields)
 
-                def _persist_gate_field(field_id, field_val):
-                    tf = DocumentTypedField.query.get(field_id)
-                    if tf and tf.document_id == doc_id:
-                        _wizard_persist_typed(doc_id, tf, field_val, username)
+                    def _persist_gate_field(field_id, field_val):
+                        tf = DocumentTypedField.query.get(field_id)
+                        if tf and tf.document_id == doc_id:
+                            _wizard_persist_typed(doc_id, tf, field_val, username)
 
-                if ans == 'no':
-                    apply_ee_dependents_not_applicable(_persist_gate_field, id_by_acro)
-                elif prev == 'no':
-                    clear_ee_dependents_values(_persist_gate_field, id_by_acro)
+                    if ans == 'no':
+                        apply_ee_dependents_not_applicable(_persist_gate_field, id_by_acro)
+                    elif prev == 'no':
+                        clear_ee_dependents_values(_persist_gate_field, id_by_acro)
+            elif step['kind'] == 'overlay':
+                overlay_key = step.get('overlay_key') or ''
+                overlays = dict(session.get(_document_wizard_overlay_key(doc_id)) or {})
+                if direction == 'skip':
+                    overlays[overlay_key] = step.get('skip_value') or ''
+                else:
+                    overlays[overlay_key] = value
+                session[_document_wizard_overlay_key(doc_id)] = overlays
+            elif step['kind'] == 'emp_part':
+                pk = step.get('part_key') or ''
+                role = step.get('part_role') or ''
+                parts = dict(session.get(_document_wizard_emp_parts_key(doc_id)) or {})
+                if pk and role:
+                    if direction == 'skip':
+                        parts[f'{pk}:{role}'] = step.get('skip_value') or ''
+                    else:
+                        parts[f'{pk}:{role}'] = value
+                    session[_document_wizard_emp_parts_key(doc_id)] = parts
+                    from employment_wizard_labels import persist_employment_composites_to_db
+                    persist_employment_composites_to_db(
+                        doc_id, typed_fields, parts, username, _wizard_persist_typed,
+                    )
             elif step['kind'] == 'ack_group':
                 if direction != 'skip':
                     checked_raw = request.form.getlist('ack_field')
@@ -24743,6 +24827,14 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
         embed_typed_field_values_in_pdf(
             pdf_doc, typed_fields, typed_value_map, typed_value_filled_at,
         )
+        try:
+            from flask import has_request_context
+            from employment_wizard_labels import is_employment_application_form
+            if has_request_context() and is_employment_application_form(typed_fields):
+                overlays = session.get(_document_wizard_overlay_key(document.id)) or {}
+                embed_employment_overlay_values(pdf_doc, overlays)
+        except Exception:
+            pass
         embed_signatures_in_pdf(pdf_doc, user_signatures, signature_fields)
         flatten_pdf_form_widgets(pdf_doc)
 

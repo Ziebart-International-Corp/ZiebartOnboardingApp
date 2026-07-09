@@ -8,6 +8,10 @@ from document_wizard_labels import (
     is_employee_information_form,
     wizard_skip_value_for_step,
 )
+from employment_wizard_labels import (
+    build_employment_application_wizard_steps,
+    is_employment_application_form,
+)
 
 # Use wizard UI when a document has at least this many configured fields.
 DOCUMENT_WIZARD_MIN_FIELDS = 8
@@ -42,6 +46,8 @@ def build_wizard_fields_for_document(
     today_date: str,
     phone_like_fn,
     has_dependents: Optional[str] = None,
+    overlay_values: Optional[dict[str, str]] = None,
+    composite_parts: Optional[dict[str, str]] = None,
 ) -> list[dict[str, Any]]:
     """
     Build ordered wizard steps from admin-configured document fields.
@@ -59,6 +65,21 @@ def build_wizard_fields_for_document(
             _wizard_type_for_typed,
             phone_like_fn,
             has_dependents=has_dependents,
+        )
+
+    if is_employment_application_form(typed_fields):
+        return build_employment_application_wizard_steps(
+            typed_fields,
+            signature_fields,
+            typed_values,
+            signed_field_ids,
+            user_display_name,
+            user_initials,
+            today_date,
+            _wizard_type_for_typed,
+            phone_like_fn,
+            overlay_values=overlay_values,
+            composite_parts=composite_parts,
         )
 
     tf_sort = {tf.id: (tf.page_number, tf.y_position, tf.x_position) for tf in typed_fields}
