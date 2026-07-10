@@ -1793,40 +1793,326 @@ def flatten_pdf_form_widgets(pdf_doc) -> None:
             break
 
 
-def _place_text_in_pdf_rect(page, rect, text: str, *, fontsize: int | None = None) -> None:
+def _pdf_rect_center_viewer(page, rect) -> tuple[float, float]:
+    """Return widget rect center in sign-page viewer coordinates."""
+    page_height = page.rect.height
+    page_width = page.rect.width
+    scale_y = page_height / SIGN_VIEWER_HEIGHT
+    viewer_width_px = SIGN_VIEWER_HEIGHT * (page_width / page_height)
+    scale_x = page_width / viewer_width_px
+    cx = (rect.x0 + rect.x1) / 2 / scale_x
+    cy = (rect.y0 + rect.y1) / 2 / scale_y
+    return cx, cy
+
+
+def _employment_pick_widget(page, widget, tf, candidates: list[tuple]) -> tuple | None:
+    """Pick the AcroForm widget whose center is closest to the DB field position."""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    fx = (getattr(tf, 'x_position', 0) or 0) + (getattr(tf, 'width', 0) or 0) / 2
+    fy = (getattr(tf, 'y_position', 0) or 0) + (getattr(tf, 'height', 0) or 0) / 2
+    tf_page = int(getattr(tf, 'page_number', 1) or 1) - 1
+    best = None
+    best_dist = None
+    for page_idx, pg, w in candidates:
+        if tf_page >= 0 and page_idx != tf_page:
+            continue
+        if not w.rect or w.rect.is_empty:
+            continue
+        wx, wy = _pdf_rect_center_viewer(pg, fitz.Rect(w.rect))
+        dist = (wx - fx) ** 2 + (wy - fy) ** 2
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best = (page_idx, pg, w)
+    return best or candidates[0]
+
+
+_FORM_EMBED_FONT = 'helv'
+_FORM_EMBED_FONT_MAX = 10.0
+_FORM_EMBED_FONT_MIN = 7.5
+_FORM_EMBED_FONT_MIN_NARROW = 5.5
+# User-filled values render in blue so they stand out from the printed form.
+_FORM_FILLED_INK = (0.0, 0.2, 0.75)
+# Optional upward nudge for filled text (PDF points); 0 = sit on the printed rule.
+_FORM_TEXT_BASELINE_UP = 0.0
+# Where single-line fields sit within the widget rect (higher = closer to the rule).
+_FORM_LINE_FIELD_BASELINE = 0.85
+# Shift filled text slightly right (~0.5 mm in PDF points).
+_FORM_TEXT_X_RIGHT = 1.418
+
+
+def _fit_form_fontsize(rect, text: str = '', *, requested: float | None = None) -> float:
+    """Pick a consistent body-text size for a form field rect."""
+    if requested is not None:
+        fs = max(_FORM_EMBED_FONT_MIN, min(float(requested), _FORM_EMBED_FONT_MAX))
+    else:
+        cap = rect.height * 0.48
+        fs = max(_FORM_EMBED_FONT_MIN, min(_FORM_EMBED_FONT_MAX, cap))
+    val = (text or '').strip()
+    if not val or rect.width <= 0:
+        return fs
+    try:
+        while fs > _FORM_EMBED_FONT_MIN:
+            tw = fitz.get_text_length(val, fontname=_FORM_EMBED_FONT, fontsize=fs)
+            if tw <= max(4.0, rect.width - 2.0):
+                break
+            fs -= 0.5
+    except Exception:
+        pass
+    return fs
+
+
+def _form_text_baseline_y(rect, fs: float, *, on_line: bool = False) -> float:
+    """Baseline for filled text: centered in table cells, on the rule for line fields."""
+    if on_line or rect.height <= 24:
+        y = rect.y0 + rect.height * _FORM_LINE_FIELD_BASELINE
+    else:
+        y = (rect.y0 + rect.y1) / 2 + fs * 0.32
+    return y - _FORM_TEXT_BASELINE_UP
+
+
+def _place_education_name_in_pdf_rect(page, rect, text: str) -> None:
+    """Draw school name on the row underline only — no white erase, labels stay visible."""
+    val = (text or '').strip()
+    if not val or rect.is_empty:
+        return
+    pad_x = 2.0
+    max_w = max(4.0, rect.width - pad_x * 2)
+    fs = min(_FORM_EMBED_FONT_MAX, rect.height * 0.4)
+    while fs >= _FORM_EMBED_FONT_MIN:
+        try:
+            tw = fitz.get_text_length(val, fontname=_FORM_EMBED_FONT, fontsize=fs)
+            if tw <= max_w:
+                baseline = _form_text_baseline_y(rect, fs, on_line=True)
+                page.insert_text(
+                    (rect.x0 + pad_x, baseline),
+                    val[:500],
+                    fontsize=fs,
+                    fontname=_FORM_EMBED_FONT,
+                    color=_FORM_FILLED_INK,
+                )
+                return
+        except Exception:
+            pass
+        fs -= 0.5
+    bottom = fitz.Rect(
+        rect.x0 + 1.0,
+        rect.y0 + rect.height * 0.42,
+        rect.x1 - 1.0,
+        rect.y1 - 1.0,
+    )
+    fs_try = min(_FORM_EMBED_FONT_MAX, rect.height * 0.36)
+    while fs_try >= _FORM_EMBED_FONT_MIN:
+        try:
+            rc = page.insert_textbox(
+                bottom,
+                val,
+                fontsize=fs_try,
+                fontname=_FORM_EMBED_FONT,
+                align=0,
+                color=_FORM_FILLED_INK,
+                render_mode=0,
+            )
+            if rc >= 0:
+                return
+        except Exception:
+            pass
+        fs_try -= 0.5
+
+
+def _place_employer_date_in_pdf_rect(page, rect, text: str) -> None:
+    """Draw employment-history From/To dates — larger and slightly higher than default."""
+    val = (text or '').strip()
+    if not val or rect.is_empty:
+        return
+    try:
+        from employment_pdf_field_map import (
+            EMP_EMPLOYER_DATE_BASELINE_UP,
+            EMP_EMPLOYER_DATE_FONT_BOOST,
+        )
+    except ImportError:
+        EMP_EMPLOYER_DATE_FONT_BOOST = 2.0
+        EMP_EMPLOYER_DATE_BASELINE_UP = 2.0
+    fs = min(
+        _FORM_EMBED_FONT_MAX + EMP_EMPLOYER_DATE_FONT_BOOST,
+        _fit_form_fontsize(rect, val) + EMP_EMPLOYER_DATE_FONT_BOOST,
+    )
+    while fs >= _FORM_EMBED_FONT_MIN:
+        try:
+            tw = fitz.get_text_length(val, fontname=_FORM_EMBED_FONT, fontsize=fs)
+            if tw <= max(4.0, rect.width - 2.0):
+                break
+        except Exception:
+            break
+        fs -= 0.5
+    baseline_y = _form_text_baseline_y(rect, fs, on_line=True) - EMP_EMPLOYER_DATE_BASELINE_UP
+    x0 = rect.x0 + 1.5 + _FORM_TEXT_X_RIGHT
+    try:
+        page.insert_text(
+            (x0, baseline_y),
+            val[:500],
+            fontsize=fs,
+            fontname=_FORM_EMBED_FONT,
+            color=_FORM_FILLED_INK,
+        )
+    except Exception:
+        pass
+
+
+def _place_text_in_pdf_rect(
+    page,
+    rect,
+    text: str,
+    *,
+    fontsize: int | None = None,
+    clip_to_rect: bool = False,
+) -> None:
     val = (text or '').strip()
     if not val or rect.is_empty or rect.width <= 0 or rect.height <= 0:
         return
-    fs = fontsize
-    if fs is None:
-        fs = int(rect.height * 0.75)
-        fs = max(8, min(fs, 72))
+    narrow_cell = clip_to_rect and rect.width < 55
+    education_name = clip_to_rect and not narrow_cell
+    if education_name:
+        _place_education_name_in_pdf_rect(page, rect, val)
+        return
+    fs_min = _FORM_EMBED_FONT_MIN_NARROW if clip_to_rect else _FORM_EMBED_FONT_MIN
+    fs = _fit_form_fontsize(rect, val, requested=fontsize)
+    fs = max(fs_min, fs)
     try:
-        rc = page.insert_textbox(
-            rect, val, fontsize=fs, align=0, color=(0, 0, 0), render_mode=0,
-        )
-        if rc < 0:
-            page.insert_text((rect.x0 + 2, rect.y0 + fs + 1), val[:200], fontsize=fs, color=(0, 0, 0))
+        tw = fitz.get_text_length(val, fontname=_FORM_EMBED_FONT, fontsize=fs)
     except Exception:
+        tw = 0
+    tall_cell = rect.height > 24
+    use_textbox = narrow_cell or (
+        tall_cell and (tw > max(4.0, rect.width - 2.0) or len(val) > 48)
+    )
+    if use_textbox:
+        up = _FORM_TEXT_BASELINE_UP
+        box = fitz.Rect(
+            rect.x0 + 1.0 + (_FORM_TEXT_X_RIGHT if not clip_to_rect else 0.5),
+            rect.y0 + 1.0 - up,
+            rect.x1 - 1.0,
+            rect.y1 - 1.0 - up,
+        )
+        fs_try = fs
+        while fs_try >= fs_min:
+            try:
+                rc = page.insert_textbox(
+                    box,
+                    val,
+                    fontsize=fs_try,
+                    fontname=_FORM_EMBED_FONT,
+                    align=0,
+                    color=_FORM_FILLED_INK,
+                    render_mode=0,
+                )
+                if rc >= 0:
+                    return
+            except Exception:
+                pass
+            fs_try -= 0.5
+        if clip_to_rect:
+            return
+    baseline_y = _form_text_baseline_y(rect, fs, on_line=not tall_cell)
+    x0 = rect.x0 + 1.5 + _FORM_TEXT_X_RIGHT
+    if tall_cell and not narrow_cell:
         try:
-            page.insert_text((rect.x0 + 2, rect.y0 + fs + 1), val[:200], fontsize=fs, color=(0, 0, 0))
+            tw = fitz.get_text_length(val, fontname=_FORM_EMBED_FONT, fontsize=fs)
+            if tw < rect.width - 2:
+                x0 = rect.x0 + max(1.5, (rect.width - tw) / 2) + _FORM_TEXT_X_RIGHT
         except Exception:
             pass
+    try:
+        page.insert_text(
+            (x0, baseline_y),
+            val[:500],
+            fontsize=fs,
+            fontname=_FORM_EMBED_FONT,
+            color=_FORM_FILLED_INK,
+        )
+    except Exception:
+        pass
+
+
+def _employment_text_acro(acro: str) -> bool:
+    try:
+        from employment_pdf_field_map import EMP_YESNO_TEXT_ACROS
+        return (acro or '').strip() in EMP_YESNO_TEXT_ACROS
+    except ImportError:
+        return False
+
+
+def _employment_choice_is_checked(val: str) -> bool:
+    return (val or '').strip().upper() in ('X', '1', 'TRUE', 'YES', 'ON')
+
+
+def _employment_embed_as_text(widget, val: str, acro: str) -> bool:
+    """Acrobat text widgets (type 7) and graduated Yes/No cells store plain text, not X marks."""
+    if getattr(widget, 'field_type', None) == 7:
+        return True
+    if _employment_text_acro(acro):
+        return True
+    if (val or '').strip() and not _employment_choice_is_checked(val):
+        return True
+    return False
+
+
+def _employment_delete_radio_siblings(page, widget) -> None:
+    """Remove every radio widget sharing the same field name (Yes/No pair)."""
+    if getattr(widget, 'field_type', None) != 5:
+        return
+    fname = (widget.field_name or '').strip()
+    if not fname:
+        return
+    for w in list(page.widgets() or []):
+        if (w.field_name or '').strip() == fname:
+            try:
+                page.delete_widget(w)
+            except Exception:
+                pass
 
 
 def _place_checkmark_in_pdf_rect(page, rect) -> None:
-    """Draw a centered X in a small checkbox/marker rect (fallback only)."""
+    """Draw a centered X inside a checkbox rect."""
     if rect.is_empty or rect.width <= 0 or rect.height <= 0:
         return
-    fs = max(7, min(int(rect.height * 0.85), int(rect.width * 0.85), 14))
+    fs = max(5.5, min(rect.width, rect.height) * 0.68)
     try:
-        rc = page.insert_textbox(
-            rect, 'X', fontsize=fs, align=1, color=(0, 0, 0), render_mode=0,
+        tw = fitz.get_text_length('X', fontname=_FORM_EMBED_FONT, fontsize=fs)
+    except Exception:
+        tw = fs * 0.55
+    cx = (rect.x0 + rect.x1) / 2
+    cy = (rect.y0 + rect.y1) / 2 - _FORM_TEXT_BASELINE_UP
+    x = cx - tw / 2
+    y = cy + fs * 0.28
+    try:
+        page.insert_text(
+            (x, y),
+            'X',
+            fontsize=fs,
+            fontname=_FORM_EMBED_FONT,
+            color=_FORM_FILLED_INK,
         )
-        if rc < 0:
-            cx = (rect.x0 + rect.x1) / 2
-            cy = (rect.y0 + rect.y1) / 2
-            page.insert_text((cx - fs * 0.3, cy + fs * 0.35), 'X', fontsize=fs, color=(0, 0, 0))
+        return
+    except Exception:
+        pass
+    half = min(rect.width, rect.height) * 0.26
+    w = max(0.55, min(rect.width, rect.height) * 0.09)
+    try:
+        page.draw_line(
+            fitz.Point(cx - half, cy - half),
+            fitz.Point(cx + half, cy + half),
+            color=_FORM_FILLED_INK,
+            width=w,
+        )
+        page.draw_line(
+            fitz.Point(cx + half, cy - half),
+            fitz.Point(cx - half, cy + half),
+            color=_FORM_FILLED_INK,
+            width=w,
+        )
     except Exception:
         pass
 
@@ -1848,8 +2134,21 @@ def embed_typed_field_values_in_pdf(
         from ee_pdf_field_map import canonical_acro
     except ImportError:
         canonical_acro = lambda n: (n or '').strip()  # noqa: E731
+    try:
+        from employment_wizard_labels import is_employment_application_form
+    except ImportError:
+        is_employment_application_form = lambda _fields: False  # noqa: E731
+
+    is_emp_form = is_employment_application_form(typed_fields)
+
+    def _acro_name(name: str) -> str:
+        n = (name or '').strip()
+        if is_emp_form:
+            return n
+        return canonical_acro(n)
 
     best_by_acro: dict[str, tuple] = {}
+    field_entries: list[tuple] = []
     for tf in typed_fields:
         tid = getattr(tf, 'id', None)
         if tid is None or tid not in typed_value_map:
@@ -1859,7 +2158,7 @@ def embed_typed_field_values_in_pdf(
             continue
         ph = (getattr(tf, 'placeholder', None) or '').strip()
         if ph.startswith(ACRO_PLACEHOLDER_PREFIX):
-            ak = canonical_acro(ph[len(ACRO_PLACEHOLDER_PREFIX):])
+            ak = _acro_name(ph[len(ACRO_PLACEHOLDER_PREFIX):])
         else:
             ak = f'_field_{tid}'
         filled_at = (typed_value_filled_at or {}).get(tid)
@@ -1870,54 +2169,115 @@ def embed_typed_field_values_in_pdf(
             except Exception:
                 ts = 0.0
         sort_key = (ts, tid or 0)
-        prev = best_by_acro.get(ak)
-        if prev is None or sort_key >= prev[2]:
-            best_by_acro[ak] = (tf, val, sort_key)
+        field_entries.append((tf, val, ak, sort_key))
+        if not is_emp_form:
+            prev = best_by_acro.get(ak)
+            if prev is None or sort_key >= prev[2]:
+                best_by_acro[ak] = (tf, val, sort_key)
 
     widgets_by_acro: dict[str, tuple] = {}
+    widgets_multimap: dict[str, list[tuple]] = {}
     for page_idx, page in enumerate(pdf_doc):
         for widget in page.widgets() or []:
-            wname = canonical_acro((widget.field_name or '').strip())
-            if wname:
-                widgets_by_acro[wname] = (page, widget)
+            wname = _acro_name((widget.field_name or '').strip())
+            if not wname:
+                continue
+            entry = (page_idx, page, widget)
+            widgets_multimap.setdefault(wname, []).append(entry)
+            widgets_by_acro[wname] = (page, widget)
 
-    handled_acros: set[str] = set()
-    for acro, (tf, val, _sort_key) in best_by_acro.items():
-        hit = widgets_by_acro.get(acro)
-        if not hit:
-            continue
-        page, widget = hit
+    def _embed_on_widget(page, widget, tf, val, acro: str = '') -> None:
         if not widget.rect or widget.rect.is_empty:
-            continue
+            return
         rect = fitz.Rect(widget.rect)
         ft = getattr(tf, 'field_type', None) or 'text'
-        wtype = getattr(widget, 'field_type', None)
-        try:
-            if ft == 'checkbox_choice':
-                if val.upper() == 'X':
-                    if wtype in (2, 5):
-                        widget.field_value = checkbox_widget_value(widget, val)
-                        widget.update()
-                        page.delete_widget(widget)
-                    else:
-                        page.delete_widget(widget)
-                        _place_checkmark_in_pdf_rect(page, rect)
+        as_text = is_emp_form and _employment_embed_as_text(widget, val, acro)
+        clip = _clip_name_text(acro)
+        if ft == 'checkbox_choice' and not as_text:
+            if _employment_choice_is_checked(val):
+                if is_emp_form:
+                    _employment_delete_radio_siblings(page, widget)
                 else:
-                    page.delete_widget(widget)
+                    try:
+                        page.delete_widget(widget)
+                    except Exception:
+                        pass
+                _place_checkmark_in_pdf_rect(page, rect)
             else:
+                try:
+                    page.delete_widget(widget)
+                except Exception:
+                    pass
+        else:
+            try:
                 page.delete_widget(widget)
-                _place_text_in_pdf_rect(page, rect, val)
-            handled_acros.add(acro)
-        except Exception:
-            pass
+            except Exception:
+                pass
+            _place_text_in_pdf_rect(page, rect, val, clip_to_rect=clip)
 
+    handled_acros: set[str] = set()
+    handled_widgets: set[int] = set()
+    handled_field_ids: set[int] = set()
+
+    try:
+        from employment_pdf_field_map import EMP_EDUCATION_NAME_ACROS, EMP_HIGH_SCHOOL_NAME_ACRO
+    except ImportError:
+        EMP_EDUCATION_NAME_ACROS = frozenset()
+        EMP_HIGH_SCHOOL_NAME_ACRO = ''
+
+    def _clip_name_text(acro: str) -> bool:
+        return (acro or '').strip() in EMP_EDUCATION_NAME_ACROS
+
+    if is_emp_form:
+        for tf, val, acro, _sort_key in field_entries:
+            candidates = widgets_multimap.get(acro, [])
+            picked = _employment_pick_widget(None, None, tf, candidates)
+            if picked:
+                page_idx, page, widget = picked
+                wid = id(widget)
+                if wid in handled_widgets:
+                    continue
+                try:
+                    if acro == EMP_HIGH_SCHOOL_NAME_ACRO:
+                        try:
+                            page.delete_widget(widget)
+                        except Exception:
+                            pass
+                        handled_widgets.add(wid)
+                        continue
+                    _embed_on_widget(page, widget, tf, val, acro)
+                    handled_widgets.add(wid)
+                    handled_acros.add(acro)
+                    if getattr(tf, 'id', None) is not None:
+                        handled_field_ids.add(tf.id)
+                except Exception:
+                    pass
+    else:
+        for acro, (tf, val, _sort_key) in best_by_acro.items():
+            hit = widgets_by_acro.get(acro)
+            if not hit:
+                continue
+            page, widget = hit
+            try:
+                _embed_on_widget(page, widget, tf, val, acro)
+                handled_acros.add(acro)
+            except Exception:
+                pass
+
+    fallback_entries = field_entries if is_emp_form else [
+        (tf, val, acro, sk) for acro, (tf, val, sk) in best_by_acro.items()
+    ]
     widget_rects = acro_widget_rect_map(pdf_doc)
-    for acro, (tf, val, _sort_key) in best_by_acro.items():
-        if acro in handled_acros:
+    for tf, val, acro, _sort_key in fallback_entries:
+        if is_emp_form:
+            if getattr(tf, 'id', None) in handled_field_ids:
+                continue
+        elif acro in handled_acros:
             continue
         page = None
         rect = None
-        if acro and acro in widget_rects:
+        clip = _clip_name_text(acro)
+        if acro and acro in widget_rects and not clip:
             page_idx, rect = widget_rects[acro]
             if 0 <= page_idx < len(pdf_doc):
                 page = pdf_doc[page_idx]
@@ -1936,21 +2296,26 @@ def embed_typed_field_values_in_pdf(
             )
         if rect is None or rect.is_empty or rect.width <= 0 or rect.height <= 0:
             continue
-        pad = fitz.Rect(rect)
-        pad.x0 -= 0.5
-        pad.y0 -= 0.5
-        pad.x1 += 0.5
-        pad.y1 += 0.5
-        try:
-            page.draw_rect(pad, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
-        except Exception:
-            pass
+        if not clip and not is_emp_form:
+            pad = fitz.Rect(rect)
+            pad.x0 -= 0.5
+            pad.y0 -= 0.5
+            pad.x1 += 0.5
+            pad.y1 += 0.5
+            try:
+                page.draw_rect(pad, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+            except Exception:
+                pass
         ft = getattr(tf, 'field_type', None) or 'text'
-        if ft == 'checkbox_choice':
-            if val.upper() == 'X':
+        as_text = is_emp_form and (
+            _employment_text_acro(acro)
+            or (ft == 'checkbox_choice' and not _employment_choice_is_checked(val))
+        )
+        if ft == 'checkbox_choice' and not as_text:
+            if _employment_choice_is_checked(val):
                 _place_checkmark_in_pdf_rect(page, rect)
         else:
-            _place_text_in_pdf_rect(page, rect, val)
+            _place_text_in_pdf_rect(page, rect, val, clip_to_rect=clip)
 
 
 def embed_employment_overlay_values(pdf_doc, overlay_values: dict[str, str]) -> None:
@@ -1958,9 +2323,10 @@ def embed_employment_overlay_values(pdf_doc, overlay_values: dict[str, str]) -> 
     if not overlay_values:
         return
     try:
-        from employment_pdf_field_map import EMP_OVERLAY_FIELDS
+        from employment_pdf_field_map import EMP_EMPLOYER_DATE_OVERLAY_KEYS, EMP_OVERLAY_FIELDS
     except ImportError:
-        return
+        EMP_EMPLOYER_DATE_OVERLAY_KEYS = frozenset()
+        EMP_OVERLAY_FIELDS = {}
     for key, val in overlay_values.items():
         text = (val or '').strip()
         if not text or text.upper() == 'N/A':
@@ -1974,7 +2340,10 @@ def embed_employment_overlay_values(pdf_doc, overlay_values: dict[str, str]) -> 
             continue
         page = pdf_doc[page_idx]
         rect = viewer_coords_to_pdf_rect(page, x, y, w, h)
-        _place_text_in_pdf_rect(page, rect, text)
+        if key in EMP_EMPLOYER_DATE_OVERLAY_KEYS:
+            _place_employer_date_in_pdf_rect(page, rect, text)
+        else:
+            _place_text_in_pdf_rect(page, rect, text)
 
 
 # Gap between signature image bottom and the printed underline (PDF points).

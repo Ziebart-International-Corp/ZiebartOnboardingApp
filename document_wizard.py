@@ -48,6 +48,7 @@ def build_wizard_fields_for_document(
     has_dependents: Optional[str] = None,
     overlay_values: Optional[dict[str, str]] = None,
     composite_parts: Optional[dict[str, str]] = None,
+    emp_wizard_acks: Optional[dict[str, str]] = None,
 ) -> list[dict[str, Any]]:
     """
     Build ordered wizard steps from admin-configured document fields.
@@ -80,6 +81,7 @@ def build_wizard_fields_for_document(
             phone_like_fn,
             overlay_values=overlay_values,
             composite_parts=composite_parts,
+            emp_wizard_acks=emp_wizard_acks,
         )
 
     tf_sort = {tf.id: (tf.page_number, tf.y_position, tf.x_position) for tf in typed_fields}

@@ -433,6 +433,94 @@ def _signed_pdf_download_filename(document, username):
     return f"{base_name}_signed_{username}{ext}"
 
 
+def _typed_signature_text_for_document(document_id, username):
+    """Return typed signature text when a document has no image signature fields."""
+    try:
+        from employment_pdf_field_map import EMP_DOCUMENT_ID, EMP_SIGNATURE_ACRO
+        if document_id == EMP_DOCUMENT_ID:
+            for tf in DocumentTypedField.query.filter_by(document_id=document_id).all():
+                if _pdf_field_name_from_placeholder(tf.placeholder) == EMP_SIGNATURE_ACRO:
+                    val = DocumentTypedFieldValue.query.filter_by(
+                        document_id=document_id,
+                        typed_field_id=tf.id,
+                        username=username,
+                    ).first()
+                    if val and (val.field_value or '').strip():
+                        return val.field_value.strip()
+    except ImportError:
+        pass
+    for tf in DocumentTypedField.query.filter_by(document_id=document_id).all():
+        if tf.field_type != 'text':
+            continue
+        label = (tf.field_label or '').lower()
+        if 'signature' not in label:
+            continue
+        val = DocumentTypedFieldValue.query.filter_by(
+            document_id=document_id,
+            typed_field_id=tf.id,
+            username=username,
+        ).first()
+        if val and (val.field_value or '').strip():
+            return val.field_value.strip()
+    return ''
+
+
+def _completed_document_cards_for_user(username):
+    """
+    Documents for the staff new-hire details page: image signatures plus
+    completed assignments that only have typed signatures (e.g. employment application).
+    """
+    cards_by_doc_id: dict[int, dict] = {}
+
+    def _ensure_card(doc_id, completed_at=None):
+        if doc_id in cards_by_doc_id:
+            card = cards_by_doc_id[doc_id]
+            if completed_at and (
+                not card.get('completed_at') or completed_at > card['completed_at']
+            ):
+                card['completed_at'] = completed_at
+            return card
+        doc = Document.query.get(doc_id)
+        if not doc:
+            return None
+        card = {
+            'document': doc,
+            'signatures': [],
+            'typed_signature': '',
+            'completed_at': completed_at,
+        }
+        cards_by_doc_id[doc_id] = card
+        return card
+
+    for sig in DocumentSignature.query.filter_by(username=username).all():
+        card = _ensure_card(sig.document_id, sig.signed_at)
+        if card:
+            card['signatures'].append(sig)
+
+    for assignment in DocumentAssignment.query.filter_by(
+        username=username, is_completed=True,
+    ).all():
+        _ensure_card(assignment.document_id, assignment.completed_at)
+
+    for task in UserTask.query.filter_by(
+        username=username, task_type='document', status='completed',
+    ).all():
+        if task.document_id:
+            _ensure_card(task.document_id, task.completed_at)
+
+    for card in cards_by_doc_id.values():
+        if not card['signatures']:
+            card['typed_signature'] = _typed_signature_text_for_document(
+                card['document'].id, username,
+            )
+
+    return sorted(
+        cards_by_doc_id.values(),
+        key=lambda c: c.get('completed_at') or datetime.min,
+        reverse=True,
+    )
+
+
 def _send_built_user_pdf(document, username, *, as_attachment=False):
     """Build filled PDF for a user and return a Flask send_file response, or (None, error)."""
     from io import BytesIO
@@ -3950,6 +4038,28 @@ def resolve_document_file_path(document, repair_db=True):
     """
     if not document:
         return None
+    try:
+        from employment_pdf_field_map import (
+            EMP_DOCUMENT_ID,
+            EMP_TRUTH_PDF_FILENAME,
+            EMP_TRUTH_PDF_REL_PATH,
+        )
+        if document.id == EMP_DOCUMENT_ID:
+            truth_path = BASE_DIR / EMP_TRUTH_PDF_REL_PATH
+            stored = (document.file_path or '').replace('\\', '/')
+            if truth_path.is_file() and 'clean' in stored.lower():
+                if repair_db:
+                    try:
+                        document.file_path = EMP_TRUTH_PDF_REL_PATH
+                        document.filename = EMP_TRUTH_PDF_FILENAME
+                        if not (document.original_filename or '').strip():
+                            document.original_filename = 'Employment Application.pdf'
+                        db.session.commit()
+                    except Exception:
+                        db.session.rollback()
+                return str(truth_path)
+    except ImportError:
+        pass
     candidates = []
     if document.file_path:
         candidates.append(document.file_path)
@@ -4943,20 +5053,6 @@ def dashboard():
         all_tasks_completed = (
             len(incomplete_training) == 0 and len(user_tasks) == 0 and len(upcoming_tasks) == 0
         ) if (required_videos or all_user_tasks) else False
-        
-        # Soft welcome note on Home while onboarding is still open
-        welcome_headline = ''
-        welcome_body_html = Markup('')
-        show_home_welcome = False
-        if not all_tasks_completed:
-            try:
-                welcome_headline, welcome_body_raw = get_welcome_messages(user_full_name)
-                welcome_body_html = Markup(render_onboarding_message_html(welcome_body_raw, for_email=False))
-                show_home_welcome = bool((welcome_headline or '').strip() or (welcome_body_raw or '').strip())
-            except Exception:
-                show_home_welcome = False
-                welcome_headline = ''
-                welcome_body_html = Markup('')
         
         # Build notifications list
         notifications = []
@@ -6217,12 +6313,6 @@ def dashboard():
         <div class="dashboard-view">
         <div class="dashboard-container">
         <div class="dashboard-page-wrap">
-            {% if show_home_welcome and not show_finale %}
-            <div class="welcome-section" style="max-width: 1100px; margin: 0 auto 20px;">
-                <h1>{{ welcome_headline }}</h1>
-                <div class="welcome-body">{{ welcome_body_html|safe }}</div>
-            </div>
-            {% endif %}
             <div class="main-content{% if not external_links %} main-content-two-col{% endif %}">
                 {% if show_finale %}
                 <div class="dashboard-tasks-col">
@@ -6521,8 +6611,7 @@ def dashboard():
          pending_count=pending_count, notifications=notifications, external_links=external_links,
          hero_media_url=hero_media_url, hero_media_type=hero_media_type,
          show_finale=show_finale, finale_message=finale_message, finale_message_html=finale_message_html, finale_document=finale_document,
-         has_new_assigned_work=has_new_assigned_work,
-         show_home_welcome=show_home_welcome, welcome_headline=welcome_headline, welcome_body_html=welcome_body_html)
+         has_new_assigned_work=has_new_assigned_work)
     except Exception as e:
         # Log the error for debugging
         import traceback
@@ -14825,6 +14914,10 @@ def _document_wizard_emp_parts_key(doc_id):
     return f'doc_wizard_emp_parts_{doc_id}'
 
 
+def _document_wizard_emp_acks_key(doc_id):
+    return f'doc_wizard_emp_acks_{doc_id}'
+
+
 def _user_can_fill_document(document, username, is_admin=None):
     if is_admin is None:
         is_admin = current_user.is_admin() if current_user else False
@@ -15102,15 +15195,29 @@ def _load_document_wizard_steps(document, username):
             resolve_has_dependents_answer,
         )
         from employment_wizard_labels import (
-            filter_employment_wizard_steps,
+            hydrate_education_location_parts,
+            hydrate_employment_parts_from_overlays,
             is_employment_application_form,
+            migrate_employment_applied_employed_values,
             repair_employment_application_field_groups,
         )
         if is_employee_information_form(typed_fields):
             if repair_employee_information_field_groups(typed_fields):
                 db.session.commit()
         elif is_employment_application_form(typed_fields):
-            if repair_employment_application_field_groups(typed_fields):
+            emp_changed = repair_employment_application_field_groups(typed_fields)
+            from employment_wizard_labels import (
+                ensure_employment_education_table_positions,
+                ensure_employment_radio_pair_fields,
+            )
+            if ensure_employment_radio_pair_fields(document, typed_fields):
+                emp_changed = True
+                typed_fields = DocumentTypedField.query.filter_by(document_id=document.id).all()
+            if ensure_employment_education_table_positions(typed_fields):
+                emp_changed = True
+            if migrate_employment_applied_employed_values(document.id, username, typed_fields):
+                emp_changed = True
+            if emp_changed:
                 db.session.commit()
     except Exception:
         app.logger.exception('repair form field groups failed doc_id=%s', document.id)
@@ -15121,6 +15228,31 @@ def _load_document_wizard_steps(document, username):
         pass
     overlay_values = session.get(_document_wizard_overlay_key(document.id)) or {}
     composite_parts = session.get(_document_wizard_emp_parts_key(document.id)) or {}
+    try:
+        from employment_wizard_labels import (
+            hydrate_education_location_parts,
+            hydrate_education_name_from_overlays,
+            hydrate_employment_parts_from_overlays,
+            is_employment_application_form as _is_emp_app,
+            load_employment_wizard_parts,
+            resolve_education_section_gates,
+            resolve_employment_employer_count,
+        )
+        if _is_emp_app(typed_fields):
+            if not composite_parts:
+                composite_parts = load_employment_wizard_parts(document.id, username)
+            composite_parts = hydrate_employment_parts_from_overlays(overlay_values, composite_parts)
+            composite_parts = hydrate_education_name_from_overlays(overlay_values, composite_parts)
+            composite_parts = hydrate_education_location_parts(typed_fields, typed_values, composite_parts)
+            composite_parts = resolve_education_section_gates(
+                composite_parts, typed_fields, typed_values,
+            )
+            composite_parts = resolve_employment_employer_count(
+                composite_parts, typed_fields, typed_values,
+            )
+    except Exception:
+        pass
+    emp_wizard_acks = session.get(_document_wizard_emp_acks_key(document.id)) or {}
     steps = build_wizard_fields_for_document(
         document.id,
         signature_fields,
@@ -15134,6 +15266,7 @@ def _load_document_wizard_steps(document, username):
         has_dependents=has_dependents,
         overlay_values=overlay_values,
         composite_parts=composite_parts,
+        emp_wizard_acks=emp_wizard_acks,
     )
     try:
         from document_wizard_labels import filter_ee_wizard_steps, is_employee_information_form
@@ -15141,7 +15274,9 @@ def _load_document_wizard_steps(document, username):
         if is_employee_information_form(typed_fields):
             steps = filter_ee_wizard_steps(steps, has_dependents)
         elif is_employment_application_form(typed_fields):
-            steps = filter_employment_wizard_steps(steps, typed_fields, typed_values)
+            steps = filter_employment_wizard_steps(
+                steps, typed_fields, typed_values, composite_parts=composite_parts,
+            )
     except Exception:
         app.logger.exception('filter wizard steps failed doc_id=%s', document.id)
     return steps, signature_fields, typed_fields
@@ -15325,6 +15460,9 @@ def _serve_document_wizard_page(doc_id):
         idx = session.get(_document_wizard_index_key(doc_id))
         if request.args.get('restart') == '1':
             session.pop(_document_wizard_has_dependents_key(doc_id), None)
+            session.pop(_document_wizard_emp_acks_key(doc_id), None)
+            session.pop(_document_wizard_overlay_key(doc_id), None)
+            session.pop(_document_wizard_emp_parts_key(doc_id), None)
         if idx is None or request.args.get('restart') == '1':
             idx = first_incomplete_required_wizard_index(steps)
         else:
@@ -15384,6 +15522,23 @@ def _serve_document_wizard_page(doc_id):
                 .choice-option input[type="radio"] { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
                 .choice-option .choice-label { display: block; text-align: left; padding: 14px 16px; border: 2px solid rgba(255,255,255,0.25); border-radius: 8px; background: #121a26; color: #f2f5fb; font-size: 1.05em; min-height: 48px; }
                 .choice-option input[type="radio"]:checked + .choice-label { border-color: #FE0100; background: #2a1520; box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.35); }
+                .choice-option-followup { display: none; margin-top: 12px; }
+                .choice-option-followup-date { display: block; }
+                .choice-option-followup .followup-caption { font-size: 0.9em; color: #8892a8; margin: 0 0 8px; line-height: 1.4; }
+                input[type="date"].field-input,
+                input[type="date"].wizard-date-input {
+                    color-scheme: dark;
+                    cursor: pointer;
+                    font-size: 16px;
+                }
+                input[type="date"].field-input::-webkit-calendar-picker-indicator,
+                input[type="date"].wizard-date-input::-webkit-calendar-picker-indicator {
+                    filter: invert(1);
+                    cursor: pointer;
+                    opacity: 0.95;
+                    width: 24px;
+                    height: 24px;
+                }
                 .last4-row { display: flex; align-items: stretch; width: 100%; margin-top: 8px; }
                 .last4-prefix { display: flex; align-items: center; padding: 14px 12px; background: #2a3753; color: #c8d0e0; border: 1px solid rgba(255,255,255,0.24); border-right: none; border-radius: 8px 0 0 8px; font-family: monospace; }
                 .last4-input { flex: 1; padding: 14px 16px; font-size: 16px; font-family: monospace; border: 1px solid rgba(255,255,255,0.24); border-radius: 0 8px 8px 0; background: #121a26; color: #f2f5fb; min-width: 5em; }
@@ -15397,7 +15552,9 @@ def _serve_document_wizard_page(doc_id):
                 #sigCanvas { display: block; width: 100%; height: 160px; touch-action: none; cursor: crosshair; background: #fff; }
                 .consent-row { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0; font-size: 0.95em; color: #b7c1d3; }
                 .consent-row input { width: 20px; height: 20px; margin-top: 2px; flex-shrink: 0; }
-                .flash { background: #3a1a1a; border: 1px solid #dc3545; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; color: #ffd7d7; }
+                .policy-panel { background: #121a26; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 16px 18px; margin-bottom: 20px; max-height: 50vh; overflow-y: auto; line-height: 1.55; color: #d8dee9; font-size: 0.95em; }
+                .policy-panel p { margin: 0 0 12px; }
+                .policy-panel p:last-child { margin-bottom: 0; }
                 .alt-link { margin-top: 20px; font-size: 0.9em; }
                 .alt-link a { color: #7eb8ff; }
             {{ global_theme_css|safe }}
@@ -15421,11 +15578,22 @@ def _serve_document_wizard_page(doc_id):
                 <form id="fieldForm" method="POST" action="{{ url_for('document_wizard_save_field', doc_id=doc_id) }}">
                     <input type="hidden" name="wizard_id" value="{{ field.wizard_id }}">
                     <input type="hidden" name="direction" id="direction" value="next">
-                    {% if field.kind == 'gate' and field.options %}
+                    {% if field.kind == 'info' %}
+                    <div class="policy-panel">{{ field.policy_html|safe }}</div>
+                    {% elif field.kind == 'gate' and field.options %}
                     <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
                         {% for opt in field.options %}
                         <label class="choice-option">
                             <input type="radio" name="value" value="{{ opt.value }}" {% if field.value == opt.value %}checked{% endif %} required>
+                            <span class="choice-label">{{ opt.label }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                    {% elif field.wizard_type == 'yes_no' and field.options %}
+                    <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
+                        {% for opt in field.options %}
+                        <label class="choice-option">
+                            <input type="radio" name="value" value="{{ opt.value }}" {% if field.value == opt.value %}checked{% endif %} {% if field.required %}required{% endif %}>
                             <span class="choice-label">{{ opt.label }}</span>
                         </label>
                         {% endfor %}
@@ -15443,11 +15611,31 @@ def _serve_document_wizard_page(doc_id):
                     <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
                         {% for opt in field.options %}
                         <label class="choice-option">
-                            <input type="radio" name="value" value="{{ opt.field_id }}" {% if field.value == opt.field_id|string %}checked{% endif %} required>
-                            <span class="choice-label">{{ opt.label }}</span>
+                            <input type="radio" name="value" value="{{ opt.field_id }}" data-acro="{{ opt.acro or '' }}" {% if field.value == opt.field_id|string %}checked{% endif %} required>
+                            <div class="choice-label">
+                                <span>{{ opt.label }}</span>
+                            {% if opt.followup %}
+                            {% set fu = opt.followup %}
+                            <div class="choice-option-followup{% if fu.wizard_type == 'date' %} choice-option-followup-date{% endif %}">
+                                {% if fu.wizard_type == 'date' %}
+                                <p class="followup-caption">{{ fu.hint or 'Select a date' }}</p>
+                                <input type="date" name="followup_value" class="field-input wizard-date-input choice-followup-input" id="followupInput{{ fu.field_id }}" data-field-id="{{ fu.field_id }}" data-required="{{ '1' if fu.required else '0' }}" value="{{ fu.value }}">
+                                {% elif fu.wizard_type == 'textarea' %}
+                                {% if fu.hint %}<p class="followup-caption">{{ fu.hint }}</p>{% endif %}
+                                <textarea name="followup_value" class="field-input choice-followup-input" id="followupInput{{ fu.field_id }}" rows="4" data-field-id="{{ fu.field_id }}" data-required="{{ '1' if fu.required else '0' }}" placeholder="Enter your answer">{{ fu.value }}</textarea>
+                                {% else %}
+                                {% if fu.hint %}<p class="followup-caption">{{ fu.hint }}</p>{% endif %}
+                                <input type="text" name="followup_value" class="field-input choice-followup-input" id="followupInput{{ fu.field_id }}" data-field-id="{{ fu.field_id }}" data-required="{{ '1' if fu.required else '0' }}" value="{{ fu.value }}" placeholder="Enter {{ fu.label|lower }}">
+                                {% endif %}
+                            </div>
+                            {% endif %}
+                            </div>
                         </label>
                         {% endfor %}
                     </div>
+                    {% if field.followups %}
+                    <input type="hidden" name="followup_field_id" id="followupFieldId" value="">
+                    {% endif %}
                     {% elif field.wizard_type == 'date' %}
                     <input type="date" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
                     {% elif is_last4 %}
@@ -15462,6 +15650,8 @@ def _serve_document_wizard_page(doc_id):
                     {% elif field.wizard_type == 'phone' %}
                     <p class="hint" style="margin-top:0;">Enter a 10-digit US phone number (e.g. (555) 123-4567).</p>
                     <input type="tel" name="value" class="field-input wizard-phone-input" id="mainInput" value="{{ current_val }}" inputmode="tel" autocomplete="tel" placeholder="(555) 123-4567" {% if field.required %}required{% endif %}>
+                    {% elif field.wizard_type == 'textarea' %}
+                    <textarea name="value" class="field-input" id="mainInput" rows="5" placeholder="Enter your answer" {% if field.required %}required{% endif %}>{{ current_val }}</textarea>
                     {% elif field.wizard_type == 'checkbox' %}
                     <label style="display:flex;align-items:center;gap:12px;margin-top:8px;font-size:1.1em;min-height:48px;">
                         <input type="checkbox" name="value" value="X" id="mainInput" {% if current_val == 'X' %}checked{% endif %} {% if field.required %}required{% endif %} style="width:22px;height:22px;">
@@ -15482,7 +15672,7 @@ def _serve_document_wizard_page(doc_id):
                         {% if not field.required %}
                         <button type="button" class="btn-nav btn-ghost" onclick="skipField()">Skip{% if field.skip_value %} (N/A){% endif %}</button>
                         {% endif %}
-                        <button type="submit" class="btn-nav btn-primary">{{ 'Finish' if idx + 1 >= total_count else 'Next' }}</button>
+                        <button type="submit" class="btn-nav btn-primary">{{ 'Finish' if idx + 1 >= total_count else ('Continue' if field.kind == 'info' else 'Next') }}</button>
                     </div>
                 </form>
                 {% if not field.required and field.skip_value %}
@@ -15554,6 +15744,44 @@ def _serve_document_wizard_page(doc_id):
                     if (phoneInput.value) {
                         phoneInput.dispatchEvent(new Event('input'));
                     }
+                }
+                var choiceRadios = document.querySelectorAll('.choice-list input[name="value"]');
+                function syncChoiceFollowups() {
+                    var fieldIdInput = document.getElementById('followupFieldId');
+                    var activeInput = null;
+                    document.querySelectorAll('.choice-option').forEach(function(option) {
+                        var radio = option.querySelector('input[type="radio"]');
+                        var panel = option.querySelector('.choice-option-followup');
+                        if (!panel) return;
+                        var show = !!(radio && radio.checked);
+                        var isDateFollowup = panel.classList.contains('choice-option-followup-date');
+                        panel.style.display = (show || isDateFollowup) ? 'block' : 'none';
+                        var input = panel.querySelector('.choice-followup-input');
+                        if (!input) return;
+                        input.disabled = !show;
+                        if (show) {
+                            activeInput = input;
+                            if (input.getAttribute('data-required') === '1') input.setAttribute('required', 'required');
+                            else input.removeAttribute('required');
+                        } else {
+                            input.removeAttribute('required');
+                        }
+                    });
+                    if (fieldIdInput) {
+                        fieldIdInput.value = activeInput ? (activeInput.getAttribute('data-field-id') || '') : '';
+                    }
+                }
+                if (choiceRadios.length) {
+                    choiceRadios.forEach(function(r) { r.addEventListener('change', syncChoiceFollowups); });
+                    document.querySelectorAll('.choice-option-followup .choice-followup-input').forEach(function(inp) {
+                        inp.addEventListener('click', function(e) { e.stopPropagation(); });
+                        inp.addEventListener('focus', function() {
+                            var radio = inp.closest('.choice-option') && inp.closest('.choice-option').querySelector('input[type="radio"]');
+                            if (radio) radio.checked = true;
+                            syncChoiceFollowups();
+                        });
+                    });
+                    syncChoiceFollowups();
                 }
                 var form = document.getElementById('fieldForm');
                 if (form) form.addEventListener('submit', function(e) {
@@ -15664,43 +15892,137 @@ def document_wizard_save_field(doc_id):
             db.session.commit()
             _finalize_document_completion(doc_id, username)
         elif direction != 'back':
-            if step['kind'] == 'gate':
-                ans = value.strip().lower()
-                if ans not in ('yes', 'no'):
-                    flash('Please select Yes or No.', 'error')
-                    session[_document_wizard_index_key(doc_id)] = idx
-                    return redirect(url_for('view_documents', wizard=doc_id))
-                if step.get('emp_composite'):
+            if step['kind'] == 'info':
+                acks = dict(session.get(_document_wizard_emp_acks_key(doc_id)) or {})
+                acks[wizard_id] = '1'
+                session[_document_wizard_emp_acks_key(doc_id)] = acks
+            elif step['kind'] == 'gate':
+                if step.get('employer_count_gate'):
+                    from employment_pdf_field_map import EMP_EMPLOYER_BLOCKS
+                    ans = value.strip()
+                    max_jobs = len(EMP_EMPLOYER_BLOCKS)
+                    if not ans.isdigit() or not (1 <= int(ans) <= max_jobs):
+                        flash(f'Please select how many jobs to enter (1–{max_jobs}).', 'error')
+                        session[_document_wizard_index_key(doc_id)] = idx
+                        return redirect(url_for('view_documents', wizard=doc_id))
+                    new_count = int(ans)
                     parts = dict(session.get(_document_wizard_emp_parts_key(doc_id)) or {})
-                    pk = step.get('part_key') or ''
-                    role = step.get('part_role') or ''
-                    if pk and role:
-                        parts[f'{pk}:{role}'] = ans
-                        session[_document_wizard_emp_parts_key(doc_id)] = parts
-                        from employment_wizard_labels import persist_employment_composites_to_db
-                        persist_employment_composites_to_db(
-                            doc_id, typed_fields, parts, username, _wizard_persist_typed,
-                        )
-                else:
-                    deps_key = _document_wizard_has_dependents_key(doc_id)
-                    prev = session.get(deps_key)
-                    session[deps_key] = ans
-                    from document_wizard_labels import (
-                        apply_ee_dependents_not_applicable,
-                        clear_ee_dependents_values,
-                        ee_id_by_acro,
+                    gate_key = f"{step.get('part_key') or ''}:{step.get('part_role') or ''}"
+                    prev_raw = (parts.get(gate_key) or '').strip()
+                    prev_count = int(prev_raw) if prev_raw.isdigit() else None
+                    parts[gate_key] = ans
+                    session[_document_wizard_emp_parts_key(doc_id)] = parts
+                    from employment_wizard_labels import (
+                        clear_employer_block_values,
+                        clear_employers_beyond_count,
+                        emp_id_by_acro,
+                        persist_employment_composites_to_db,
+                        save_employment_wizard_parts,
+                        sync_employment_date_overlays,
                     )
-                    id_by_acro = ee_id_by_acro(typed_fields)
+                    id_by_acro = emp_id_by_acro(typed_fields)
 
-                    def _persist_gate_field(field_id, field_val):
+                    def _persist_employer_count_field(field_id, field_val):
                         tf = DocumentTypedField.query.get(field_id)
                         if tf and tf.document_id == doc_id:
                             _wizard_persist_typed(doc_id, tf, field_val, username)
 
-                    if ans == 'no':
-                        apply_ee_dependents_not_applicable(_persist_gate_field, id_by_acro)
-                    elif prev == 'no':
-                        clear_ee_dependents_values(_persist_gate_field, id_by_acro)
+                    if prev_count is not None and new_count > prev_count:
+                        for block in EMP_EMPLOYER_BLOCKS[prev_count:new_count]:
+                            clear_employer_block_values(
+                                block, parts, _persist_employer_count_field, id_by_acro,
+                            )
+                        session[_document_wizard_emp_parts_key(doc_id)] = parts
+                    clear_employers_beyond_count(
+                        new_count, parts, _persist_employer_count_field, id_by_acro,
+                    )
+                    session[_document_wizard_emp_parts_key(doc_id)] = parts
+                    persist_employment_composites_to_db(
+                        doc_id, typed_fields, parts, username, _wizard_persist_typed,
+                    )
+                    sync_employment_date_overlays(session, doc_id, parts)
+                    save_employment_wizard_parts(doc_id, username, parts)
+                else:
+                    ans = value.strip().lower()
+                    if ans not in ('yes', 'no'):
+                        flash('Please select Yes or No.', 'error')
+                        session[_document_wizard_index_key(doc_id)] = idx
+                        return redirect(url_for('view_documents', wizard=doc_id))
+                    if step.get('edu_section_gate'):
+                        parts = dict(session.get(_document_wizard_emp_parts_key(doc_id)) or {})
+                        pk = step.get('part_key') or ''
+                        role = step.get('part_role') or ''
+                        prev = (parts.get(f'{pk}:{role}') or '').strip().lower() if pk and role else ''
+                        if pk and role:
+                            parts[f'{pk}:{role}'] = ans
+                            session[_document_wizard_emp_parts_key(doc_id)] = parts
+                        from employment_wizard_labels import (
+                            apply_education_section_not_applicable,
+                            clear_education_section_values,
+                            emp_id_by_acro,
+                            persist_employment_composites_to_db,
+                            save_employment_wizard_parts,
+                            sync_education_name_overlays,
+                            sync_employment_date_overlays,
+                        )
+                        id_by_acro = emp_id_by_acro(typed_fields)
+
+                        def _persist_edu_gate_field(field_id, field_val):
+                            tf = DocumentTypedField.query.get(field_id)
+                            if tf and tf.document_id == doc_id:
+                                _wizard_persist_typed(doc_id, tf, field_val, username)
+
+                        if ans == 'no' and pk:
+                            apply_education_section_not_applicable(
+                                pk, typed_fields, parts, _persist_edu_gate_field, id_by_acro,
+                            )
+                            session[_document_wizard_emp_parts_key(doc_id)] = parts
+                            persist_employment_composites_to_db(
+                                doc_id, typed_fields, parts, username, _wizard_persist_typed,
+                            )
+                        elif prev == 'no' and ans == 'yes' and pk:
+                            clear_education_section_values(
+                                pk, typed_fields, parts, _persist_edu_gate_field, id_by_acro,
+                            )
+                            session[_document_wizard_emp_parts_key(doc_id)] = parts
+                        save_employment_wizard_parts(doc_id, username, parts)
+                    elif step.get('emp_composite'):
+                        parts = dict(session.get(_document_wizard_emp_parts_key(doc_id)) or {})
+                        pk = step.get('part_key') or ''
+                        role = step.get('part_role') or ''
+                        if pk and role:
+                            parts[f'{pk}:{role}'] = ans
+                            session[_document_wizard_emp_parts_key(doc_id)] = parts
+                            from employment_wizard_labels import (
+                                persist_employment_composites_to_db,
+                                sync_education_name_overlays,
+                                sync_employment_date_overlays,
+                            )
+                            persist_employment_composites_to_db(
+                                doc_id, typed_fields, parts, username, _wizard_persist_typed,
+                            )
+                            sync_employment_date_overlays(session, doc_id, parts)
+                            sync_education_name_overlays(session, doc_id, parts)
+                    else:
+                        deps_key = _document_wizard_has_dependents_key(doc_id)
+                        prev = session.get(deps_key)
+                        session[deps_key] = ans
+                        from document_wizard_labels import (
+                            apply_ee_dependents_not_applicable,
+                            clear_ee_dependents_values,
+                            ee_id_by_acro,
+                        )
+                        id_by_acro = ee_id_by_acro(typed_fields)
+
+                        def _persist_gate_field(field_id, field_val):
+                            tf = DocumentTypedField.query.get(field_id)
+                            if tf and tf.document_id == doc_id:
+                                _wizard_persist_typed(doc_id, tf, field_val, username)
+
+                        if ans == 'no':
+                            apply_ee_dependents_not_applicable(_persist_gate_field, id_by_acro)
+                        elif prev == 'no':
+                            clear_ee_dependents_values(_persist_gate_field, id_by_acro)
             elif step['kind'] == 'overlay':
                 overlay_key = step.get('overlay_key') or ''
                 overlays = dict(session.get(_document_wizard_overlay_key(doc_id)) or {})
@@ -15719,10 +16041,16 @@ def document_wizard_save_field(doc_id):
                     else:
                         parts[f'{pk}:{role}'] = value
                     session[_document_wizard_emp_parts_key(doc_id)] = parts
-                    from employment_wizard_labels import persist_employment_composites_to_db
+                    from employment_wizard_labels import (
+                        persist_employment_composites_to_db,
+                        sync_education_name_overlays,
+                        sync_employment_date_overlays,
+                    )
                     persist_employment_composites_to_db(
                         doc_id, typed_fields, parts, username, _wizard_persist_typed,
                     )
+                    sync_employment_date_overlays(session, doc_id, parts)
+                    sync_education_name_overlays(session, doc_id, parts)
             elif step['kind'] == 'ack_group':
                 if direction != 'skip':
                     checked_raw = request.form.getlist('ack_field')
@@ -15774,6 +16102,56 @@ def document_wizard_save_field(doc_id):
                             _wizard_persist_typed(doc_id, tf, 'X', username)
                         else:
                             _wizard_persist_typed(doc_id, tf, '', username)
+                    selected_acro = None
+                    for opt in step.get('options') or []:
+                        if opt['field_id'] == selected_id:
+                            selected_acro = opt.get('acro')
+                            break
+                    followups = step.get('followups') or []
+                    active_fu = next(
+                        (fu for fu in followups if fu.get('trigger_acro') == selected_acro),
+                        None,
+                    )
+                    if not active_fu:
+                        active_fu = next(
+                            (
+                                fu for fu in followups
+                                if fu.get('trigger_yes') and selected_acro in (fu.get('yes_acros') or [])
+                            ),
+                            None,
+                        )
+                    for fu in followups:
+                        if active_fu and fu.get('field_id') == active_fu.get('field_id'):
+                            continue
+                        tf_clear = DocumentTypedField.query.get(fu.get('field_id'))
+                        if tf_clear and tf_clear.document_id == doc_id:
+                            _wizard_persist_typed(doc_id, tf_clear, '', username)
+                    if active_fu:
+                        followup_val = (request.form.get('followup_value') or '').strip()
+                        if active_fu.get('required') and not followup_val:
+                            flash(
+                                f'Please provide: {active_fu.get("label", "details")}.',
+                                'error',
+                            )
+                            session[_document_wizard_index_key(doc_id)] = idx
+                            return redirect(url_for('view_documents', wizard=doc_id))
+                        tf_fu = DocumentTypedField.query.get(active_fu.get('field_id'))
+                        if tf_fu and tf_fu.document_id == doc_id:
+                            if followup_val:
+                                ok, err = validate_typed_field_value(
+                                    tf_fu.field_type,
+                                    followup_val,
+                                    tf_fu.field_label,
+                                    placeholder=tf_fu.placeholder,
+                                    wizard_type=active_fu.get('wizard_type'),
+                                )
+                                if not ok:
+                                    flash(err, 'error')
+                                    session[_document_wizard_index_key(doc_id)] = idx
+                                    return redirect(url_for('view_documents', wizard=doc_id))
+                                _wizard_persist_typed(doc_id, tf_fu, followup_val, username)
+                            else:
+                                _wizard_persist_typed(doc_id, tf_fu, '', username)
             elif step['kind'] == 'signature':
                 if direction != 'skip':
                     if not request.form.get('consent'):
@@ -15790,12 +16168,20 @@ def document_wizard_save_field(doc_id):
                         return redirect(url_for('view_documents', wizard=doc_id))
                     _persist_signature_for_user(doc_id, sig_field, value, username, consent_given=True)
             elif step['kind'] == 'typed':
+                from employment_wizard_labels import _employment_yesno_persist_value
                 tf = DocumentTypedField.query.get(step['db_id'])
                 if not tf or tf.document_id != doc_id:
                     flash('Invalid field.', 'error')
                     return redirect(url_for('view_documents', wizard=doc_id))
                 if direction != 'skip':
-                    if tf.field_type == 'checkbox_choice':
+                    if step.get('wizard_type') == 'yes_no':
+                        ans = value.strip().lower()
+                        if ans not in ('yes', 'no'):
+                            flash('Please select Yes or No.', 'error')
+                            session[_document_wizard_index_key(doc_id)] = idx
+                            return redirect(url_for('view_documents', wizard=doc_id))
+                        field_value = _employment_yesno_persist_value(ans)
+                    elif tf.field_type == 'checkbox_choice':
                         field_value = 'X' if value == 'X' else ''
                     elif tf.field_type == 'last4':
                         field_value = normalize_last4_typed_value(value)
@@ -24824,14 +25210,66 @@ def _build_signed_pdf_copy_for_user(document, username, output_path=None):
         typed_fields = DocumentTypedField.query.filter_by(document_id=document.id).all()
         signature_fields = DocumentSignatureField.query.filter_by(document_id=document.id).all()
 
+        try:
+            from employment_wizard_labels import (
+                is_employment_application_form,
+                migrate_employment_applied_employed_values,
+                repair_employment_application_field_groups,
+            )
+            if is_employment_application_form(typed_fields):
+                emp_changed = repair_employment_application_field_groups(typed_fields)
+                from employment_wizard_labels import (
+                    ensure_employment_education_table_positions,
+                    ensure_employment_radio_pair_fields,
+                )
+                if ensure_employment_radio_pair_fields(document, typed_fields):
+                    emp_changed = True
+                    typed_fields = DocumentTypedField.query.filter_by(document_id=document.id).all()
+                if ensure_employment_education_table_positions(typed_fields):
+                    emp_changed = True
+                if migrate_employment_applied_employed_values(document.id, username, typed_fields):
+                    emp_changed = True
+                if emp_changed:
+                    db.session.commit()
+                    user_typed_values = DocumentTypedFieldValue.query.filter_by(
+                        document_id=document.id,
+                        username=username,
+                    ).all()
+                    typed_value_map = {val.typed_field_id: val.field_value for val in user_typed_values}
+                    typed_value_filled_at = {val.typed_field_id: val.filled_at for val in user_typed_values}
+        except Exception:
+            app.logger.exception('employment repair/migrate before PDF build doc_id=%s', document.id)
+
         embed_typed_field_values_in_pdf(
             pdf_doc, typed_fields, typed_value_map, typed_value_filled_at,
         )
         try:
             from flask import has_request_context
-            from employment_wizard_labels import is_employment_application_form
-            if has_request_context() and is_employment_application_form(typed_fields):
-                overlays = session.get(_document_wizard_overlay_key(document.id)) or {}
+            from employment_wizard_labels import (
+                build_employment_overlay_values,
+                is_employment_application_form,
+                load_employment_wizard_parts,
+            )
+            if is_employment_application_form(typed_fields):
+                composite_parts = load_employment_wizard_parts(document.id, username)
+                overlays = build_employment_overlay_values(
+                    typed_fields, typed_value_map, composite_parts,
+                )
+                if has_request_context():
+                    legacy_edu_overlay_keys = {
+                        'edu_high_school_name',
+                        'edu_college_name',
+                        'edu_technical_name',
+                        'edu_other_name',
+                    }
+                    legacy_emp_date_keys = {
+                        f'emp_employer_{n}_dates' for n in range(1, 6)
+                    }
+                    session_overlays = {
+                        k: v for k, v in (session.get(_document_wizard_overlay_key(document.id)) or {}).items()
+                        if k not in legacy_edu_overlay_keys and k not in legacy_emp_date_keys
+                    }
+                    overlays = {**overlays, **session_overlays}
                 embed_employment_overlay_values(pdf_doc, overlays)
         except Exception:
             pass
@@ -26446,33 +26884,11 @@ def _view_new_hire_details_impl(username, force_manager_console=False):
                     'quiz_responses': []
                 })
         
-        # Get signed documents
+        # Get signed / completed documents (image signatures and typed-signature forms)
         signed_documents = []
         try:
-            all_signatures = DocumentSignature.query.filter_by(username=username).all()
-            
-            # Group signatures by document
-            doc_signatures = {}
-            for sig in all_signatures:
-                try:
-                    doc_id = sig.document_id
-                    if doc_id not in doc_signatures:
-                        doc = Document.query.get(doc_id)
-                        if doc:
-                            doc_signatures[doc_id] = {
-                                'document': doc,
-                                'signatures': []
-                            }
-                    # Only append if document exists in doc_signatures
-                    if doc_id in doc_signatures:
-                        doc_signatures[doc_id]['signatures'].append(sig)
-                except Exception as e:
-                    # Skip signatures that cause errors
-                    continue
-            
-            signed_documents = list(doc_signatures.values())
-        except Exception as e:
-            # If there's an error getting signatures, use empty list
+            signed_documents = _completed_document_cards_for_user(username)
+        except Exception:
             signed_documents = []
         
         # Get user tasks
@@ -27156,7 +27572,15 @@ def _view_new_hire_details_impl(username, force_manager_console=False):
                     {% for doc_data in signed_documents %}
                     <div class="document-item">
                         <h3 style="margin-bottom: 10px;">{{ doc_data.document.name_for_users }}</h3>
-                        <p style="color: #666; margin-bottom: 10px;">Signed {{ doc_data.signatures|length }} field(s)</p>
+                        <p style="color: #666; margin-bottom: 10px;">
+                            {% if doc_data.signatures %}
+                                Signed {{ doc_data.signatures|length }} field(s)
+                            {% elif doc_data.typed_signature %}
+                                Typed signature
+                            {% else %}
+                                Completed
+                            {% endif %}
+                        </p>
                         {% if doc_data.signatures %}
                         <div class="signature-preview">
                             {% for sig in doc_data.signatures %}
@@ -27165,10 +27589,18 @@ def _view_new_hire_details_impl(username, force_manager_console=False):
                             {% endif %}
                             {% endfor %}
                         </div>
-                        <p style="color: #666; font-size: 0.9em; margin-top: 10px;">
-                            Signed on: {{ doc_data.signatures[0].signed_at.strftime('%B %d, %Y at %I:%M %p') if doc_data.signatures and doc_data.signatures[0] and doc_data.signatures[0].signed_at else 'Unknown date' }}
-                        </p>
+                        {% elif doc_data.typed_signature %}
+                        <p style="font-family: 'Brush Script MT', 'Segoe Script', cursive; font-size: 1.5em; margin: 8px 0;">{{ doc_data.typed_signature }}</p>
                         {% endif %}
+                        <p style="color: #666; font-size: 0.9em; margin-top: 10px;">
+                            {% if doc_data.completed_at %}
+                            Completed on: {{ doc_data.completed_at.strftime('%B %d, %Y at %I:%M %p') }}
+                            {% elif doc_data.signatures and doc_data.signatures[0] and doc_data.signatures[0].signed_at %}
+                            Signed on: {{ doc_data.signatures[0].signed_at.strftime('%B %d, %Y at %I:%M %p') }}
+                            {% else %}
+                            Completed on: Unknown date
+                            {% endif %}
+                        </p>
                         <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px;">
                             <a href="{{ url_for('download_signed_document', doc_id=doc_data.document.id, username=username) }}" class="btn">📥 Download</a>
                             <a href="{{ url_for('staff_print_user_document_completed', doc_id=doc_data.document.id, username=username) }}" class="btn" style="background: #333;" target="_blank" title="Open print dialog for completed PDF">🖨️ Print</a>
