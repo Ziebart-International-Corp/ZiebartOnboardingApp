@@ -8,6 +8,10 @@ from document_wizard_labels import (
     is_employee_information_form,
     wizard_skip_value_for_step,
 )
+from conditional_offer_wizard_labels import (
+    build_conditional_offer_wizard_steps,
+    is_conditional_offer_form,
+)
 from employment_wizard_labels import (
     build_employment_application_wizard_steps,
     is_employment_application_form,
@@ -19,6 +23,17 @@ DOCUMENT_WIZARD_MIN_FIELDS = 8
 
 def document_wizard_eligible(field_count: int) -> bool:
     return field_count >= DOCUMENT_WIZARD_MIN_FIELDS
+
+
+def document_uses_step_wizard(field_count: int, typed_fields: list) -> bool:
+    """True when this document should open the step-by-step wizard (not classic PDF overlay)."""
+    if is_employee_information_form(typed_fields):
+        return True
+    if is_employment_application_form(typed_fields):
+        return True
+    if is_conditional_offer_form(typed_fields):
+        return True
+    return document_wizard_eligible(field_count)
 
 
 def _wizard_type_for_typed(field_type: str, phone_like: bool) -> str:
@@ -82,6 +97,19 @@ def build_wizard_fields_for_document(
             overlay_values=overlay_values,
             composite_parts=composite_parts,
             emp_wizard_acks=emp_wizard_acks,
+        )
+
+    if is_conditional_offer_form(typed_fields):
+        return build_conditional_offer_wizard_steps(
+            typed_fields,
+            signature_fields,
+            typed_values,
+            signed_field_ids,
+            user_display_name,
+            user_initials,
+            today_date,
+            _wizard_type_for_typed,
+            phone_like_fn,
         )
 
     tf_sort = {tf.id: (tf.page_number, tf.y_position, tf.x_position) for tf in typed_fields}

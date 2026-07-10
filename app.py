@@ -17,6 +17,7 @@ from document_wizard import (
     DOCUMENT_WIZARD_MIN_FIELDS,
     apply_wizard_field_skip,
     build_wizard_fields_for_document,
+    document_uses_step_wizard,
     document_wizard_eligible,
     first_incomplete_required_wizard_index,
     first_incomplete_wizard_index,
@@ -402,7 +403,8 @@ def _document_configured_field_count(doc_id):
 @app.template_global()
 def user_sign_document_url(doc_id):
     """Sign or step-by-step wizard URL for users (IIS-friendly /documents?query)."""
-    if document_wizard_eligible(_document_configured_field_count(doc_id)):
+    typed_fields = DocumentTypedField.query.filter_by(document_id=doc_id).all()
+    if document_uses_step_wizard(_document_configured_field_count(doc_id), typed_fields):
         return url_for('view_documents', wizard=doc_id)
     return url_for('view_documents', sign=doc_id)
 
@@ -4659,14 +4661,14 @@ def document_fully_completed_for_user(document_id, username):
         return False
 
     try:
+        from conditional_offer_wizard_labels import is_conditional_offer_form
         from document_wizard_labels import is_employee_information_form
         from employment_wizard_labels import is_employment_application_form
-        if is_employee_information_form(typed_fields):
-            document = Document.query.get(document_id)
-            if document:
-                steps, _, _ = _load_document_wizard_steps(document, username)
-                return wizard_required_steps_complete(steps)
-        if is_employment_application_form(typed_fields):
+        if (
+            is_employee_information_form(typed_fields)
+            or is_employment_application_form(typed_fields)
+            or is_conditional_offer_form(typed_fields)
+        ):
             document = Document.query.get(document_id)
             if document:
                 steps, _, _ = _load_document_wizard_steps(document, username)
@@ -21835,6 +21837,13 @@ def remove_document_assignment(assignment_id):
     return redirect(url_for('assign_document', doc_id=doc_id))
 
 
+@app.route('/documents/<int:doc_id>/wizard')
+@login_required
+def document_wizard_redirect(doc_id):
+    """Friendly URL → query-param wizard (IIS-safe)."""
+    return redirect(url_for('view_documents', wizard=doc_id))
+
+
 @app.route('/documents')
 @login_required
 def view_documents():
@@ -22779,7 +22788,7 @@ def _serve_sign_document_page(doc_id):
             )
             return redirect(url_for('view_documents'))
 
-        if document_wizard_eligible(len(signature_fields) + len(typed_fields)) and not request.args.get('classic'):
+        if document_uses_step_wizard(len(signature_fields) + len(typed_fields), typed_fields) and not request.args.get('classic'):
             return redirect(url_for('view_documents', wizard=doc_id))
         
         # Get existing signatures by current user
