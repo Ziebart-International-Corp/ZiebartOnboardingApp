@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Manage External Links - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #FFFFFF;
+            color: #000000;
+        }
+        p, span, div, td, th, label, input, textarea, select, button, a {
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+            position: relative;
+            z-index: 101;
+            height: 100%;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn:hover {
+            background: #FE0100;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-success:hover {
+            background: #218838;
+        }
+        .btn-danger {
+            background: #FE0100;
+        }
+        .btn-danger:hover {
+            background: #FE0100;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .section {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 2rem;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .section-title {
+            font-size: 1.6em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            margin-bottom: 20px;
+            color: #000000;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #000000;
+        }
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            font-size: 16px; /* Prevents zoom on iOS */
+            font-family: inherit;
+            min-height: 44px; /* Touch-friendly */
+        }
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid #e5e5e5;
+        }
+        th {
+            background: #2d2d2d;
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        tbody tr {
+            transition: background-color 0.2s;
+        }
+        tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+        .badge {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 600;
+        }
+        .badge-active {
+            background: #d4edda;
+            color: #155724;
+        }
+        .badge-inactive {
+            background: #f8d7da;
+            color: #842029;
+        }
+        .action-buttons {
+            display: flex;
+            gap: 8px;
+        }
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 0.85em;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #999;
+        }
+        
+        /* Mobile Responsive Styles */
+        @media (max-width: 768px) {
+            .top-header {
+                padding: 12px 15px;
+                flex-wrap: wrap;
+            }
+            .logo-section {
+                font-size: 1.1em;
+            }
+            .logo-section img {
+                height: 60px;
+                margin-bottom: -30px;
+            }
+            .back-btn {
+                font-size: 0.85em;
+                padding: 6px 12px;
+            }
+            .container {
+                padding: 15px;
+            }
+            .section {
+                padding: 20px;
+            }
+            .section-title {
+                font-size: 1.3em;
+            }
+            .form-row {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+            .form-group input,
+            .form-group textarea {
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px;
+            }
+            table {
+                display: block;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            th, td {
+                padding: 10px 8px;
+                font-size: 0.85em;
+                white-space: nowrap;
+            }
+            .action-buttons {
+                flex-direction: column;
+                width: 100%;
+            }
+            .action-buttons .btn {
+                width: 100%;
+                margin: 5px 0;
+            }
+            .btn, .btn-success {
+                min-height: 44px;
+                padding: 12px 20px;
+                font-size: 1em;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .top-header {
+                padding: 10px 12px;
+            }
+            .logo-section {
+                font-size: 1em;
+            }
+            .logo-section img {
+                height: 50px;
+                margin-bottom: -25px;
+            }
+            .section {
+                padding: 15px;
+            }
+            .section-title {
+                font-size: 1.2em;
+            }
+            th, td {
+                padding: 8px 6px;
+                font-size: 0.8em;
+            }
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text">Ziebart Onboarding</span>
+        </div>
+        <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    
+    <div class="container">
+        <div class="section">
+            <h2 class="section-title">Add New External Link</h2>
+            <form method="POST" action="{{ url_for('add_external_link') }}" enctype="multipart/form-data">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="title">Link Title *</label>
+                        <input type="text" name="title" id="title" required placeholder="e.g., Company Portal">
+                    </div>
+                    <div class="form-group">
+                        <label for="url">URL *</label>
+                        <input type="url" name="url" id="url" required placeholder="https://example.com">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="icon">Icon (Emoji) - Use if no image</label>
+                        <input type="text" name="icon" id="icon" placeholder="🔗" value="🔗" maxlength="2">
+                    </div>
+                    <div class="form-group">
+                        <label for="order">Display Order</label>
+                        <input type="number" name="order" id="order" value="0" min="0">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="image">Image (optional) - Recommended size: 100x100px</label>
+                    <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+                        <input type="file" name="image" id="image" accept="image/*" style="flex: 1;">
+                        <button type="button" onclick="openImageCropper()" class="btn" style="background: #007bff; white-space: nowrap;">Crop Image</button>
+                    </div>
+                    <small style="color: #666;">Allowed: JPG, PNG, GIF, SVG (Max 5MB). Upload an image, then click "Crop Image" to select a square area.</small>
+                    <input type="hidden" name="cropped_image" id="cropped_image">
+                    <div id="imagePreview" style="margin-top: 10px; display: none;">
+                        <p style="font-weight: 600; margin-bottom: 5px;">Preview:</p>
+                        <img id="previewImg" style="max-width: 200px; max-height: 200px; border: 1px solid #ddd; border-radius: 8px; padding: 5px;">
+                    </div>
+                </div>
+                <!-- Image Cropper Modal -->
+                <div id="imageCropperModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 10000; align-items: center; justify-content: center;">
+                    <div style="background: white; padding: 20px; border-radius: 12px; max-width: 90%; max-height: 90%; overflow: auto;">
+                        <h3 style="margin-bottom: 15px;">Crop Image (Select Square Area)</h3>
+                        <div style="position: relative; margin-bottom: 15px;">
+                            <img id="cropImagePreview" style="max-width: 100%; max-height: 500px; display: block;">
+                            <canvas id="cropCanvas" style="display: none;"></canvas>
+                        </div>
+                        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                            <button type="button" onclick="cancelCrop()" class="btn" style="background: #6c757d;">Cancel</button>
+                            <button type="button" onclick="applyCrop()" class="btn btn-success">Apply Crop</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="description">Description (optional)</label>
+                    <textarea name="description" id="description" placeholder="Brief description of the link..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-success">Add Link</button>
+            </form>
+        </div>
+        
+        <script>
+            var cropper = null;
+            var originalImage = null;
+            var cropData = null;
+            
+            function handleImageSelect(event) {
+                var file = event.target.files[0];
+                if (!file) return;
+                
+                // Skip SVG files (they don't need cropping)
+                if (file.name.toLowerCase().endsWith('.svg')) {
+                    document.getElementById('cropped_image').value = '';
+                    return;
+                }
+                
+                var reader = new FileReader();
+                reader.onload = function(e) {
+                    var img = document.getElementById('cropImagePreview');
+                    img.src = e.target.result;
+                    originalImage = e.target.result;
+                    
+                    // Show cropper modal
+                    document.getElementById('imageCropperModal').style.display = 'flex';
+                    
+                    // Initialize simple crop interface
+                    setTimeout(function() {
+                        initCropInterface(img);
+                    }, 100);
+                };
+                reader.readAsDataURL(file);
+            }
+            
+            function initCropInterface(img) {
+                // Create a simple crop interface using canvas
+                var canvas = document.getElementById('cropCanvas');
+                var ctx = canvas.getContext('2d');
+                
+                // Set canvas size to match image
+                var imgElement = new Image();
+                imgElement.onload = function() {
+                    var maxSize = 800;
+                    var scale = Math.min(maxSize / imgElement.width, maxSize / imgElement.height, 1);
+                    canvas.width = imgElement.width * scale;
+                    canvas.height = imgElement.height * scale;
+                    
+                    ctx.drawImage(imgElement, 0, 0, canvas.width, canvas.height);
+                    
+                    // Draw crop overlay
+                    drawCropOverlay();
+                };
+                imgElement.src = img.src;
+            }
+            
+            var cropX = 0, cropY = 0, cropSize = 200;
+            var isDragging = false;
+            var dragStartX = 0, dragStartY = 0;
+            var startCropX = 0, startCropY = 0;
+            
+            function drawCropOverlay() {
+                var canvas = document.getElementById('cropCanvas');
+                var ctx = canvas.getContext('2d');
+                var img = document.getElementById('cropImagePreview');
+                
+                // Redraw image
+                var imgElement = new Image();
+                imgElement.onload = function() {
+                    var maxSize = 800;
+                    var scale = Math.min(maxSize / imgElement.width, maxSize / imgElement.height, 1);
+                    canvas.width = imgElement.width * scale;
+                    canvas.height = imgElement.height * scale;
+                    
+                    ctx.drawImage(imgElement, 0, 0, canvas.width, canvas.height);
+                    
+                    // Initialize crop size to fit image
+                    cropSize = Math.min(canvas.width, canvas.height) * 0.8;
+                    cropX = (canvas.width - cropSize) / 2;
+                    cropY = (canvas.height - cropSize) / 2;
+                    
+                    // Draw semi-transparent overlay
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    // Clear crop area
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'destination-out';
+                    ctx.fillRect(cropX, cropY, cropSize, cropSize);
+                    ctx.restore();
+                    
+                    // Draw crop border
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(cropX, cropY, cropSize, cropSize);
+                    
+                    // Draw corner handles
+                    var handleSize = 10;
+                    ctx.fillStyle = '#fff';
+                    // Top-left
+                    ctx.fillRect(cropX - handleSize/2, cropY - handleSize/2, handleSize, handleSize);
+                    // Top-right
+                    ctx.fillRect(cropX + cropSize - handleSize/2, cropY - handleSize/2, handleSize, handleSize);
+                    // Bottom-left
+                    ctx.fillRect(cropX - handleSize/2, cropY + cropSize - handleSize/2, handleSize, handleSize);
+                    // Bottom-right
+                    ctx.fillRect(cropX + cropSize - handleSize/2, cropY + cropSize - handleSize/2, handleSize, handleSize);
+                    
+                    // Show canvas instead of image
+                    img.style.display = 'none';
+                    canvas.style.display = 'block';
+                    canvas.style.maxWidth = '100%';
+                    canvas.style.maxHeight = '500px';
+                    canvas.style.cursor = 'move';
+                    
+                    // Add mouse events
+                    canvas.onmousedown = startDrag;
+                    canvas.onmousemove = onDrag;
+                    canvas.onmouseup = endDrag;
+                    canvas.onmouseleave = endDrag;
+                };
+                imgElement.src = originalImage;
+            }
+            
+            function startDrag(e) {
+                var canvas = document.getElementById('cropCanvas');
+                var rect = canvas.getBoundingClientRect();
+                var x = (e.clientX - rect.left) * (canvas.width / rect.width);
+                var y = (e.clientY - rect.top) * (canvas.height / rect.height);
+                
+                // Check if clicking on corner (resize) or inside (move)
+                var handleSize = 20;
+                var isCorner = (
+                    (x >= cropX - handleSize && x <= cropX + handleSize && y >= cropY - handleSize && y <= cropY + handleSize) ||
+                    (x >= cropX + cropSize - handleSize && x <= cropX + cropSize + handleSize && y >= cropY - handleSize && y <= cropY + handleSize) ||
+                    (x >= cropX - handleSize && x <= cropX + handleSize && y >= cropY + cropSize - handleSize && y <= cropY + cropSize + handleSize) ||
+                    (x >= cropX + cropSize - handleSize && x <= cropX + cropSize + handleSize && y >= cropY + cropSize - handleSize && y <= cropY + cropSize + handleSize)
+                );
+                
+                if (isCorner) {
+                    // Resize mode
+                    isDragging = 'resize';
+                } else if (x >= cropX && x <= cropX + cropSize && y >= cropY && y <= cropY + cropSize) {
+                    // Move mode
+                    isDragging = 'move';
+                    dragStartX = x - cropX;
+                    dragStartY = y - cropY;
+                }
+                
+                startCropX = cropX;
+                startCropY = cropY;
+            }
+            
+            function onDrag(e) {
+                if (!isDragging) return;
+                
+                var canvas = document.getElementById('cropCanvas');
+                var rect = canvas.getBoundingClientRect();
+                var x = (e.clientX - rect.left) * (canvas.width / rect.width);
+                var y = (e.clientY - rect.top) * (canvas.height / rect.height);
+                
+                if (isDragging === 'move') {
+                    cropX = Math.max(0, Math.min(canvas.width - cropSize, x - dragStartX));
+                    cropY = Math.max(0, Math.min(canvas.height - cropSize, y - dragStartY));
+                } else if (isDragging === 'resize') {
+                    var newSize = Math.max(50, Math.min(canvas.width, canvas.height, Math.abs(x - startCropX), Math.abs(y - startCropY)));
+                    cropSize = newSize;
+                    cropX = Math.max(0, Math.min(canvas.width - cropSize, startCropX));
+                    cropY = Math.max(0, Math.min(canvas.height - cropSize, startCropY));
+                }
+                
+                drawCropOverlay();
+            }
+            
+            function endDrag() {
+                isDragging = false;
+            }
+            
+            function applyCrop() {
+                var canvas = document.getElementById('cropCanvas');
+                var img = document.getElementById('cropImagePreview');
+                
+                // Create a new canvas for the cropped image
+                var croppedCanvas = document.createElement('canvas');
+                croppedCanvas.width = 200; // Output size
+                croppedCanvas.height = 200;
+                var ctx = croppedCanvas.getContext('2d');
+                
+                // Load original image to get full resolution
+                var imgElement = new Image();
+                imgElement.onload = function() {
+                    // Calculate scale factor
+                    var scaleX = imgElement.width / canvas.width;
+                    var scaleY = imgElement.height / canvas.height;
+                    
+                    // Calculate actual crop coordinates in original image
+                    var srcX = cropX * scaleX;
+                    var srcY = cropY * scaleY;
+                    var srcSize = cropSize * Math.min(scaleX, scaleY);
+                    
+                    // Draw cropped and resized image
+                    ctx.drawImage(imgElement, srcX, srcY, srcSize, srcSize, 0, 0, 200, 200);
+                    
+                    // Convert to base64
+                    var croppedData = croppedCanvas.toDataURL('image/png');
+                    document.getElementById('cropped_image').value = croppedData;
+                    
+                    // Update preview
+                    img.src = croppedData;
+                    img.style.display = 'block';
+                    canvas.style.display = 'none';
+                    
+                    // Show preview in form
+                    var previewDiv = document.getElementById('imagePreview');
+                    var previewImg = document.getElementById('previewImg');
+                    if (previewDiv && previewImg) {
+                        previewImg.src = croppedData;
+                        previewDiv.style.display = 'block';
+                    }
+                    
+                    // Hide modal
+                    document.getElementById('imageCropperModal').style.display = 'none';
+                    
+                    // Show success message
+                    alert('Crop applied! Click "Add Link" to save.');
+                };
+                imgElement.src = originalImage;
+            }
+            
+            function cancelCrop() {
+                document.getElementById('imageCropperModal').style.display = 'none';
+                document.getElementById('image').value = '';
+                document.getElementById('cropped_image').value = '';
+            }
+        </script>
+        
+        <div class="section">
+            <h2 class="section-title">External Links ({{ links|length }} total)</h2>
+            {% if links %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Icon</th>
+                        <th>Title</th>
+                        <th>URL</th>
+                        <th>Description</th>
+                        <th>Order</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for link in links %}
+                    <tr>
+                        <td>
+                            {% if link.image_filename %}
+                            <img src="{{ url_for('serve_quick_link_image', filename=link.image_filename) }}" alt="{{ link.title }}" style="width: 50px; height: 50px; object-fit: contain; border-radius: 8px;">
+                            {% else %}
+                            <span style="font-size: 1.5em;">{{ link.icon or '🔗' }}</span>
+                            {% endif %}
+                        </td>
+                        <td><strong>{{ link.title }}</strong></td>
+                        <td><a href="{{ link.url }}" target="_blank" style="color: #007bff; text-decoration: none;">{{ link.url[:50] }}{% if link.url|length > 50 %}...{% endif %}</a></td>
+                        <td>{{ link.description or '-' }}</td>
+                        <td>{{ link.order }}</td>
+                        <td>
+                            <span class="badge badge-{{ 'active' if link.is_active else 'inactive' }}">
+                                {{ 'Active' if link.is_active else 'Inactive' }}
+                            </span>
+                        </td>
+                        <td>
+                            <div class="action-buttons">
+                                <a href="{{ url_for('edit_external_link', link_id=link.id) }}" class="btn btn-small" style="background: #007bff;">Edit</a>
+                                <form method="POST" action="{{ url_for('toggle_external_link', link_id=link.id) }}" style="display: inline;">
+                                    <button type="submit" class="btn btn-small" style="background: {{ '#6c757d' if link.is_active else '#28a745' }};">
+                                        {{ 'Deactivate' if link.is_active else 'Activate' }}
+                                    </button>
+                                </form>
+                                <form method="POST" action="{{ url_for('delete_external_link', link_id=link.id) }}" style="display: inline;">
+                                    <button type="submit" class="btn btn-small btn-danger" onclick="return confirm('Delete this link?')">Delete</button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty-state">
+                <p>No external links yet. Add one above to get started.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+

@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Manage Quiz - {{ video.title }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .admin-panel {
+            background: white;
+            padding: 25px;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            overflow: visible;
+        }
+        .admin-panel h2 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            color: #000000;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            margin: 5px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-primary {
+            background: #007bff;
+        }
+        .btn-danger {
+            background: #FE0100;
+        }
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 0.85em;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            font-size: 16px; /* Prevents zoom on iOS */
+            min-height: 44px; /* Touch-friendly */
+        }
+        .form-group textarea {
+            min-height: 80px;
+        }
+        .question-item {
+            background: #f8f9fa;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .answer-item {
+            background: white;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 3px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .answer-item.correct {
+            border-left: 3px solid #28a745;
+        }
+        
+        /* Mobile Responsive Styles */
+        @media (max-width: 768px) {
+            .header {
+                padding: 12px 15px;
+                flex-wrap: wrap;
+            }
+            .header-content h1 {
+                font-size: 1.2em;
+            }
+            .back-btn {
+                font-size: 0.85em;
+                padding: 6px 12px;
+            }
+            .container {
+                padding: 15px;
+            }
+            .admin-panel {
+                padding: 15px;
+            }
+            .admin-panel h2 {
+                font-size: 1.3em;
+            }
+            .form-group input,
+            .form-group textarea,
+            .form-group select {
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px;
+            }
+            .answer-input {
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+                margin-bottom: 10px;
+            }
+            .answer-input input[type="text"] {
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px;
+            }
+            .btn {
+                min-height: 44px;
+                padding: 12px 20px;
+                font-size: 1em;
+            }
+            .btn-small {
+                min-height: 44px;
+                padding: 10px 15px;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .header-content h1 {
+                font-size: 1em;
+            }
+            .admin-panel {
+                padding: 12px;
+            }
+            .admin-panel h2 {
+                font-size: 1.2em;
+            }
+            .question-item {
+                padding: 12px;
+            }
+        }
+    {{ global_theme_css|safe }}
+        /* Manage Quiz: keep question list and form readable on dark theme */
+        body.quiz-manage-page {
+            background: #0a0e14 !important;
+            color: #f2f5fb !important;
+        }
+        body.quiz-manage-page .admin-panel {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+            border: 1px solid rgba(255, 255, 255, 0.14) !important;
+            color: #f2f5fb !important;
+        }
+        body.quiz-manage-page .admin-panel::before {
+            opacity: 0 !important;
+            display: none !important;
+        }
+        body.quiz-manage-page .admin-panel h2,
+        body.quiz-manage-page .admin-panel h3,
+        body.quiz-manage-page .admin-panel label,
+        body.quiz-manage-page .admin-panel strong,
+        body.quiz-manage-page .admin-panel p {
+            color: #f2f5fb !important;
+            -webkit-text-fill-color: #f2f5fb !important;
+        }
+        body.quiz-manage-page .admin-panel small {
+            color: #b7c1d3 !important;
+        }
+        body.quiz-manage-page .question-item {
+            background: rgba(255, 255, 255, 0.06) !important;
+            border-left: 4px solid rgba(110, 168, 254, 0.9) !important;
+            border-radius: 8px !important;
+        }
+        body.quiz-manage-page .question-item h3 {
+            color: #f2f5fb !important;
+            -webkit-text-fill-color: #f2f5fb !important;
+            font-weight: 700 !important;
+            margin-bottom: 8px !important;
+        }
+        body.quiz-manage-page .answer-item {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.12) !important;
+            color: #f2f5fb !important;
+            border-radius: 6px !important;
+        }
+        body.quiz-manage-page .answer-item.correct {
+            border-left: 3px solid #34c86a !important;
+            background: rgba(52, 200, 106, 0.12) !important;
+        }
+        body.quiz-manage-page .answer-item span {
+            color: #8ee4a8 !important;
+        }
+        body.quiz-manage-page .answer-input {
+            color: #f2f5fb !important;
+        }
+        body.quiz-manage-page .answer-input input[type="radio"] {
+            accent-color: #fe0100;
+        }
+        body.quiz-manage-page .form-group input,
+        body.quiz-manage-page .form-group textarea,
+        body.quiz-manage-page .form-group select {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.24) !important;
+            color: #f2f5fb !important;
+        }
+        body.quiz-manage-page .form-group input::placeholder,
+        body.quiz-manage-page .form-group textarea::placeholder {
+            color: #9aa5b8 !important;
+        }
+    </style>
+</head>
+<body class="quiz-manage-page">
+    <div class="header">
+        <div class="header-content">
+            <h1>📝 Manage Quiz: {{ video.title }}</h1>
+        </div>
+        <div class="header-actions"><a href="{{ url_for('manage_training') }}" class="back-btn">← Back to Training</a></div>
+    </div>
+    
+    <div class="container">
+        
+        <div class="admin-panel">
+            <h2>Add Quiz Question</h2>
+            <form method="POST" action="{{ url_for('add_quiz_question', video_id=video.id) }}">
+                <div class="form-group">
+                    <label for="question_text">Question Text *</label>
+                    <textarea name="question_text" id="question_text" required></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="question_type">Question Type *</label>
+                    <select name="question_type" id="question_type" required onchange="toggleTimestamp()">
+                        <option value="mid">Mid-Video (pauses at specific time)</option>
+                        <option value="end">End of Video</option>
+                    </select>
+                </div>
+                <div class="form-group" id="timestampGroup">
+                    <label for="video_timestamp">Video Timestamp (seconds) *</label>
+                    <input type="number" name="video_timestamp" id="video_timestamp" step="0.1" min="0" placeholder="e.g., 120.5">
+                    <small>Video will pause at this time to show the question</small>
+                </div>
+                <div class="form-group">
+                    <label>Answers (check the correct one) *</label>
+                    <div id="answersContainer">
+                        <div class="answer-input">
+                            <input type="text" name="answer_text[]" placeholder="Answer option 1" required>
+                            <input type="radio" name="correct_answer" value="0" required> Correct
+                        </div>
+                        <div class="answer-input">
+                            <input type="text" name="answer_text[]" placeholder="Answer option 2" required>
+                            <input type="radio" name="correct_answer" value="1"> Correct
+                        </div>
+                    </div>
+                    <button type="button" onclick="addAnswerOption()" style="margin-top: 10px; padding: 5px 10px;">+ Add Answer Option</button>
+                </div>
+                <button type="submit" class="btn btn-success">Add Question</button>
+            </form>
+        </div>
+        
+        <div class="admin-panel">
+            <h2>Mid-Video Questions ({{ mid_questions|length }})</h2>
+            {% for question in mid_questions %}
+            <div class="question-item">
+                <h3>{{ question.question_text }}</h3>
+                <p><strong>Timestamp:</strong> {{ "%.1f"|format(question.video_timestamp) }} seconds</p>
+                <div style="margin-top: 10px;">
+                    <strong>Answers:</strong>
+                    {% for answer in question.answers %}
+                    <div class="answer-item {% if answer.is_correct %}correct{% endif %}">
+                        {{ answer.answer_text }}
+                        {% if answer.is_correct %}<span style="color: #28a745;">✓ Correct</span>{% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                <div style="margin-top: 10px;">
+                    <a href="{{ url_for('delete_quiz_question', question_id=question.id) }}" class="btn btn-danger btn-small" 
+                       onclick="return confirm('Delete this question?')">Delete</a>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <div class="admin-panel">
+            <h2>End of Video Questions ({{ end_questions|length }})</h2>
+            {% for question in end_questions %}
+            <div class="question-item">
+                <h3>{{ question.question_text }}</h3>
+                <div style="margin-top: 10px;">
+                    <strong>Answers:</strong>
+                    {% for answer in question.answers %}
+                    <div class="answer-item {% if answer.is_correct %}correct{% endif %}">
+                        {{ answer.answer_text }}
+                        {% if answer.is_correct %}<span style="color: #28a745;">✓ Correct</span>{% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                <div style="margin-top: 10px;">
+                    <a href="{{ url_for('delete_quiz_question', question_id=question.id) }}" class="btn btn-danger btn-small" 
+                       onclick="return confirm('Delete this question?')">Delete</a>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    
+    <script>
+        var answerCount = 2;
+        
+        function toggleTimestamp() {
+            var type = document.getElementById('question_type').value;
+            var timestampGroup = document.getElementById('timestampGroup');
+            timestampGroup.style.display = type === 'mid' ? 'block' : 'none';
+            if (type === 'mid') {
+                document.getElementById('video_timestamp').required = true;
+            } else {
+                document.getElementById('video_timestamp').required = false;
+            }
+        }
+        
+        function addAnswerOption() {
+            var container = document.getElementById('answersContainer');
+            var div = document.createElement('div');
+            div.className = 'answer-input';
+            div.innerHTML = '<input type="text" name="answer_text[]" placeholder="Answer option ' + (answerCount + 1) + '" required> ' +
+                           '<input type="radio" name="correct_answer" value="' + answerCount + '"> Correct';
+            container.appendChild(div);
+            answerCount++;
+        }
+    </script>
+</body>
+</html>
+

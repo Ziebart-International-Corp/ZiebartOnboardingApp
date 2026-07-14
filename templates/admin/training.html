@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Training Management - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .admin-panel {
+            background: white;
+            padding: 25px;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            overflow: visible;
+        }
+        .admin-panel h2 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            color: #000000;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-primary {
+            background: #007bff;
+        }
+        .btn-danger {
+            background: #FE0100;
+        }
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 0.85em;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            font-size: 14px;
+        }
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        table {
+            width: 100%;
+            background: white;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        th {
+            background: #f8f9fa;
+            font-weight: bold;
+        }
+        .badge {
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            background: #6c757d;
+            color: white;
+        }
+        .badge-active {
+            background: #28a745;
+        }
+        .store-dropdown { position: relative; }
+        .store-cell { min-width: 140px; }
+        .store-check-row {
+            display: block;
+            padding: 6px 0;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+        .flash {
+            padding: 12px 16px;
+            border-radius: 0.5rem;
+            margin-bottom: 16px;
+        }
+        .flash-success {
+            background: rgba(52, 160, 90, 0.22);
+            color: #d4f5e2;
+            border: 1px solid rgba(80, 200, 130, 0.45);
+        }
+        .flash-error {
+            background: rgba(200, 70, 70, 0.28);
+            color: #ffecec;
+            border: 1px solid rgba(255, 120, 120, 0.45);
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>🎓 Training Management</h1>
+        </div>
+        <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+            <div class="flash flash-{{ category }}">{{ msg }}</div>
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+        {% if not is_manager_view %}
+        <div class="admin-panel">
+            <h2>Upload Training Video</h2>
+            <form method="POST" action="{{ url_for('upload_training_video') }}" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label for="title">Video Title *</label>
+                    <input type="text" name="title" id="title" required placeholder="e.g., Harassment Prevention Training 2024">
+                </div>
+                <div class="form-group">
+                    <label for="description">Description</label>
+                    <textarea name="description" id="description" placeholder="Video description..."></textarea>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="video_file">Video File *</label>
+                        <input type="file" name="video_file" id="video_file" accept="video/*" required>
+                        <small style="color: #666;">Allowed: MP4, WebM, OGG, MOV, AVI (Max 500MB)</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="passing_score">Passing Score (%)</label>
+                        <input type="number" name="passing_score" id="passing_score" value="80" min="0" max="100">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-success">Upload Video</button>
+            </form>
+        </div>
+        {% endif %}
+        <div class="admin-panel">
+            <h2>{% if is_manager_view %}Training Library (view only){% else %}Training Videos ({{ videos|length }} total){% endif %}</h2>
+            {% if is_manager_view %}
+            {% if videos_with_progress %}
+                {% for item in videos_with_progress %}
+                <div style="margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid #eee;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+                        <h3 style="font-size: 1.2em; margin: 0;">{{ item.video.title }}</h3>
+                        <a href="{{ url_for('view_training_video', video_id=item.video.id) }}" class="btn btn-primary btn-small">Watch</a>
+                    </div>
+                    {% if item.video.description %}
+                    <p style="color: #666; font-size: 0.9em; margin-bottom: 12px;">{{ item.video.description[:120] }}{% if item.video.description|length > 120 %}...{% endif %}</p>
+                    {% endif %}
+                    <p style="font-size: 0.85em; color: #888; margin-bottom: 8px;">Passing score: {{ item.video.passing_score }}%</p>
+                    <table style="width: 100%; margin-top: 10px; font-size: 0.9em;">
+                        <thead>
+                            <tr>
+                                <th style="text-align: left; padding: 8px; background: #f8f9fa;">User</th>
+                                <th style="text-align: left; padding: 8px; background: #f8f9fa;">Time watched</th>
+                                <th style="text-align: left; padding: 8px; background: #f8f9fa;">Score</th>
+                                <th style="text-align: left; padding: 8px; background: #f8f9fa;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for p in item.progress_list %}
+                            <tr>
+                                <td style="padding: 8px;">{{ p.username }}</td>
+                                <td style="padding: 8px;">{{ "%.0f"|format(p.time_watched) }} sec</td>
+                                <td style="padding: 8px;">{{ "%.0f"|format(p.score or 0) }}%</td>
+                                <td style="padding: 8px;">
+                                    {% if p.is_completed %}
+                                    <span class="badge badge-{{ 'active' if p.is_passed else 'inactive' }}">{{ 'Passed' if p.is_passed else 'Failed' }}</span>
+                                    {% else %}
+                                    <span style="color: #888;">In progress</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            {% if not item.progress_list %}
+                            <tr><td colspan="4" style="padding: 12px; color: #999;">No one from your store has watched this video yet.</td></tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endfor %}
+            {% else %}
+            <p>No training videos available.</p>
+            {% endif %}
+            {% else %}
+            {% if videos %}
+            <p style="color: #b7c1d3; font-size: 0.9em; margin-bottom: 12px; max-width: 720px;">Use <strong>Stores</strong> to limit which locations see each video. Leave as <strong>All stores</strong> for company-wide training.</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th>Description</th>
+                        <th>Questions</th>
+                        <th>Passing Score</th>
+                        <th>Status</th>
+                        <th>Stores</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for video in videos %}
+                    <tr>
+                        <td><strong>{{ video.title }}</strong></td>
+                        <td>{{ video.description[:50] if video.description else '-' }}...</td>
+                        <td>{{ video.questions|length }} questions</td>
+                        <td>{{ video.passing_score }}%</td>
+                        <td>
+                            <span class="badge badge-{{ 'active' if video.is_active else 'inactive' }}">
+                                {{ 'Active' if video.is_active else 'Inactive' }}
+                            </span>
+                        </td>
+                        <td class="store-cell">
+                            <div class="store-dropdown">
+                                <button type="button" class="store-dropdown-btn" onclick="toggleTrainingStoreDropdown({{ video.id }})" title="Which stores can see this training video">
+                                    <span class="store-dropdown-label" id="training-store-label-{{ video.id }}">{% if not video.store_ids %}All stores{% else %}{{ video.store_ids|length }} store(s){% endif %}</span> ▾
+                                </button>
+                                <div class="store-dropdown-panel" id="training-store-panel-{{ video.id }}" style="display: none;">
+                                    <form method="POST" action="{{ url_for('training_video_update_stores', video_id=video.id) }}" class="store-form training-store-update-form" data-video-id="{{ video.id }}">
+                                        <label class="store-check-row"><input type="checkbox" name="all" value="1" {% if not video.store_ids %}checked{% endif %} onchange="toggleTrainingAllStores({{ video.id }})"> <strong>All stores</strong></label>
+                                        {% for store in stores %}
+                                        <label class="store-check-row"><input type="checkbox" name="store_ids" value="{{ store.id }}" class="training-store-cb-{{ video.id }}" {% if store.id in (video.store_ids|map(attribute='id')|list) %}checked{% endif %}> {{ store.name }} ({{ store.code }})</label>
+                                        {% endfor %}
+                                        <button type="submit" class="btn btn-primary btn-small" style="margin-top: 8px;">Save</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            <a href="{{ url_for('manage_video_quiz', video_id=video.id) }}" class="btn btn-primary btn-small">Manage Quiz</a>
+                            <a href="{{ url_for('view_training_video', video_id=video.id) }}" class="btn btn-primary btn-small">View/Test</a>
+                            <form method="POST" action="{{ url_for('toggle_training_video_active') }}" style="display: inline;">
+                                <input type="hidden" name="video_id" value="{{ video.id }}">
+                                <button type="submit" class="btn btn-secondary btn-small">
+                                    {{ 'Hide' if video.is_active else 'Show' }}
+                                </button>
+                            </form>
+                            <form method="POST" action="{{ url_for('delete_training_video') }}" style="display: inline;"
+                                  onsubmit="return confirm('Permanently delete this training video? This removes the video, quiz, and all user progress.');">
+                                <input type="hidden" name="video_id" value="{{ video.id }}">
+                                <button type="submit" class="btn btn-danger btn-small">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p>No training videos uploaded yet.</p>
+            {% endif %}
+            {% endif %}
+        </div>
+    </div>
+    <script>
+        function toggleTrainingAllStores(videoId) {
+            var form = document.querySelector('#training-store-panel-' + videoId + ' form');
+            if (!form) return;
+            var allCb = form.querySelector('input[name="all"]');
+            form.querySelectorAll('.training-store-cb-' + videoId).forEach(function(cb) {
+                cb.checked = false;
+                cb.disabled = allCb && allCb.checked;
+            });
+        }
+        function toggleTrainingStoreDropdown(videoId) {
+            var panel = document.getElementById('training-store-panel-' + videoId);
+            if (!panel) return;
+            var isHidden = panel.style.display === 'none';
+            document.querySelectorAll('.store-dropdown-panel').forEach(function(p) {
+                p.style.display = 'none';
+            });
+            panel.style.display = isHidden ? 'block' : 'none';
+        }
+        document.querySelectorAll('.training-store-update-form').forEach(function(form) {
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                var videoId = form.getAttribute('data-video-id');
+                fetch(form.getAttribute('action'), {
+                    method: 'POST',
+                    body: new FormData(form),
+                    credentials: 'same-origin',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                }).then(function(res) {
+                    if (res.redirected || res.ok) {
+                        var allCb = form.querySelector('input[name="all"]');
+                        var labelEl = document.getElementById('training-store-label-' + videoId);
+                        if (labelEl) {
+                            if (allCb && allCb.checked) {
+                                labelEl.textContent = 'All stores';
+                            } else {
+                                labelEl.textContent = form.querySelectorAll('input[name="store_ids"]:checked').length + ' store(s)';
+                            }
+                        }
+                        var panel = document.getElementById('training-store-panel-' + videoId);
+                        if (panel) panel.style.display = 'none';
+                    }
+                }).catch(function() { form.submit(); });
+            });
+        });
+        document.addEventListener('click', function(event) {
+            if (!event.target.closest('.store-dropdown')) {
+                document.querySelectorAll('.store-dropdown-panel').forEach(function(p) {
+                    p.style.display = 'none';
+                });
+            }
+        });
+    </script>
+</body>
+</html>
+

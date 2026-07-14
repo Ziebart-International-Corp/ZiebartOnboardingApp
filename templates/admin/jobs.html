@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Background Jobs - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { font-family: 'URW Form', Arial, sans-serif; background: #FFFFFF; color: #000000; }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover { background: rgba(255,255,255,0.3); color: #FFFFFF; }
+        .container { max-width: 1400px; margin: 30px auto; padding: 0 20px; }
+        .section {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 2rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .section-title { font-size: 1.6em; font-weight: 800; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid #e5e5e5; vertical-align: top; font-size: 0.92em; }
+        th { background: #2d2d2d; color: #fff; font-weight: 600; }
+        .status-pending { color: #856404; font-weight: 600; }
+        .status-running { color: #0c5460; font-weight: 600; }
+        .status-done { color: #155724; font-weight: 600; }
+        .status-failed { color: #721c24; font-weight: 600; }
+        .btn {
+            display: inline-block;
+            padding: 6px 12px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+        .error-snip { max-width: 320px; word-break: break-word; color: #555; font-size: 0.85em; }
+        .flash { padding: 10px 14px; margin-bottom: 12px; border-radius: 6px; }
+        .flash.success { background: #d4edda; color: #155724; }
+        .flash.error { background: #f8d7da; color: #721c24; }
+        {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <a href="{{ back_url }}" class="back-btn">← Back to Dashboard</a>
+        <div style="color:#fff;font-weight:700;">Background Jobs</div>
+        <div class="header-actions">{{ feedback_header_button|safe }}</div>
+    </div>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <div class="section">
+            <div class="section-title">Recent jobs</div>
+            <p style="margin-bottom:16px;color:#555;">Signed PDF builds and other background work. Failed or stuck jobs can be requeued (until max attempts).</p>
+            {% if jobs %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Attempts</th>
+                        <th>Created</th>
+                        <th>Started</th>
+                        <th>Finished</th>
+                        <th>Error</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for job in jobs %}
+                    <tr>
+                        <td>{{ job.id }}</td>
+                        <td>{{ job.job_type }}</td>
+                        <td class="status-{{ job.status }}">{{ job.status }}</td>
+                        <td>{{ job.attempts }}</td>
+                        <td>{{ job.created_at }}</td>
+                        <td>{{ job.started_at or '—' }}</td>
+                        <td>{{ job.finished_at or '—' }}</td>
+                        <td class="error-snip">{{ (job.last_error or '')[:240] }}</td>
+                        <td>
+                            {% if job.status in ('failed', 'running') %}
+                            <form method="post" action="{{ url_for('admin_jobs_requeue', job_id=job.id) }}" style="display:inline;">
+                                <button type="submit" class="btn">Requeue</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p>No background jobs yet.</p>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

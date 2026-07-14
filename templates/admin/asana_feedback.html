@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Asana Feedback - Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; }
+        .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+        .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
+        .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+        .container { max-width: 720px; margin: 24px auto; padding: 0 20px 48px; }
+        .card { background: white; border-radius: 0.75rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 20px; }
+        .card h2 { font-size: 1.15em; margin-bottom: 12px; }
+        .card p, .card li { line-height: 1.55; margin-bottom: 10px; color: #444; }
+        .status-ok { color: #155724; font-weight: 600; }
+        .status-warn { color: #856404; font-weight: 600; }
+        .mono { font-family: Consolas, monospace; font-size: 0.9em; word-break: break-all; }
+        .btn { display: inline-block; padding: 10px 18px; border-radius: 0.5rem; border: none; cursor: pointer; font-size: 0.95em; text-decoration: none; font-weight: 600; }
+        .btn-primary { background: #FE0100; color: #fff; }
+        .btn-secondary { background: #6c757d; color: #fff; margin-left: 8px; }
+        ol { padding-left: 1.25rem; }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Asana Feedback</h1>
+        <a href="{{ url_for('admin_dashboard', staff_console='admin') }}" class="back-btn">← Admin Dashboard</a>
+    </div>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for category, msg in messages %}
+        <div class="card" style="margin-bottom:16px;background:{% if category == 'error' %}#f8d7da{% else %}#d4edda{% endif %};">
+            <p style="margin:0;color:{% if category == 'error' %}#721c24{% else %}#155724{% endif %};">{{ msg }}</p>
+        </div>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+
+        <div class="card">
+            <h2>Connection status</h2>
+            {% if feedback_ready %}
+            <p class="status-ok">Ready — feedback submissions will create tasks in Asana.</p>
+            {% if env_token %}
+            <p>Using <span class="mono">ASANA_ACCESS_TOKEN</span> from <span class="mono">.env</span>.</p>
+            {% elif connected %}
+            <p>Connected via OAuth{% if connected_user %} as {{ connected_user }}{% endif %}.</p>
+            <form method="post" action="{{ url_for('asana_oauth_disconnect') }}" style="margin-top:16px;" onsubmit="return confirm('Disconnect OAuth tokens stored in the database? .env access token is unaffected.');">
+                <button type="submit" class="btn btn-secondary">Disconnect OAuth</button>
+            </form>
+            {% endif %}
+            {% elif env_token or connected %}
+            <p class="status-warn">Token configured but <span class="mono">ASANA_FEEDBACK_PROJECT_GID</span> is missing in <span class="mono">.env</span>.</p>
+            {% else %}
+            <p class="status-warn">Not configured.</p>
+            <p>Add <span class="mono">ASANA_ACCESS_TOKEN</span> and <span class="mono">ASANA_FEEDBACK_PROJECT_GID</span> to <span class="mono">.env</span>. Client ID and secret alone cannot call the Asana API — you need a personal access token or service account token.</p>
+            {% if oauth_available %}
+            <p style="margin-top:12px;">Optional: use OAuth instead by clicking below.</p>
+            <a href="{{ url_for('asana_oauth_connect') }}" class="btn btn-primary" style="margin-top:8px;">Connect to Asana (OAuth)</a>
+            {% endif %}
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <h2>Setup checklist</h2>
+            <ol>
+                <li>In Asana, create a <strong>personal access token</strong> (My Settings → Apps → Personal access tokens) or a <strong>service account token</strong> (Enterprise).</li>
+                <li>Set <span class="mono">ASANA_ACCESS_TOKEN</span> in <span class="mono">.env</span> to that token.</li>
+                <li>Set <span class="mono">ASANA_FEEDBACK_PROJECT_GID</span> in <span class="mono">.env</span>{% if project_gid %} (currently <span class="mono">{{ project_gid }}</span>){% else %} — <strong>not set yet</strong>{% endif %}.</li>
+                <li>Create three sections in that project (Comments, Issues, Improvements) and set their list GIDs in <span class="mono">.env</span>:
+                    <ul style="margin-top:8px;">
+                        <li><span class="mono">ASANA_SECTION_GID_COMMENT</span>{% if section_gid_comment %} — {{ section_gid_comment }}{% else %} — not set{% endif %}</li>
+                        <li><span class="mono">ASANA_SECTION_GID_ISSUE</span>{% if section_gid_issue %} — {{ section_gid_issue }}{% else %} — not set{% endif %}</li>
+                        <li><span class="mono">ASANA_SECTION_GID_SUGGESTION</span>{% if section_gid_suggestion %} — {{ section_gid_suggestion }}{% else %} — not set{% endif %} (maps to “Suggest an improvement”)</li>
+                    </ul>
+                    GID is the number in the section URL: <span class="mono">.../list/1234567890</span>
+                </li>
+                <li>Optional: set <span class="mono">ASANA_FEEDBACK_ASSIGNEE_GID</span> so every feedback task is assigned automatically{% if assignee_gid %} (currently <span class="mono">{{ assignee_gid }}</span>){% endif %}.</li>
+                <li>Ensure the token’s user/service account has access to that project.</li>
+            </ol>
+        </div>
+    </div>
+</body>
+</html>
+

@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="en" class="training-quiz-html">
+<head>
+    <title>{{ video.title }} - Harassment Training</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html.training-quiz-html, body.training-quiz-page { color-scheme: dark; }
+        body.training-quiz-page {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #1a1a1a;
+            color: white;
+        }
+        .training-top-bar {
+            background: #000000;
+            padding: max(10px, env(safe-area-inset-top, 0px)) 14px 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        .training-back-link {
+            flex-shrink: 0;
+            color: #f2f5fb;
+            text-decoration: none;
+            font-size: 0.9em;
+            font-weight: 600;
+            padding: 8px 12px;
+            border-radius: 0.5rem;
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            background: rgba(255, 255, 255, 0.08);
+            min-height: 44px;
+            display: inline-flex;
+            align-items: center;
+        }
+        .training-back-link:hover {
+            color: #fe0100;
+            border-color: rgba(254, 1, 0, 0.45);
+        }
+        .training-top-title-wrap {
+            flex: 1;
+            min-width: 0;
+        }
+        .training-top-title-wrap h1 {
+            font-size: 1.05em;
+            font-weight: 800;
+            margin: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .training-top-title-wrap p {
+            font-size: 0.82em;
+            color: rgba(242, 245, 251, 0.75);
+            margin: 4px 0 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .header {
+            background: #2a2a2a;
+            padding: 15px;
+            text-align: center;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        .video-container {
+            background: #000;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            margin-bottom: 20px;
+            position: relative;
+        }
+        video {
+            width: 100%;
+            max-height: 70vh;
+            pointer-events: auto;
+        }
+        /* Hide timeline scrubber to prevent seeking */
+        video::-webkit-media-controls-timeline {
+            display: none !important;
+        }
+        video::-webkit-media-controls-current-time-display {
+            pointer-events: none;
+        }
+        /* Hide playback rate controls */
+        video::-webkit-media-controls-playback-rate-button {
+            display: none !important;
+        }
+        video::-webkit-media-controls-playback-rate-value {
+            display: none !important;
+        }
+        .quiz-overlay {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.95);
+            z-index: 1000;
+            padding: 40px;
+            overflow-y: auto;
+        }
+        .quiz-overlay.show {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .quiz-content {
+            background: white;
+            color: #000000;
+            padding: 30px;
+            border-radius: 0.5rem;
+            max-width: 800px;
+            width: 100%;
+        }
+        .quiz-content h2 {
+            margin-bottom: 20px;
+            color: #FE0100;
+        }
+        .quiz-content .question {
+            font-size: 1.2em;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+        .answer-option {
+            background: #f8f9fa;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.3s;
+        }
+        .answer-option:hover {
+            border-color: #007bff;
+            background: #e9ecef;
+        }
+        .answer-option.selected {
+            border-color: #007bff;
+            background: #cfe2ff;
+        }
+        .btn {
+            padding: 12px 24px;
+            background: #FE0100;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            margin-top: 20px;
+        }
+        .btn:hover {
+            background: #FE0100;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-success:hover {
+            background: #218838;
+        }
+        .progress-info {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 0.5rem;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .score-display {
+            text-align: center;
+            padding: 40px;
+        }
+        .score-display h1 {
+            font-size: 3em;
+            margin: 20px 0;
+        }
+        .score-pass {
+            color: #28a745;
+        }
+        .score-fail {
+            color: #FE0100;
+        }
+        
+        /* Mobile Responsive Styles */
+        @media (max-width: 768px) {
+            body.training-quiz-page {
+                overflow-x: hidden;
+            }
+            .training-top-bar {
+                flex-wrap: wrap;
+                padding-left: 12px;
+                padding-right: 12px;
+            }
+            .training-back-link {
+                order: 1;
+            }
+            .training-top-title-wrap {
+                order: 2;
+                flex: 1 1 calc(100% - 120px);
+            }
+            .training-top-title-wrap h1 {
+                white-space: normal;
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+            }
+            .container {
+                padding: 12px;
+                padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+            }
+            .video-container {
+                margin-bottom: 15px;
+            }
+            video {
+                max-height: 45dvh;
+            }
+            .progress-info {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+                padding: 12px;
+            }
+            .progress-info > div {
+                width: 100%;
+            }
+            .quiz-overlay {
+                padding: 12px;
+                align-items: flex-start;
+                justify-content: flex-start;
+            }
+            .quiz-overlay.show {
+                align-items: flex-start;
+                justify-content: flex-start;
+            }
+            .quiz-content {
+                padding: 16px;
+                max-height: 85dvh;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            .quiz-content h2 {
+                font-size: 1.2em;
+            }
+            .quiz-content .question {
+                font-size: 1em;
+            }
+            .answer-option {
+                padding: 12px;
+                min-height: 44px;
+            }
+            .btn {
+                min-height: 44px;
+                padding: 12px 20px;
+                font-size: 1em;
+                width: 100%;
+            }
+            .score-display {
+                padding: 20px;
+            }
+            .score-display h1 {
+                font-size: 2em;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .training-top-title-wrap h1 {
+                font-size: 0.95em;
+            }
+            .training-top-title-wrap p {
+                font-size: 0.78em;
+            }
+            video {
+                max-height: 40dvh;
+            }
+            .quiz-content {
+                padding: 12px;
+                max-height: 88dvh;
+            }
+            .quiz-content h2 {
+                font-size: 1em;
+            }
+            .answer-option {
+                padding: 10px;
+            }
+        }
+    {{ global_theme_css|safe }}
+        /* Training quiz: force readable text on white quiz card and dark answer options */
+        body.training-quiz-page .quiz-content {
+            background: #ffffff !important;
+            color: #111111 !important;
+        }
+        body.training-quiz-page .quiz-content::before,
+        body.training-quiz-page .answer-option::before {
+            opacity: 0 !important;
+            background: none !important;
+            display: none !important;
+        }
+        body.training-quiz-page .quiz-content h1,
+        body.training-quiz-page .quiz-content h2,
+        body.training-quiz-page .quiz-content h3,
+        body.training-quiz-page .quiz-content .question,
+        body.training-quiz-page .quiz-content p,
+        body.training-quiz-page .quiz-content label,
+        body.training-quiz-page .quiz-content span {
+            color: #111111 !important;
+            -webkit-text-fill-color: #111111 !important;
+            opacity: 1 !important;
+        }
+        body.training-quiz-page .quiz-content h2 {
+            color: #FE0100 !important;
+            -webkit-text-fill-color: #FE0100 !important;
+        }
+        body.training-quiz-page .answer-option {
+            background: #f1f3f6 !important;
+            color: #111111 !important;
+            border: 2px solid #d6dbe4 !important;
+            position: relative;
+            z-index: 1;
+        }
+        body.training-quiz-page .answer-option > * { position: relative; z-index: 2; }
+        body.training-quiz-page .answer-option label,
+        body.training-quiz-page .answer-option span {
+            color: #111111 !important;
+            -webkit-text-fill-color: #111111 !important;
+            opacity: 1 !important;
+            cursor: pointer;
+        }
+        body.training-quiz-page .answer-option:hover {
+            background: #e3e8f0 !important;
+            border-color: #007bff !important;
+        }
+        body.training-quiz-page .answer-option.selected {
+            background: #cfe2ff !important;
+            border-color: #007bff !important;
+        }
+        body.training-quiz-page .quiz-content .btn {
+            background: #FE0100 !important;
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+        }
+        body.training-quiz-page .quiz-content .btn-success {
+            background: #28a745 !important;
+        }
+    </style>
+</head>
+<body class="training-quiz-page">
+    <div class="training-top-bar">
+        <a href="{{ url_for('list_training_videos') }}" class="training-back-link">← Videos</a>
+        <div class="training-top-title-wrap">
+            <h1>{{ video.title }}</h1>
+            {% if video.description %}
+            <p>{{ video.description }}</p>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="progress-info">
+            <div>
+                <strong>Attempt:</strong> {{ progress.attempt_number }} / {{ video.max_attempts }}
+                <strong>Time Watched:</strong> <span id="timeWatched">0</span> seconds
+            </div>
+            <div>
+                <strong>Passing Score:</strong> {{ video.passing_score }}%
+            </div>
+        </div>
+        
+        <div class="video-container">
+            <video id="trainingVideo" controls controlsList="nodownload noplaybackrate" disablePictureInPicture>
+                <source src="{{ url_for('serve_training_video', video_id=video.id) }}" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+            
+            <div class="quiz-overlay" id="quizOverlay">
+                <div class="quiz-content" id="quizContent">
+                    <!-- Quiz content will be inserted here -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        var video = document.getElementById('trainingVideo');
+        var quizOverlay = document.getElementById('quizOverlay');
+        var quizContent = document.getElementById('quizContent');
+        var timeWatched = 0;
+        var maxWatchedTime = {{ progress.time_watched or 0 }};
+        var watchTimeInterval;
+        var currentQuestion = null;
+        var userAnswers = {};
+        var midQuestions = {{ mid_questions|tojson }};
+        var endQuestions = {{ end_questions|tojson }};
+        var videoId = {{ video.id }};
+        var progressId = {{ progress.id }};
+        var passingScore = {{ video.passing_score }};
+        var midQuestionIndex = 0;
+        var isSeeking = false;
+        
+        // Disable right-click context menu
+        video.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            return false;
+        });
+        
+        // Disable keyboard shortcuts for seeking
+        video.addEventListener('keydown', function(e) {
+            // Prevent arrow keys, space bar seeking, etc.
+            if ([37, 38, 39, 40, 32].indexOf(e.keyCode) > -1) {
+                // Allow space for play/pause only
+                if (e.keyCode === 32) {
+                    e.preventDefault();
+                    if (video.paused) {
+                        video.play();
+                    } else {
+                        video.pause();
+                    }
+                } else {
+                    e.preventDefault();
+                    return false;
+                }
+            }
+        });
+        
+        // Prevent seeking by disabling the seek bar interaction
+        video.addEventListener('seeking', function(e) {
+            if (!isSeeking) {
+                // If user tries to seek ahead of max watched time, reset to max
+                if (video.currentTime > maxWatchedTime + 1) {
+                    e.preventDefault();
+                    video.currentTime = maxWatchedTime;
+                    alert('You cannot skip ahead. Please watch the video from where you left off.');
+                }
+            }
+        });
+        
+        // Prevent seeking when user tries to click on progress bar
+        video.addEventListener('seeked', function(e) {
+            if (!isSeeking) {
+                // If user seeks ahead, reset to max watched time
+                if (video.currentTime > maxWatchedTime + 1) {
+                    video.currentTime = maxWatchedTime;
+                    alert('You cannot skip ahead. Please watch the video from where you left off.');
+                } else {
+                    // Update max watched time if they seek backwards (allowed)
+                    if (video.currentTime < maxWatchedTime) {
+                        maxWatchedTime = video.currentTime;
+                    }
+                }
+            }
+        });
+        
+        // Track watch time and prevent skipping
+        video.addEventListener('timeupdate', function() {
+            var currentTime = video.currentTime;
+            
+            // Prevent skipping ahead - if current time exceeds max watched by more than 1 second, reset
+            if (currentTime > maxWatchedTime + 1 && !isSeeking) {
+                video.currentTime = maxWatchedTime;
+                alert('You cannot skip ahead. Please watch the video in order.');
+                return;
+            }
+            
+            // Update max watched time only if playing forward naturally
+            if (video.paused === false && currentTime > maxWatchedTime) {
+                maxWatchedTime = currentTime;
+                timeWatched = maxWatchedTime;
+                document.getElementById('timeWatched').textContent = Math.floor(timeWatched);
+            }
+        });
+        
+        // Track watch time
+        video.addEventListener('play', function() {
+            // Reset to max watched time if trying to play ahead
+            if (video.currentTime > maxWatchedTime + 1) {
+                video.currentTime = maxWatchedTime;
+            }
+            
+            watchTimeInterval = setInterval(function() {
+                timeWatched = video.currentTime;
+                document.getElementById('timeWatched').textContent = Math.floor(timeWatched);
+                // Update in database every 10 seconds
+                if (Math.floor(timeWatched) % 10 === 0) {
+                    updateWatchTime();
+                }
+            }, 1000);
+        });
+        
+        video.addEventListener('pause', function() {
+            if (watchTimeInterval) {
+                clearInterval(watchTimeInterval);
+            }
+            updateWatchTime();
+        });
+        
+        // Set initial position to max watched time
+        video.addEventListener('loadedmetadata', function() {
+            video.currentTime = maxWatchedTime;
+            // Disable playback rate changes
+            video.playbackRate = 1.0;
+        });
+        
+        // Prevent playback rate changes
+        video.addEventListener('ratechange', function() {
+            if (video.playbackRate !== 1.0) {
+                video.playbackRate = 1.0;
+                alert('Playback speed cannot be changed. Please watch at normal speed.');
+            }
+        });
+        
+        // Additional protection: monitor for any seeking attempts
+        var lastValidTime = maxWatchedTime;
+        setInterval(function() {
+            if (!video.paused && video.currentTime > lastValidTime + 2) {
+                // If video jumped ahead more than 2 seconds, reset
+                video.currentTime = lastValidTime;
+                alert('You cannot skip ahead. Please watch the video in order.');
+            } else if (video.currentTime <= lastValidTime + 2) {
+                // Update last valid time if playing forward normally
+                if (video.currentTime > lastValidTime) {
+                    lastValidTime = video.currentTime;
+                    maxWatchedTime = lastValidTime;
+                }
+            }
+        }, 500);
+        
+        // Check for mid-video questions (using separate listener)
+        var questionCheckInterval = setInterval(function() {
+            if (midQuestionIndex < midQuestions.length && !video.paused) {
+                var question = midQuestions[midQuestionIndex];
+                if (video.currentTime >= question.video_timestamp && !userAnswers['mid_' + question.id]) {
+                    video.pause();
+                    showQuestion(question, 'mid');
+                }
+            }
+        }, 500);
+        
+        // Check for end questions when video ends
+        video.addEventListener('ended', function() {
+            if (watchTimeInterval) {
+                clearInterval(watchTimeInterval);
+            }
+            updateWatchTime();
+            if (endQuestions.length > 0 && !userAnswers['end_completed']) {
+                showEndQuiz();
+            } else {
+                calculateScore();
+            }
+        });
+        
+        function showQuestion(question, type) {
+            currentQuestion = question;
+            var html = '<h2>Quiz Question</h2>';
+            html += '<div class="question">' + question.question_text + '</div>';
+            html += '<div id="answersContainer">';
+            
+            question.answers.forEach(function(answer, index) {
+                html += '<div class="answer-option" onclick="selectAnswer(' + answer.id + ', ' + index + ')">';
+                html += '<input type="radio" name="answer" value="' + answer.id + '" id="answer' + answer.id + '">';
+                html += '<label for="answer' + answer.id + '">' + answer.answer_text + '</label>';
+                html += '</div>';
+            });
+            
+            html += '<button class="btn" onclick="submitAnswer()">Submit Answer</button>';
+            quizContent.innerHTML = html;
+            quizOverlay.classList.add('show');
+        }
+        
+        function selectAnswer(answerId, index) {
+            document.querySelectorAll('.answer-option').forEach(function(el) {
+                el.classList.remove('selected');
+            });
+            event.currentTarget.classList.add('selected');
+            document.getElementById('answer' + answerId).checked = true;
+        }
+        
+        function submitAnswer() {
+            var selected = document.querySelector('input[name="answer"]:checked');
+            if (!selected) {
+                alert('Please select an answer.');
+                return;
+            }
+            
+            var answerId = parseInt(selected.value);
+            var questionId = currentQuestion.id;
+            
+            // Find if answer is correct
+            var isCorrect = currentQuestion.answers.find(function(a) {
+                return a.id === answerId && a.is_correct;
+            });
+            
+            userAnswers[(currentQuestion.question_type === 'mid' ? 'mid_' : 'end_') + questionId] = {
+                answerId: answerId,
+                isCorrect: !!isCorrect
+            };
+            
+            // Save to server
+            saveAnswer(questionId, answerId, !!isCorrect);
+            
+            // Hide quiz overlay
+            quizOverlay.classList.remove('show');
+            
+            if (currentQuestion.question_type === 'mid') {
+                midQuestionIndex++;
+                video.play();
+            }
+        }
+        
+        var endQuestionIndex = 0;
+        
+        function showEndQuiz() {
+            if (endQuestions.length === 0) {
+                calculateScore();
+                return;
+            }
+            
+            endQuestionIndex = 0;
+            showNextEndQuestion();
+        }
+        
+        function showNextEndQuestion() {
+            if (endQuestionIndex >= endQuestions.length) {
+                userAnswers['end_completed'] = true;
+                calculateScore();
+                return;
+            }
+            
+            var question = endQuestions[endQuestionIndex];
+            currentQuestion = question;
+            
+            var html = '<h2>Final Quiz - Question ' + (endQuestionIndex + 1) + ' of ' + endQuestions.length + '</h2>';
+            html += '<div class="question">' + question.question_text + '</div>';
+            html += '<div id="answersContainer">';
+            
+            question.answers.forEach(function(answer, index) {
+                html += '<div class="answer-option" onclick="selectAnswer(' + answer.id + ', ' + index + ')">';
+                html += '<input type="radio" name="answer" value="' + answer.id + '" id="answer' + answer.id + '">';
+                html += '<label for="answer' + answer.id + '">' + answer.answer_text + '</label>';
+                html += '</div>';
+            });
+            
+            html += '<button class="btn" onclick="submitEndAnswer()">Submit Answer</button>';
+            quizContent.innerHTML = html;
+            quizOverlay.classList.add('show');
+        }
+        
+        function submitEndAnswer() {
+            var selected = document.querySelector('input[name="answer"]:checked');
+            if (!selected) {
+                alert('Please select an answer.');
+                return;
+            }
+            
+            var answerId = parseInt(selected.value);
+            var questionId = currentQuestion.id;
+            
+            var isCorrect = currentQuestion.answers.find(function(a) {
+                return a.id === answerId && a.is_correct;
+            });
+            
+            userAnswers['end_' + questionId] = {
+                answerId: answerId,
+                isCorrect: !!isCorrect
+            };
+            
+            saveAnswer(questionId, answerId, !!isCorrect);
+            
+            quizOverlay.classList.remove('show');
+            
+            // Move to next question
+            endQuestionIndex++;
+            setTimeout(function() {
+                showNextEndQuestion();
+            }, 500);
+        }
+        
+        function saveAnswer(questionId, answerId, isCorrect) {
+            fetch("{{ url_for('save_quiz_answer') }}", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    progress_id: progressId,
+                    question_id: questionId,
+                    answer_id: answerId,
+                    is_correct: isCorrect
+                })
+            });
+        }
+        
+        function updateWatchTime() {
+            fetch("{{ url_for('update_watch_time') }}", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    progress_id: progressId,
+                    time_watched: maxWatchedTime
+                })
+            });
+        }
+        
+        function calculateScore() {
+            var totalQuestions = midQuestions.length + endQuestions.length;
+            var correct = 0;
+            
+            Object.keys(userAnswers).forEach(function(key) {
+                if (key !== 'end_completed' && userAnswers[key].isCorrect) {
+                    correct++;
+                }
+            });
+            
+            var score = totalQuestions > 0 ? Math.round((correct / totalQuestions) * 100) : 0;
+            var passed = score >= passingScore;
+            
+            // Save final score
+            fetch("{{ url_for('save_training_score') }}", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    progress_id: progressId,
+                    score: score,
+                    total_questions: totalQuestions,
+                    correct_answers: correct,
+                    is_passed: passed
+                })
+            }).then(function() {
+                showScore(score, passed, totalQuestions, correct);
+            });
+        }
+        
+        function showScore(score, passed, total, correct) {
+            var html = '<div class="score-display">';
+            html += '<h1 class="' + (passed ? 'score-pass' : 'score-fail') + '">' + score + '%</h1>';
+            html += '<h2>' + (passed ? 'Congratulations! You passed!' : 'You did not pass.') + '</h2>';
+            html += '<p>You answered ' + correct + ' out of ' + total + ' questions correctly.</p>';
+            
+            if (!passed) {
+                html += '<p style="color: #dc3545; margin-top: 20px;">You need to score at least ' + passingScore + '% to pass.</p>';
+                html += '<p>Please review the training and try again.</p>';
+                html += '<a href="{{ url_for("view_training_video", video_id=video.id) }}" class="btn" style="display: inline-block; margin-top: 20px;">Retake Training</a>';
+            } else {
+                html += '<p style="color: #28a745; margin-top: 20px;">Training completed successfully!</p>';
+                html += '<a href="{{ url_for("dashboard") }}" class="btn btn-success" style="display: inline-block; margin-top: 20px;">Return to Dashboard</a>';
+            }
+            
+            html += '</div>';
+            quizContent.innerHTML = html;
+            quizOverlay.classList.add('show');
+        }
+    </script>
+</body>
+</html>
+

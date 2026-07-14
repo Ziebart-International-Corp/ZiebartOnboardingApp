@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Feedback - Onboarding App</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; color: #000; }
+        .top-header {
+            background: #000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+            position: relative;
+            z-index: 100;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            color: #fff;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .nav-links { display: flex; gap: 8px; align-items: center; }
+        .nav-links a {
+            color: #fff;
+            text-decoration: none;
+            font-size: 0.95em;
+            font-weight: 600;
+            padding: 8px 14px;
+            border-radius: 999px;
+        }
+        .user-section {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            position: relative;
+        }
+        .user-dropdown {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 20px;
+            color: #fff;
+        }
+        .user-dropdown:hover { background: rgba(255,255,255,0.1); }
+        .user-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #FE0100;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: #fff;
+            min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: 0.5rem;
+            margin-top: 10px;
+            z-index: 1000;
+        }
+        .dropdown-menu.show { display: block; }
+        .dropdown-item {
+            padding: 12px 20px;
+            color: #000;
+            text-decoration: none;
+            display: block;
+        }
+        .dropdown-item:hover { background: #f5f5f5; }
+        .main-content {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 24px 20px 48px;
+        }
+        @media (max-width: 768px) {
+            .top-header { padding: 10px 14px; flex-wrap: wrap; gap: 10px; }
+            .logo-section img { height: 42px; margin-bottom: 0; align-self: center; }
+            .nav-links { display: none; }
+            .user-dropdown-label, .user-dropdown-caret { display: none; }
+        }
+        {{ global_theme_css|safe }}
+    </style>
+</head>
+<body class="user-app-shell">
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+            <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
+        </div>
+        <div class="nav-links">
+            <a href="{{ url_for('dashboard') }}">Home</a>
+            <a href="{{ url_for('user_tasks') }}">Tasks</a>
+            <a href="{{ url_for('view_documents') }}">Files</a>
+            <a href="{{ url_for('list_training_videos') }}">Videos</a>
+            <a href="{{ url_for('profile') }}">Profile</a>
+        </div>
+        <div class="user-section">
+            {{ feedback_header_button|safe }}
+            <div class="user-dropdown" onclick="toggleUserDropdown()">
+                <div class="user-icon">{{ user_first_name[0].upper() if user_first_name else 'U' }}</div>
+                <span class="user-dropdown-label">{{ user_full_name }}</span>
+                <span class="user-dropdown-caret" aria-hidden="true">▼</span>
+            </div>
+            <div class="dropdown-menu" id="userDropdown">
+                {{ staff_console_dropdown_links }}
+            </div>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <section class="feedback-page-panel section">
+            <h1 class="page-title">Send feedback</h1>
+            <p class="feedback-intro page-subtitle">
+                Share a comment, report a problem, or suggest an improvement. You can attach a screenshot or photo if it helps explain the issue.
+            </p>
+
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                <div class="feedback-flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+            {% endwith %}
+
+            <form class="feedback-form" method="post" enctype="multipart/form-data" action="{{ url_for('feedback') }}">
+                <div class="form-row">
+                    <label for="feedback_type">Type</label>
+                    <select id="feedback_type" name="feedback_type" required>
+                        {% for value, label in feedback_type_options %}
+                        <option value="{{ value }}" {% if form_values.feedback_type == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label for="title">Subject <span style="font-weight:400;color:#9ea8b8;">(optional)</span></label>
+                    <input type="text" id="title" name="title" maxlength="200" value="{{ form_values.title }}" placeholder="Short summary">
+                </div>
+                <div class="form-row">
+                    <label for="description">Details</label>
+                    <textarea id="description" name="description" required maxlength="5000" placeholder="What happened? What would you like to see improved?">{{ form_values.description }}</textarea>
+                </div>
+                <div class="form-row">
+                    <label for="page_url">Page <span style="font-weight:400;color:#9ea8b8;">(optional)</span></label>
+                    <input type="url" id="page_url" name="page_url" maxlength="500" value="{{ form_values.page_url }}" placeholder="https://...">
+                    <span class="field-hint">We pre-fill this when you open feedback from another page.</span>
+                </div>
+                <div class="form-row">
+                    <label for="photo">Photo <span style="font-weight:400;color:#9ea8b8;">(optional)</span></label>
+                    <input type="file" id="photo" name="photo" accept="image/jpeg,image/png,image/gif,image/webp">
+                    <span class="field-hint">JPG, PNG, GIF, or WebP. Max upload size follows the app limit.</span>
+                    <img id="photoPreview" class="feedback-photo-preview" alt="Selected photo preview">
+                </div>
+                <div class="feedback-form-actions">
+                    <button type="submit" class="feedback-submit-btn">Submit feedback</button>
+                    <a href="{{ url_for('dashboard') }}" class="btn" style="text-decoration:none;">Cancel</a>
+                </div>
+            </form>
+        </section>
+    </div>
+
+    <script>
+        function toggleUserDropdown() {
+            var dropdown = document.getElementById('userDropdown');
+            if (dropdown) dropdown.classList.toggle('show');
+        }
+        window.onclick = function(event) {
+            if (!event.target.closest('.user-dropdown')) {
+                var dropdown = document.getElementById('userDropdown');
+                if (dropdown && dropdown.classList.contains('show')) dropdown.classList.remove('show');
+            }
+        };
+        (function() {
+            var input = document.getElementById('photo');
+            var preview = document.getElementById('photoPreview');
+            if (!input || !preview) return;
+            input.addEventListener('change', function() {
+                var file = input.files && input.files[0];
+                if (!file) {
+                    preview.style.display = 'none';
+                    preview.removeAttribute('src');
+                    return;
+                }
+                var reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.src = e.target.result;
+                    preview.style.display = 'block';
+                };
+                reader.readAsDataURL(file);
+            });
+        })();
+    </script>
+</body>
+</html>

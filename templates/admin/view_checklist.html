@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>View Checklist - Onboarding App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .admin-panel {
+            background: white;
+            padding: 25px;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            overflow: visible;
+        }
+        .admin-panel h2 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            color: #000000;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .checklist-view {
+            margin-top: 20px;
+        }
+        .checklist-item {
+            background: #f8f9fa;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-radius: 0.5rem;
+            border-left: 4px solid #007bff;
+            display: flex;
+            align-items: flex-start;
+            gap: 15px;
+            transition: all 0.3s;
+        }
+        .checklist-item.completed {
+            background: #d4edda;
+            border-left-color: #28a745;
+            opacity: 0.8;
+        }
+        .checkbox-container {
+            margin-top: 5px;
+        }
+        .checkbox-container input[type="checkbox"] {
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            accent-color: #28a745;
+        }
+        .item-content {
+            flex: 1;
+        }
+        .item-content h3 {
+            margin-bottom: 8px;
+            color: #000000;
+            font-size: 1.1em;
+        }
+        .item-content.completed h3 {
+            text-decoration: line-through;
+            color: #6c757d;
+        }
+        .item-meta {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            color: #808080;
+            font-size: 0.9em;
+        }
+        .badge {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            background: #6c757d;
+            color: white;
+        }
+        .badge-assigned {
+            background: #007bff;
+        }
+        .progress-bar {
+            background: #e9ecef;
+            height: 30px;
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 20px 0;
+            position: relative;
+        }
+        .progress-fill {
+            background: linear-gradient(90deg, #28a745 0%, #20c997 100%);
+            height: 100%;
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 0.5rem;
+            text-align: center;
+        }
+        .stat-card .number {
+            font-size: 2em;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-card .label {
+            color: #808080;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>✅ New Hire Checklist</h1>
+        </div>
+        <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    
+    <div class="container">
+        
+        <div class="admin-panel">
+            <h2>Onboarding Checklist</h2>
+            
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="number" id="totalTasks">{{ checklist_items|length }}</div>
+                    <div class="label">Total Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="completedTasks">0</div>
+                    <div class="label">Completed</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="remainingTasks">{{ checklist_items|length }}</div>
+                    <div class="label">Remaining</div>
+                </div>
+            </div>
+            
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <div class="progress-bar" style="flex: 1; min-width: 0;">
+                    <div class="progress-fill" id="progressFill" style="width: 0%;"></div>
+                </div>
+                <span id="progressPct" style="font-size: 0.9em; font-weight: 600; flex-shrink: 0;">0%</span>
+            </div>
+            
+            <div class="checklist-view">
+                {% if checklist_items %}
+                    <form id="checklistForm" method="POST" action="{{ url_for('update_checklist_completion') }}">
+                        {% for item in checklist_items %}
+                        <div class="checklist-item" id="item-{{ item.id }}">
+                            <div class="checkbox-container">
+                                <input type="checkbox" 
+                                       name="completed_items" 
+                                       value="{{ item.id }}" 
+                                       id="check-{{ item.id }}"
+                                       onchange="updateProgress()">
+                            </div>
+                            <div class="item-content" id="content-{{ item.id }}">
+                                <h3>{{ item.task_name }}</h3>
+                                {% if item.description %}
+                                <p style="color: #666; margin-top: 5px;">{{ item.description }}</p>
+                                {% endif %}
+                                <div class="item-meta">
+                                    {% if item.assigned_to %}
+                                    <span class="badge badge-assigned">Assigned to: {{ item.assigned_to }}</span>
+                                    {% endif %}
+                                    <span>Order: {{ item.order }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                        <input type="hidden" name="form_submitted" value="1">
+                        <button type="submit" class="btn btn-success" style="margin-top: 20px;">Save Checklist Status</button>
+                    </form>
+                {% else %}
+                    <p>No checklist items available. <a href="{{ url_for('manage_checklist') }}">Add some tasks</a> to get started.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Load saved completion status from localStorage
+        function loadSavedStatus() {
+            var saved = localStorage.getItem('checklist_completed');
+            if (saved) {
+                var completed = JSON.parse(saved);
+                completed.forEach(function(itemId) {
+                    var checkbox = document.getElementById('check-' + itemId);
+                    if (checkbox) {
+                        checkbox.checked = true;
+                        var item = document.getElementById('item-' + itemId);
+                        var content = document.getElementById('content-' + itemId);
+                        if (item && content) {
+                            item.classList.add('completed');
+                            content.classList.add('completed');
+                        }
+                    }
+                });
+            }
+            updateProgress();
+        }
+        
+        // Update progress bar and stats
+        function updateProgress() {
+            var checkboxes = document.querySelectorAll('input[type="checkbox"][name="completed_items"]');
+            var total = checkboxes.length;
+            var completed = 0;
+            var completedIds = [];
+            
+            checkboxes.forEach(function(checkbox) {
+                if (checkbox.checked) {
+                    completed++;
+                    completedIds.push(checkbox.value);
+                    var itemId = checkbox.value;
+                    var item = document.getElementById('item-' + itemId);
+                    var content = document.getElementById('content-' + itemId);
+                    if (item && content) {
+                        item.classList.add('completed');
+                        content.classList.add('completed');
+                    }
+                } else {
+                    var itemId = checkbox.value;
+                    var item = document.getElementById('item-' + itemId);
+                    var content = document.getElementById('content-' + itemId);
+                    if (item && content) {
+                        item.classList.remove('completed');
+                        content.classList.remove('completed');
+                    }
+                }
+            });
+            
+            var percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+            document.getElementById('progressFill').style.width = percentage + '%';
+            var pctEl = document.getElementById('progressPct');
+            if (pctEl) pctEl.textContent = percentage + '%';
+            document.getElementById('completedTasks').textContent = completed;
+            document.getElementById('remainingTasks').textContent = total - completed;
+            
+            // Save to localStorage
+            localStorage.setItem('checklist_completed', JSON.stringify(completedIds));
+        }
+        
+        // Load saved status on page load
+        window.onload = function() {
+            loadSavedStatus();
+        };
+        
+        // Handle form submission
+        document.getElementById('checklistForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            var formData = new FormData(this);
+            fetch(this.action, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (response.ok) {
+                    alert('Checklist status saved successfully!');
+                } else {
+                    alert('Error saving checklist status.');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error saving checklist status.');
+            });
+        });
+    </script>
+</body>
+</html>
+

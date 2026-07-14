@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en" class="assign-doc-html">
+<head>
+    <title>Assign Document - {{ document.name_for_users }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html.assign-doc-html,
+        body.assign-document-page {
+            color-scheme: dark;
+        }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #0a0e14;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .admin-panel {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 25px;
+            margin-bottom: 20px;
+            color: #f2f5fb;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+        }
+        .form-group input[type="text"],
+        .form-group input[type="date"],
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            font-size: 16px; /* Prevents zoom on iOS */
+            min-height: 44px; /* Touch-friendly */
+        }
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .assign-doc-users-list {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            border-radius: 0.5rem;
+            padding: 10px;
+            background: #070b10;
+            color: #f2f5fb;
+        }
+        .assign-doc-user-row {
+            padding: 10px;
+            margin-bottom: 5px;
+            background: #121a26;
+            color: #ffffff;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            border-radius: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .assign-doc-user-row input[type="checkbox"] {
+            margin-right: 10px;
+            min-width: 20px;
+            min-height: 20px; /* Touch-friendly */
+        }
+        .assign-doc-user-row label {
+            flex: 1;
+            cursor: pointer;
+            font-weight: 600;
+            color: #ffffff;
+        }
+        .assign-doc-user-name {
+            color: #ffffff;
+        }
+        .assigned-badge {
+            background: #28a745;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            margin-left: 10px;
+        }
+        .current-assignments {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+        }
+        .assignment-item {
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #121a26;
+            color: #f2f5fb;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        /* Mobile Responsive Styles */
+        @media (max-width: 768px) {
+            .header {
+                padding: 12px 15px;
+                flex-wrap: wrap;
+            }
+            .header-content h1 {
+                font-size: 1.2em;
+            }
+            .back-btn {
+                font-size: 0.85em;
+                padding: 6px 12px;
+            }
+            .container {
+                padding: 15px;
+            }
+            .admin-panel {
+                padding: 15px;
+            }
+            .admin-panel h2 {
+                font-size: 1.3em;
+            }
+            .form-group input[type="text"],
+            .form-group input[type="date"],
+            .form-group textarea {
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px;
+            }
+            .assign-doc-users-list {
+                max-height: 300px;
+            }
+            .assign-doc-user-row {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            .assignment-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+            .btn {
+                min-height: 44px;
+                padding: 12px 20px;
+                font-size: 1em;
+                width: 100%;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .header-content h1 {
+                font-size: 1em;
+            }
+            .admin-panel {
+                padding: 12px;
+            }
+            .admin-panel h2 {
+                font-size: 1.2em;
+            }
+            .assign-doc-users-list {
+                max-height: 250px;
+            }
+        }
+    {{ global_theme_css|safe }}
+        /* Assign Document: high-contrast list (global metallic ::before + light row defaults) */
+        body.assign-document-page {
+            background: linear-gradient(160deg, #0f1419 0%, #0a0e14 100%) !important;
+            color: #f2f5fb !important;
+        }
+        body.assign-document-page .container {
+            position: relative;
+            z-index: 1;
+        }
+        body.assign-document-page .admin-panel::before {
+            opacity: 0.05 !important;
+        }
+        body.assign-document-page .admin-panel {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+            border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            color: #f2f5fb !important;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35) !important;
+        }
+        body.assign-document-page .admin-panel form {
+            position: relative !important;
+            z-index: 2 !important;
+        }
+        body.assign-document-page .admin-panel h2,
+        body.assign-document-page .admin-panel h3 {
+            color: #f2f5fb !important;
+            border-bottom-color: rgba(255, 255, 255, 0.12) !important;
+        }
+        body.assign-document-page .form-group > label {
+            color: #dbe4f5 !important;
+        }
+        body.assign-document-page .assign-doc-users-list {
+            background: #0d1118 !important;
+            border: 1px solid rgba(255, 255, 255, 0.22) !important;
+            box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35) !important;
+        }
+        body.assign-document-page .assign-doc-user-row {
+            background: #1a2332 !important;
+            border: 1px solid rgba(255, 255, 255, 0.16) !important;
+            color: #ffffff !important;
+        }
+        body.assign-document-page .assign-doc-user-row:hover {
+            background: #243044 !important;
+            border-color: rgba(255, 255, 255, 0.24) !important;
+        }
+        body.assign-document-page .assign-doc-user-row label {
+            color: #ffffff !important;
+            font-weight: 600 !important;
+            -webkit-text-fill-color: #ffffff !important;
+        }
+        body.assign-document-page .assign-doc-user-name {
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+            font-weight: 600 !important;
+            font-size: 1rem !important;
+        }
+        body.assign-document-page .form-group input[type="date"],
+        body.assign-document-page .form-group textarea {
+            background: rgba(255, 255, 255, 0.1) !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255, 255, 255, 0.28) !important;
+        }
+        body.assign-document-page .form-group textarea::placeholder {
+            color: #9aa5b8 !important;
+        }
+        body.assign-document-page .current-assignments {
+            border-top-color: rgba(255, 255, 255, 0.12) !important;
+        }
+        body.assign-document-page .assignment-item {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.14) !important;
+            color: #f2f5fb !important;
+        }
+        body.assign-document-page .assignment-item strong {
+            color: #ffffff !important;
+        }
+        body.assign-document-page .assignment-item span:not(.assigned-badge) {
+            color: #c9d4e8 !important;
+        }
+        body.assign-document-page .assign-doc-users-list > p {
+            color: #b7c1d3 !important;
+        }
+        body.assign-document-page .assign-doc-users-shell {
+            background: #03060a !important;
+            background-color: #03060a !important;
+            background-image: none !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255, 255, 255, 0.2) !important;
+            border-radius: 12px !important;
+            padding: 14px !important;
+            margin-top: 8px !important;
+        }
+        body.assign-document-page .assign-doc-users-shell > label {
+            color: #f2f5fb !important;
+        }
+        /* ID-scoped: beats almost all theme class chains if body/page scoping fails */
+        #assign-doc-users-list-root.assign-doc-users-list {
+            background: #0d1118 !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255, 255, 255, 0.22) !important;
+            border-radius: 10px !important;
+            padding: 10px !important;
+            max-height: 400px !important;
+            overflow-y: auto !important;
+            box-sizing: border-box !important;
+        }
+        #assign-doc-users-list-root .assign-doc-user-row {
+            background: #1a2332 !important;
+            color: #ffffff !important;
+            border: 1px solid rgba(255, 255, 255, 0.18) !important;
+        }
+        #assign-doc-users-list-root .assign-doc-user-row label,
+        #assign-doc-users-list-root .assign-doc-user-name {
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+        }
+    </style>
+</head>
+<body class="assign-document-page" data-page="assign-document">
+    <div class="header">
+        <div class="header-content">
+            <h1>👤 Assign Document - {{ document.original_filename }}</h1>
+        </div>
+        <div class="header-actions"><a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a></div>
+    </div>
+    
+    <div class="container">
+        
+        <div class="admin-panel">
+            <h2>Assign to Users</h2>
+            <p style="color: #b7c1d3; font-size: 0.95em; margin-bottom: 16px; max-width: 640px;">Creates a signing task and shows this document on the user&rsquo;s <strong>Files</strong> page, even if it is <strong>Not in library</strong> on Manage Documents. Use the library toggle only for optional browse access without assignment.</p>
+            <form method="POST" action="{{ url_for('assign_document_submit', doc_id=document.id) }}">
+                <div class="form-group assign-doc-users-form-group">
+                    <div class="assign-doc-users-shell"
+                         style="background:#03060a !important;background-color:#03060a !important;background-image:none !important;color:#f2f5fb !important;border:1px solid rgba(255,255,255,0.2) !important;border-radius:12px;padding:14px;margin-top:8px;box-sizing:border-box;">
+                    <label style="color:#f2f5fb !important;margin-bottom:10px;display:block;">Select Users:</label>
+                    <div id="assign-doc-users-list-root" class="assign-doc-users-list"
+                         style="background:#070b10 !important;background-color:#070b10 !important;background-image:none !important;color:#f2f5fb !important;border:1px solid rgba(255,255,255,0.22) !important;border-radius:10px;padding:10px;max-height:400px;overflow-y:auto;box-sizing:border-box;">
+                        {% if all_users %}
+                            {% for user in all_users %}
+                            <div class="assign-doc-user-row"
+                                 style="background:#121a26 !important;background-color:#121a26 !important;background-image:none !important;color:#ffffff !important;border:1px solid rgba(255,255,255,0.18) !important;border-radius:8px;padding:10px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+                                <input type="checkbox" name="usernames" value="{{ user.username }}" id="user-{{ user.username }}" 
+                                       {% if user.username in assigned_usernames %}checked{% endif %}>
+                                <label for="user-{{ user.username }}" style="color:#ffffff !important;-webkit-text-fill-color:#ffffff !important;flex:1;cursor:pointer;margin:0;">
+                                    <span class="assign-doc-user-name" style="color:#ffffff !important;-webkit-text-fill-color:#ffffff !important;font-weight:600;">{{ user_display_names.get(user.username, user.username) }}</span>
+                                </label>
+                                {% if user.username in assigned_usernames %}
+                                <span class="assigned-badge">Assigned</span>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <p style="color: #c9d4e8; padding: 20px;">No users found. Users will appear here after they log in.</p>
+                        {% endif %}
+                    </div>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="due_date">Due Date (optional):</label>
+                    <input type="date" name="due_date" id="due_date">
+                </div>
+                
+                <div class="form-group">
+                    <label for="notes">Notes (optional):</label>
+                    <textarea name="notes" id="notes" placeholder="Add any notes about this assignment..."></textarea>
+                </div>
+                
+                <button type="submit" class="btn btn-success">Assign Document</button>
+            </form>
+            
+            {% if current_assignments %}
+            <div class="current-assignments">
+                <h3>Current Assignments</h3>
+                {% for assignment in current_assignments %}
+                <div class="assignment-item">
+                    <div>
+                        <strong>{{ user_display_names.get(assignment.username, assignment.username) }}</strong>
+                        {% if assignment.due_date %}
+                        <span style="color: #666; margin-left: 10px;">Due: {{ assignment.due_date.strftime('%Y-%m-%d') }}</span>
+                        {% endif %}
+                        {% if assignment.is_completed %}
+                        <span class="assigned-badge" style="margin-left: 10px;">✓ Completed</span>
+                        {% endif %}
+                    </div>
+                    <form method="POST" action="{{ url_for('remove_document_assignment', assignment_id=assignment.id) }}" style="display: inline;">
+                        <button type="submit" class="btn" style="padding: 5px 15px; font-size: 0.85em;" 
+                                onclick="return confirm('Remove assignment for {{ user_display_names.get(assignment.username, assignment.username) }}?')">
+                            Remove
+                        </button>
+                    </form>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+

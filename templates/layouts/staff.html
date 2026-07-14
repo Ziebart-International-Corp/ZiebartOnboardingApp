@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Staff Console{% endblock %}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; color: #111; min-height: 100vh; }
+        .header { background: #000; color: #fff; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+        .header h1 { font-weight: 800; margin: 0; font-size: 1.25em; }
+        .header a { color: #fff; text-decoration: none; }
+        .container { max-width: 1100px; margin: 30px auto; padding: 0 20px; }
+        {{ global_theme_css|safe }}
+        {% block extra_css %}{% endblock %}
+    </style>
+</head>
+<body class="staff-console {% block body_class %}{% endblock %}">
+    {% block header %}
+    <div class="header">
+        <h1>{% block header_title %}Staff Console{% endblock %}</h1>
+        <div>{% block header_actions %}{% endblock %}</div>
+    </div>
+    {% endblock %}
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

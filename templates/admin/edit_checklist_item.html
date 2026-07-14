@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Edit Checklist Item - Onboarding App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 800px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .admin-panel {
+            background: white;
+            padding: 25px;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            font-size: 14px;
+        }
+        .form-group textarea {
+            min-height: 80px;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr 100px;
+            gap: 15px;
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>Edit Checklist Item</h1>
+        </div>
+        <div class="header-actions"><a href="{{ url_for('manage_checklist') }}" class="back-btn">← Back to Checklist</a></div>
+    </div>
+    
+    <div class="container">
+        
+        <div class="admin-panel">
+            <h2>Edit Checklist Item</h2>
+            <form method="POST" action="{{ url_for('update_checklist_item', item_id=item.id) }}">
+                <div class="form-group">
+                    <label for="task_name">Task Name *</label>
+                    <input type="text" name="task_name" id="task_name" value="{{ item.task_name }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="description">Description</label>
+                    <textarea name="description" id="description">{{ item.description or '' }}</textarea>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="assigned_to">Assigned To</label>
+                        <input type="text" name="assigned_to" id="assigned_to" value="{{ item.assigned_to or '' }}" placeholder="e.g., HR, IT, Manager">
+                    </div>
+                    <div class="form-group">
+                        <label for="order">Order</label>
+                        <input type="number" name="order" id="order" value="{{ item.order }}" min="0">
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: flex-end;">
+                        <label style="display: flex; align-items: center; gap: 5px;">
+                            <input type="checkbox" name="is_active" value="1" {% if item.is_active %}checked{% endif %} style="width: auto;">
+                            Active
+                        </label>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-success">Update Checklist Item</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+

@@ -1,0 +1,2014 @@
+<!DOCTYPE html>
+<html lang="en" class="sign-document-html">
+<head>
+    <title>Sign Document - {{ document.name_for_users }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    {% if is_pdf and not document_file_missing %}
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    {% endif %}
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html.sign-document-html, body.sign-document-page { color-scheme: dark; }
+        body.sign-document-page {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #0a0e14;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-danger {
+            background: #FE0100;
+        }
+        .choice-checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .choice-checkbox-btn {
+            width: 40px;
+            height: 40px;
+            min-width: 40px;
+            border: 2px solid #333;
+            border-radius: 4px;
+            background: #fff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+        .choice-checkbox-btn-selected {
+            border-color: #28a745;
+            background: #e8f5e9;
+        }
+        .choice-checkbox-mark {
+            font-size: 1.4em;
+            font-weight: 800;
+            line-height: 1;
+            color: #000;
+        }
+        .main-content {
+            display: block;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .sign-doc-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+            padding: 10px 12px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 6px;
+        }
+        .sign-progress-wrap {
+            flex: 1;
+            min-width: 160px;
+        }
+        #signProgressText {
+            font-size: 0.9em;
+            color: #f2f5fb;
+            display: block;
+            margin-bottom: 6px;
+        }
+        .sign-progress-bar {
+            height: 6px;
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        #signProgressFill {
+            height: 100%;
+            width: 0%;
+            background: #28a745;
+            border-radius: 3px;
+            transition: width 0.25s ease;
+        }
+        #signNextFieldBtn {
+            background: #fe0100;
+            white-space: nowrap;
+        }
+        .document-viewer-container {
+            background: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 20px;
+            position: relative;
+        }
+        .document-viewer-layout {
+            display: flex;
+            gap: 12px;
+            align-items: stretch;
+        }
+        .document-viewer-wrap {
+            flex: 1;
+            min-width: 0;
+        }
+        .pdf-page-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 6px;
+            font-size: 0.9em;
+            color: #f2f5fb;
+        }
+        .pdf-page-toolbar button {
+            padding: 4px 12px;
+            background: rgba(255, 255, 255, 0.12);
+            color: #f2f5fb;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+        .pdf-page-toolbar button:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .pdf-page-toolbar button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .pdf-page-scroller {
+            display: none;
+            flex-direction: column;
+            width: 56px;
+            flex-shrink: 0;
+            background: rgba(0, 0, 0, 0.35);
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 8px 6px;
+            max-height: min(860px, calc(100vh - 180px));
+        }
+        .pdf-page-scroller-title {
+            font-size: 0.65em;
+            font-weight: 700;
+            text-align: center;
+            color: #b7c1d3;
+            margin-bottom: 8px;
+            line-height: 1.2;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .pdf-page-scroller-list {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            align-items: center;
+        }
+        .pdf-page-scroller-item {
+            width: 38px;
+            min-height: 38px;
+            padding: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #f2f5fb;
+            font-size: 0.85em;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .pdf-page-scroller-item.active {
+            background: #fe0100;
+            border-color: rgba(255, 255, 255, 0.4);
+        }
+        .pdf-page-scroller-item.has-fields {
+            box-shadow: inset 0 0 0 2px rgba(110, 168, 254, 0.7);
+        }
+        .document-viewer {
+            position: relative;
+            background: #525252;
+            min-height: 800px;
+            overflow: auto;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+        }
+        #pdfCanvas {
+            max-width: 100%;
+            height: auto;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            background: white;
+            display: block;
+        }
+        #fieldOverlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            z-index: 100;
+            overflow: visible;
+        }
+        #fieldOverlay .field-overlay {
+            pointer-events: auto;
+        }
+        .field-overlay {
+            position: absolute;
+            box-sizing: border-box;
+            pointer-events: auto;
+            cursor: text;
+            border: 1px solid transparent;
+            background: transparent;
+            border-radius: 2px;
+            min-width: 24px;
+            min-height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            overflow: visible;
+            z-index: 101;
+            transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+        }
+        body.sign-document-page .field-overlay:not(.filled) {
+            border: 2px dashed rgba(254, 1, 0, 0.62);
+            background: rgba(255, 255, 255, 0.72);
+            box-shadow: 0 0 0 1px rgba(254, 1, 0, 0.15);
+        }
+        body.sign-document-page .field-overlay.kind-typed:not(.filled) {
+            border-color: rgba(0, 123, 255, 0.72);
+            background: rgba(255, 255, 255, 0.78);
+            box-shadow: 0 0 0 1px rgba(0, 123, 255, 0.12);
+        }
+        body.sign-document-page .field-overlay:not(.filled)::before {
+            content: attr(data-label);
+            position: absolute;
+            top: -1px;
+            left: -1px;
+            transform: translateY(-100%);
+            max-width: min(180px, 42vw);
+            padding: 2px 6px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1.25;
+            border-radius: 4px 4px 0 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            pointer-events: none;
+            z-index: 1;
+        }
+        body.sign-document-page .field-overlay.kind-signature:not(.filled)::before {
+            background: #fe0100;
+            color: #fff;
+        }
+        body.sign-document-page .field-overlay.kind-typed:not(.filled)::before {
+            background: #007bff;
+            color: #fff;
+        }
+        .field-overlay:hover:not(.active):not(.filled) {
+            border-color: rgba(0, 123, 255, 0.45);
+            background: rgba(255, 255, 255, 0.35);
+        }
+        .field-overlay.kind-signature {
+            cursor: pointer;
+        }
+        .field-overlay.kind-signature:hover:not(.filled) {
+            border-color: rgba(254, 1, 0, 0.5);
+            background: rgba(255, 255, 255, 0.25);
+        }
+        .field-overlay.filled {
+            border: 1px solid rgba(40, 167, 69, 0.35);
+            background: rgba(255, 255, 255, 0.88);
+            cursor: pointer;
+        }
+        .field-overlay.active {
+            border-color: #007bff;
+            background: #fff;
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.45);
+            z-index: 102;
+        }
+        body.sign-document-page .field-overlay.active:not(.filled) {
+            animation: sign-field-pulse 1.4s ease-in-out infinite;
+        }
+        @keyframes sign-field-pulse {
+            0%, 100% { box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.45); }
+            50% { box-shadow: 0 0 0 5px rgba(254, 1, 0, 0.35); }
+        }
+        .sign-mobile-field-list {
+            display: none;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 12px;
+            max-height: 160px;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        .sign-mobile-field-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: rgba(255, 255, 255, 0.06);
+            color: #f2f5fb;
+            font-size: 0.9em;
+            text-align: left;
+            cursor: pointer;
+        }
+        .sign-mobile-field-item.is-done {
+            opacity: 0.65;
+            border-color: rgba(40, 167, 69, 0.45);
+        }
+        .sign-mobile-field-item.is-active {
+            border-color: rgba(254, 1, 0, 0.65);
+            background: rgba(254, 1, 0, 0.12);
+        }
+        .sign-mobile-field-item-label {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .sign-mobile-field-item-meta {
+            flex-shrink: 0;
+            font-size: 0.78em;
+            color: #b7c1d3;
+        }
+        .field-overlay-label {
+            display: none;
+        }
+        .field-overlay-value {
+            font-size: 11px;
+            color: #000;
+            padding: 2px;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: none;
+        }
+        .field-overlay.filled .field-overlay-value {
+            display: block;
+        }
+        .field-overlay img.field-overlay-sig {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+        .field-overlay-input {
+            width: 100%;
+            height: 100%;
+            border: none;
+            padding: 2px 4px;
+            font-size: 12px;
+            background: #fff !important;
+            color: #000 !important;
+            -webkit-text-fill-color: #000 !important;
+            caret-color: #000 !important;
+            box-sizing: border-box;
+            box-shadow: none !important;
+        }
+        .field-overlay-choice-mark {
+            font-size: 1.2em;
+            font-weight: 800;
+            color: #000;
+        }
+        .signature-popover {
+            position: fixed;
+            z-index: 10000;
+            background: #fff;
+            border: 2px solid #333;
+            border-radius: 8px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            padding: 12px;
+            min-width: 280px;
+            max-width: 95vw;
+        }
+        .signature-popover canvas {
+            width: 100%;
+            height: 140px;
+            border: 1px solid #ddd;
+            cursor: crosshair;
+            display: block;
+            touch-action: none;
+        }
+        .signature-popover-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+        .signature-popover-actions button {
+            flex: 1;
+            min-width: 80px;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .sign-field-item.active-field {
+            outline: 2px solid #007bff;
+            outline-offset: 2px;
+        }
+        .sign-hint-banner {
+            font-size: 0.9em;
+            color: #b7c1d3;
+            margin-bottom: 10px;
+            padding: 8px 12px;
+            background: rgba(110, 168, 254, 0.12);
+            border-radius: 6px;
+        }
+        .sign-doc-toolbar .btn-done-link {
+            color: #f2f5fb;
+            text-decoration: none;
+            padding: 8px 16px;
+            border: 1px solid rgba(255,255,255,0.25);
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        .sign-doc-toolbar .btn-done-link:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        .missing-file-banner {
+            padding: 24px;
+            background: rgba(255, 193, 7, 0.12);
+            border: 1px solid rgba(255, 193, 7, 0.45);
+            border-radius: 8px;
+            color: #f2f5fb;
+            min-height: 200px;
+        }
+        .missing-file-banner strong {
+            color: #ffc107;
+        }
+        .signature-panel {
+            background: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        .signature-pad-container {
+            border: 2px solid #ddd;
+            border-radius: 0.5rem;
+            margin-bottom: 15px;
+            background: white;
+        }
+        #signaturePad {
+            width: 100%;
+            height: 200px;
+            cursor: crosshair;
+            border: none;
+        }
+        .signature-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .signature-controls button {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ddd;
+            background: #f8f9fa;
+            border-radius: 0.5rem;
+            cursor: pointer;
+        }
+        .signature-controls button:hover {
+            background: #e9ecef;
+        }
+        .signature-fields-list {
+            margin-top: 20px;
+        }
+        .signature-field-item {
+            background: #f8f9fa;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 0.5rem;
+            border-left: 3px solid #007bff;
+        }
+        .signature-field-item.signed {
+            border-left-color: #28a745;
+            background: #d4edda;
+        }
+        .signature-field-item h4 {
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+        .signature-field-item p {
+            font-size: 0.8em;
+            color: #808080;
+            margin: 3px 0;
+        }
+        .signature-preview {
+            margin-top: 10px;
+            padding: 10px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            max-height: 100px;
+            overflow: hidden;
+        }
+        .signature-preview img {
+            max-width: 100%;
+            max-height: 80px;
+        }
+        
+        /* Mobile Responsive Styles */
+        @media (max-width: 768px) {
+            body.sign-document-page {
+                overflow-x: hidden;
+            }
+            .header {
+                padding: max(10px, env(safe-area-inset-top, 0px)) 12px 12px;
+                flex-wrap: wrap;
+                gap: 10px;
+                align-items: flex-start;
+            }
+            .header-content {
+                min-width: 0;
+                flex: 1 1 100%;
+                order: 1;
+            }
+            .header-content h1 {
+                font-size: 1.1em;
+                line-height: 1.3;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+            }
+            .header .back-btn {
+                order: 2;
+                flex: 1 1 auto;
+                text-align: center;
+                min-height: 44px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .container {
+                padding: 12px;
+                padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+            }
+            .main-content {
+                grid-template-columns: 1fr;
+                gap: 16px;
+            }
+            .document-viewer-container {
+                padding: 12px;
+                order: 1;
+            }
+            .signature-panel {
+                padding: 12px;
+                order: 2;
+            }
+            .document-viewer {
+                min-height: 0;
+                padding: 8px;
+            }
+            #pdfCanvas {
+                width: 100% !important;
+                max-width: 100%;
+                height: auto !important;
+                max-height: none !important;
+            }
+            .sign-mobile-field-list {
+                display: flex;
+            }
+            .sign-hint-banner {
+                font-size: 0.85em;
+            }
+            body.sign-document-page .field-overlay:not(.filled) {
+                min-width: 44px;
+                min-height: 36px;
+            }
+            .sign-doc-toolbar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            #signNextFieldBtn {
+                width: 100%;
+                min-height: 44px;
+            }
+            .sign-document-page .pdf-page-scroller {
+                display: none !important;
+            }
+            .sign-document-page .document-viewer-layout {
+                flex-direction: column;
+            }
+            .sign-document-page .field-overlay.active {
+                z-index: 103;
+            }
+            .sign-document-page .field-overlay-input {
+                font-size: max(16px, 1em) !important;
+                min-height: 36px;
+            }
+            .signature-pad-container {
+                margin-bottom: 10px;
+            }
+            .signature-pad-container canvas {
+                width: 100% !important;
+                max-width: 100%;
+            }
+            #signaturePad {
+                height: 150px;
+            }
+            canvas[id^="signaturePad-"] {
+                width: 100% !important;
+                height: 150px !important;
+            }
+            .signature-controls {
+                flex-direction: column;
+            }
+            .signature-controls button {
+                width: 100%;
+                min-height: 44px;
+                padding: 12px;
+            }
+            .signature-field-item {
+                padding: 12px;
+            }
+            .btn, .btn-success {
+                min-height: 44px;
+                padding: 12px 20px;
+                font-size: 1em;
+            }
+            input[type="text"], input[type="date"], input[type="number"] {
+                min-height: 44px;
+                font-size: 16px;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .header-content h1 {
+                font-size: 1em;
+            }
+            .document-embed-frame,
+            .document-viewer iframe {
+                height: min(45dvh, 420px) !important;
+                min-height: 240px;
+            }
+            #signaturePad {
+                height: 120px;
+            }
+            canvas[id^="signaturePad-"] {
+                height: 120px !important;
+            }
+            .signature-field-item {
+                padding: 10px;
+            }
+        }
+    {{ global_theme_css|safe }}
+        /* Sign Document page: enforce dark panels + readable text on top of global theme */
+        body.sign-document-page .document-viewer-container,
+        body.sign-document-page .signature-panel {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+            border: 1px solid rgba(255,255,255,0.14) !important;
+            color: #f2f5fb !important;
+            position: relative;
+            z-index: 1;
+        }
+        body.sign-document-page .document-viewer-container > *,
+        body.sign-document-page .signature-panel > * {
+            position: relative;
+            z-index: 2;
+        }
+        body.sign-document-page .document-viewer-container::before,
+        body.sign-document-page .signature-panel::before {
+            opacity: 0 !important;
+            background: none !important;
+            display: none !important;
+        }
+        body.sign-document-page h1,
+        body.sign-document-page h2,
+        body.sign-document-page h3,
+        body.sign-document-page h4 {
+            color: #f2f5fb !important;
+            -webkit-text-fill-color: #f2f5fb !important;
+            opacity: 1 !important;
+        }
+        body.sign-document-page .signature-panel p,
+        body.sign-document-page .signature-panel label,
+        body.sign-document-page .signature-panel span {
+            color: #e1e7f2 !important;
+            -webkit-text-fill-color: #e1e7f2 !important;
+            opacity: 1 !important;
+        }
+        body.sign-document-page .signature-field-item {
+            background: #121a26 !important;
+            border-left: 3px solid #007bff !important;
+            color: #f2f5fb !important;
+        }
+        body.sign-document-page .signature-field-item.signed {
+            background: #14361f !important;
+            border-left-color: #28a745 !important;
+        }
+        body.sign-document-page .signature-field-item h4,
+        body.sign-document-page .signature-field-item p,
+        body.sign-document-page .signature-field-item span,
+        body.sign-document-page .signature-field-item label {
+            color: #f2f5fb !important;
+            -webkit-text-fill-color: #f2f5fb !important;
+            opacity: 1 !important;
+        }
+        body.sign-document-page .signature-pad-container {
+            background: #ffffff !important;
+            border: 2px solid rgba(255,255,255,0.3) !important;
+        }
+        body.sign-document-page .signature-preview {
+            background: #ffffff !important;
+            border: 1px solid rgba(255,255,255,0.3) !important;
+        }
+        body.sign-document-page .signature-controls button {
+            background: #1f2a3d !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255,255,255,0.24) !important;
+        }
+        body.sign-document-page .signature-controls button.btn-success {
+            background: #28a745 !important;
+            color: #ffffff !important;
+            border-color: #28a745 !important;
+        }
+        body.sign-document-page .signature-controls button:hover {
+            background: #2a3753 !important;
+        }
+        body.sign-document-page .signature-controls button.btn-success:hover {
+            background: #218838 !important;
+        }
+        body.sign-document-page .typed-field-input,
+        body.sign-document-page input[type="text"].typed-field-input,
+        body.sign-document-page input[type="date"].typed-field-input,
+        body.sign-document-page input[type="number"].typed-field-input,
+        body.sign-document-page input.typed-field-input-phone {
+            background: #121a26 !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255,255,255,0.24) !important;
+        }
+        body.sign-document-page .signature-panel hr {
+            border: none !important;
+            border-top: 1px solid rgba(255,255,255,0.18) !important;
+        }
+        /* The "Done" link styled as .btn at the bottom */
+        body.sign-document-page .signature-panel .btn {
+            background: #FE0100 !important;
+            color: #ffffff !important;
+            border: none !important;
+        }
+        /* Filled "Value:" preview boxes inside typed fields (inline style background: #f8f9fa) */
+        body.sign-document-page .signature-field-item div[style*="background: #f8f9fa"],
+        body.sign-document-page .signature-field-item div[style*="background:#f8f9fa"] {
+            background: #1a2332 !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255,255,255,0.18) !important;
+        }
+        body.sign-document-page .signature-field-item div[style*="background: #f8f9fa"] *,
+        body.sign-document-page .signature-field-item div[style*="background:#f8f9fa"] * {
+            color: #f2f5fb !important;
+            -webkit-text-fill-color: #f2f5fb !important;
+            opacity: 1 !important;
+        }
+        body.sign-document-page .typed-field-input-phone.phone-invalid {
+            border-color: #dc3545 !important;
+        }
+        body.sign-document-page .typed-field-input-phone.phone-complete {
+            border-color: #28a745 !important;
+        }
+        body.sign-document-page .phone-format-hint,
+        body.sign-document-page .last4-format-hint {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 5px;
+        }
+        body.sign-document-page .last4-input-row {
+            display: flex;
+            align-items: stretch;
+            width: 100%;
+        }
+        body.sign-document-page .last4-prefix {
+            display: inline-flex;
+            align-items: center;
+            padding: 8px 10px;
+            background: #2a3753 !important;
+            color: #aab4c8 !important;
+            border: 1px solid rgba(255,255,255,0.24);
+            border-right: none;
+            border-radius: 4px 0 0 4px;
+            font-family: monospace;
+            font-size: 0.95em;
+            letter-spacing: 0.05em;
+            user-select: none;
+            white-space: nowrap;
+        }
+        body.sign-document-page .typed-field-input-last4 {
+            border-radius: 0 4px 4px 0 !important;
+            border-left: none !important;
+            font-family: monospace;
+            letter-spacing: 0.12em;
+        }
+        body.sign-document-page .typed-field-input-last4.last4-invalid {
+            border-color: #dc3545 !important;
+        }
+        body.sign-document-page .typed-field-input-last4.last4-complete {
+            border-color: #28a745 !important;
+        }
+        body.sign-document-page #fieldOverlay .last4-overlay-wrap {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            height: 100%;
+            background: #fff;
+        }
+        body.sign-document-page #fieldOverlay .last4-overlay-prefix {
+            padding: 0 4px;
+            font-family: monospace;
+            font-size: inherit;
+            color: #666;
+            user-select: none;
+            white-space: nowrap;
+        }
+        body.sign-document-page #fieldOverlay input.typed-field-input-last4 {
+            flex: 1;
+            min-width: 0;
+            font-family: monospace;
+        }
+        /* Readonly typed-field inputs (auto-filled name / initials / date) */
+        body.sign-document-page .signature-field-item input.typed-field-input[readonly],
+        body.sign-document-page .signature-field-item input.typed-field-input[style*="background: #f8f9fa"],
+        body.sign-document-page .signature-field-item input.typed-field-input[style*="background:#f8f9fa"] {
+            background: #1a2332 !important;
+            color: #f2f5fb !important;
+            -webkit-text-fill-color: #f2f5fb !important;
+            border: 1px solid rgba(255,255,255,0.18) !important;
+            opacity: 1 !important;
+        }
+        /* PDF overlay inputs: must stay dark-on-white (global theme forces light text on all inputs) */
+        body.sign-document-page #fieldOverlay input,
+        body.sign-document-page #fieldOverlay input.field-overlay-input,
+        body.sign-document-page #fieldOverlay input.typed-field-input-phone,
+        body.sign-document-page .field-overlay input[type="text"],
+        body.sign-document-page .field-overlay input[type="number"],
+        body.sign-document-page .field-overlay input[type="date"],
+        body.sign-document-page .field-overlay input[type="tel"] {
+            background: #ffffff !important;
+            color: #000000 !important;
+            -webkit-text-fill-color: #000000 !important;
+            caret-color: #000000 !important;
+            border: none !important;
+            box-shadow: none !important;
+        }
+        body.sign-document-page #fieldOverlay input::placeholder {
+            color: #666666 !important;
+            -webkit-text-fill-color: #666666 !important;
+        }
+        body.sign-document-page #fieldOverlay input:focus {
+            background: #ffffff !important;
+            color: #000000 !important;
+            -webkit-text-fill-color: #000000 !important;
+            border: none !important;
+            box-shadow: inset 0 0 0 1px #007bff !important;
+        }
+        body.sign-document-page .field-overlay-value {
+            color: #000000 !important;
+            -webkit-text-fill-color: #000000 !important;
+        }
+    </style>
+</head>
+<body class="sign-document-page">
+    <div class="header">
+        <div class="header-content">
+            <h1>✍️ Sign Document - {{ document.name_for_users }}</h1>
+        </div>
+        <a href="{{ url_for('view_documents') }}" class="back-btn">← Back to Documents</a>
+    </div>
+    
+    <div class="container">
+        
+        <div class="main-content sign-doc-main">
+            <div class="document-viewer-container">
+                <h3 style="margin-bottom: 15px;">{{ document.name_for_users }}</h3>
+                {% if is_pdf and not document_file_missing and sign_overlay_fields %}
+                <div class="sign-doc-toolbar" id="signDocToolbar">
+                    <div class="sign-progress-wrap">
+                        <span id="signProgressText">0 / 0 complete</span>
+                        <div class="sign-progress-bar"><div id="signProgressFill"></div></div>
+                    </div>
+                    <button type="button" id="signNextFieldBtn" class="btn" style="background:#fe0100;">Next field</button>
+                    <a href="{{ url_for('view_documents') }}" class="btn-done-link">Done</a>
+                </div>
+                <p class="sign-hint-banner">Tap a highlighted field on the form to type or sign. Use <strong>Next field</strong> or the list below to jump between fields.</p>
+                {% if (signature_fields|length + typed_fields|length) >= wizard_min_fields %}
+                <p class="sign-hint-banner" style="margin-top: -4px;"><a href="{{ user_document_wizard_url(document.id) }}" style="color: #7eb8ff;">Switch to step-by-step form</a> — easier on mobile for large forms.</p>
+                {% endif %}
+                <div id="signMobileFieldList" class="sign-mobile-field-list" aria-label="Fields to complete"></div>
+                {% elif is_pdf and not document_file_missing %}
+                <p class="sign-hint-banner">This document has no fillable fields configured yet. Contact your administrator.</p>
+                <p style="margin-bottom: 12px;"><a href="{{ url_for('view_documents') }}" class="btn-done-link">← Back to documents</a></p>
+                {% endif %}
+                <div class="document-viewer-layout">
+                    <div class="document-viewer-wrap">
+                        {% if document_file_missing %}
+                        <div class="missing-file-banner" role="alert">
+                            <p><strong>Document file not found on server</strong></p>
+                            <p style="margin-top: 8px; font-size: 0.95em; color: #b7c1d3;">
+                                The PDF for this form is missing from storage (it may have been deleted or never uploaded to this server).
+                                Ask an administrator to re-upload the file under <strong>Manage Documents → Replace File</strong> for
+                                &ldquo;{{ document.name_for_users }}&rdquo;.
+                            </p>
+                        </div>
+                        {% elif is_pdf %}
+                        <div class="pdf-page-toolbar" id="pdfPageToolbar" style="display: none;">
+                            <span id="pdfPageStatus">Page 1</span>
+                            <button type="button" id="pdfPrevPage" title="Previous page">Prev</button>
+                            <button type="button" id="pdfNextPage" title="Next page">Next</button>
+                        </div>
+                        <div class="document-viewer" id="documentViewer">
+                            <canvas id="pdfCanvas"></canvas>
+                            <div id="fieldOverlay"></div>
+                        </div>
+                        {% else %}
+                        <p style="padding: 20px; color: white;">Please download the document to view it.</p>
+                        {% endif %}
+                    </div>
+                    {% if is_pdf and not document_file_missing %}
+                    <aside class="pdf-page-scroller" id="pdfPageScroller" aria-label="Document pages"></aside>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        var signaturePads = {};
+        var isDrawing = false;
+        var pdfDoc = null;
+        var pdfScale = 1.0;
+        var canvasOffsetX = 0;
+        var canvasOffsetY = 0;
+        var savedSignatureImageBase64 = {{ ('"' ~ saved_signature_image ~ '"')|safe if saved_signature_image else 'null' }};
+        
+        var signOverlayFields = {{ sign_overlay_fields_json|safe }};
+        var currentPage = 1;
+        var pagesWithFields = {};
+        var activeOverlayFieldId = null;
+        var editingOverlayFieldId = null;
+        var popoverPadCanvas = null;
+        var popoverFieldId = null;
+
+        function getSignField(fieldId) {
+            for (var i = 0; i < signOverlayFields.length; i++) {
+                if (signOverlayFields[i].id === fieldId) return signOverlayFields[i];
+            }
+            return null;
+        }
+
+        function computePagesWithFields() {
+            pagesWithFields = {};
+            signOverlayFields.forEach(function(f) {
+                pagesWithFields[f.page] = true;
+            });
+        }
+
+        function getFieldScreenRect(field) {
+            var canvas = document.getElementById('pdfCanvas');
+            if (!canvas) return null;
+            var canvasRect = canvas.getBoundingClientRect();
+            var scaleX = canvas.width / canvasRect.width;
+            var scaleY = canvas.height / canvasRect.height;
+            if (!scaleX || !scaleY) return null;
+            var minW = window.innerWidth <= 768 ? 44 : 24;
+            var minH = window.innerWidth <= 768 ? 36 : 20;
+            return {
+                left: field.x / scaleX,
+                top: field.y / scaleY,
+                width: Math.max(field.width / scaleX, minW),
+                height: Math.max(field.height / scaleY, minH)
+            };
+        }
+
+        function isMobileSignView() {
+            return window.innerWidth <= 768;
+        }
+
+        function computePdfScale(page) {
+            var viewport = page.getViewport({ scale: 1.0 });
+            if (isMobileSignView()) {
+                var viewer = document.getElementById('documentViewer');
+                var pad = 24;
+                var availW = (viewer ? viewer.clientWidth : window.innerWidth) - pad;
+                if (availW < 260) availW = window.innerWidth - pad;
+                return Math.min(availW / viewport.width, 2.5);
+            }
+            return 800 / viewport.height;
+        }
+
+        function positionOverlayElement(el, field) {
+            var rect = getFieldScreenRect(field);
+            if (!rect) return;
+            el.style.left = rect.left + 'px';
+            el.style.top = rect.top + 'px';
+            el.style.width = rect.width + 'px';
+            el.style.height = rect.height + 'px';
+        }
+
+        function getChoiceGroupKey(field) {
+            if (!field || field.field_type !== 'checkbox_choice') return '';
+            var g = (field.choice_group || '').trim();
+            return g || ('_field_' + field.id);
+        }
+
+        function isChoiceGroupFilled(groupKey) {
+            if (!groupKey) return false;
+            for (var i = 0; i < signOverlayFields.length; i++) {
+                var f = signOverlayFields[i];
+                if (f.field_type === 'checkbox_choice' && getChoiceGroupKey(f) === groupKey && f.filled) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function isSignFieldIncomplete(field) {
+            if (!field) return false;
+            if (field.field_type === 'checkbox_choice' && (field.choice_group || '').trim()) {
+                return !isChoiceGroupFilled(getChoiceGroupKey(field));
+            }
+            return !field.filled;
+        }
+
+        function isSignFieldDoneForDisplay(field) {
+            if (!field) return false;
+            if (field.field_type === 'checkbox_choice' && (field.choice_group || '').trim()) {
+                return isChoiceGroupFilled(getChoiceGroupKey(field));
+            }
+            return !!field.filled;
+        }
+
+        function countSignFieldUnits() {
+            var total = 0;
+            var seenGroups = {};
+            signOverlayFields.forEach(function(f) {
+                if (f.field_type === 'checkbox_choice' && (f.choice_group || '').trim()) {
+                    var gkey = getChoiceGroupKey(f);
+                    if (seenGroups[gkey]) return;
+                    seenGroups[gkey] = true;
+                    total++;
+                } else {
+                    total++;
+                }
+            });
+            return total;
+        }
+
+        function countFilledSignFields() {
+            var done = 0;
+            var seenGroups = {};
+            signOverlayFields.forEach(function(f) {
+                if (f.field_type === 'checkbox_choice' && (f.choice_group || '').trim()) {
+                    var gkey = getChoiceGroupKey(f);
+                    if (seenGroups[gkey]) return;
+                    seenGroups[gkey] = true;
+                    if (isChoiceGroupFilled(gkey)) done++;
+                } else if (f.filled) {
+                    done++;
+                }
+            });
+            return done;
+        }
+
+        function updateSignProgress() {
+            var total = countSignFieldUnits();
+            var done = countFilledSignFields();
+            var text = document.getElementById('signProgressText');
+            var fill = document.getElementById('signProgressFill');
+            if (text) text.textContent = done + ' / ' + total + ' complete';
+            if (fill) fill.style.width = (total ? (100 * done / total) : 0) + '%';
+            buildMobileFieldList();
+        }
+
+        function focusSignField(fieldId) {
+            var field = getSignField(fieldId);
+            if (!field) return;
+            closeSignaturePopover();
+            activeOverlayFieldId = fieldId;
+            if (field.page !== currentPage && pdfDoc) {
+                goToPage(field.page);
+                setTimeout(function() {
+                    renderFieldOverlays();
+                    var el = document.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }, 250);
+                return;
+            }
+            renderFieldOverlays();
+            var el = document.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function jumpToSignField(fieldId) {
+            var field = getSignField(fieldId);
+            if (!field) return;
+            focusSignField(fieldId);
+            if (field.field_type === 'checkbox_choice') return;
+            handleFieldOverlayClick(fieldId);
+        }
+
+        function buildMobileFieldList() {
+            var list = document.getElementById('signMobileFieldList');
+            if (!list) return;
+            if (!isMobileSignView()) {
+                list.innerHTML = '';
+                list.style.display = 'none';
+                return;
+            }
+            list.style.display = 'flex';
+            list.innerHTML = '';
+            var seenMobileChoiceGroups = {};
+            signOverlayFields.forEach(function(field) {
+                if (field.field_type === 'checkbox_choice' && (field.choice_group || '').trim()) {
+                    var gkey = getChoiceGroupKey(field);
+                    if (seenMobileChoiceGroups[gkey]) return;
+                    seenMobileChoiceGroups[gkey] = true;
+                }
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                var done = isSignFieldDoneForDisplay(field);
+                btn.className = 'sign-mobile-field-item' +
+                    (done ? ' is-done' : '') +
+                    (activeOverlayFieldId === field.id ? ' is-active' : '');
+                var label = document.createElement('span');
+                label.className = 'sign-mobile-field-item-label';
+                label.textContent = field.label || (field.kind === 'signature' ? 'Signature' : 'Field');
+                var meta = document.createElement('span');
+                meta.className = 'sign-mobile-field-item-meta';
+                meta.textContent = (done ? 'Done' : 'Tap') + ' · p' + field.page;
+                btn.appendChild(label);
+                btn.appendChild(meta);
+                btn.addEventListener('click', function() {
+                    if (field.field_type === 'checkbox_choice') {
+                        toggleChoiceCheckbox(field.id);
+                        return;
+                    }
+                    jumpToSignField(field.id);
+                });
+                list.appendChild(btn);
+            });
+        }
+
+        function highlightActiveOverlays() {
+            document.querySelectorAll('.field-overlay').forEach(function(el) {
+                var fid = parseInt(el.getAttribute('data-field-id'), 10);
+                el.classList.toggle('active', fid === activeOverlayFieldId);
+            });
+        }
+
+        function buildFieldOverlayContent(field, el) {
+            el.innerHTML = '';
+            if (field.filled) {
+                if (field.kind === 'signature' && field.signature_image) {
+                    var img = document.createElement('img');
+                    img.className = 'field-overlay-sig';
+                    img.src = 'data:image/png;base64,' + field.signature_image;
+                    img.alt = 'Signature';
+                    el.appendChild(img);
+                } else if (field.field_type === 'checkbox_choice') {
+                    var mk = document.createElement('span');
+                    mk.className = 'field-overlay-choice-mark';
+                    mk.textContent = field.value === 'X' ? 'X' : '';
+                    el.appendChild(mk);
+                } else {
+                    var val = document.createElement('span');
+                    val.className = 'field-overlay-value';
+                    val.textContent = field.value || '';
+                    val.style.display = 'block';
+                    el.appendChild(val);
+                }
+            }
+        }
+
+        function renderFieldOverlays() {
+            if (editingOverlayFieldId !== null) return;
+            var overlay = document.getElementById('fieldOverlay');
+            var viewer = document.getElementById('documentViewer');
+            if (!overlay || !viewer) return;
+            overlay.innerHTML = '';
+            var statusEl = document.getElementById('pdfPageStatus');
+            if (statusEl && pdfDoc) statusEl.textContent = 'Page ' + currentPage + ' / ' + pdfDoc.numPages;
+            signOverlayFields.forEach(function(field) {
+                if (field.page !== currentPage) return;
+                var el = document.createElement('div');
+                el.className = 'field-overlay kind-' + field.kind + (field.filled ? ' filled' : '') + (activeOverlayFieldId === field.id ? ' active' : '');
+                el.setAttribute('data-field-id', field.id);
+                el.setAttribute('data-kind', field.kind);
+                el.setAttribute('data-label', field.label || (field.kind === 'signature' ? 'Sign here' : 'Fill in'));
+                el.title = field.label;
+                positionOverlayElement(el, field);
+                buildFieldOverlayContent(field, el);
+                el.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    handleFieldOverlayClick(field.id);
+                });
+                overlay.appendChild(el);
+            });
+            updatePageScrollerUI();
+            updateSignProgress();
+        }
+
+        function handleFieldOverlayClick(fieldId) {
+            var field = getSignField(fieldId);
+            if (!field) return;
+            if (editingOverlayFieldId === fieldId) return;
+            activeOverlayFieldId = fieldId;
+            if (field.filled) {
+                if (field.kind === 'signature') {
+                    openSignaturePopover(fieldId);
+                    return;
+                }
+                if (field.field_type === 'checkbox_choice') {
+                    toggleChoiceCheckbox(fieldId);
+                    return;
+                }
+                startInlineTypedEdit(fieldId);
+                return;
+            }
+            if (field.kind === 'signature') {
+                renderFieldOverlays();
+                openSignaturePopover(fieldId);
+                return;
+            }
+            if (field.field_type === 'checkbox_choice') {
+                toggleChoiceCheckbox(fieldId);
+                return;
+            }
+            if (field.field_type === 'typed_name' || field.field_type === 'typed_initials' || field.field_type === 'date') {
+                var autoVal = field.value || '';
+                if (field.field_type === 'date' && !autoVal) {
+                    var t = new Date();
+                    autoVal = t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+                }
+                saveTypedFieldValue(fieldId, autoVal, null);
+                return;
+            }
+            startInlineTypedEdit(fieldId);
+        }
+
+        function startInlineTypedEdit(fieldId) {
+            var field = getSignField(fieldId);
+            if (!field) return;
+            editingOverlayFieldId = fieldId;
+            var overlay = document.getElementById('fieldOverlay');
+            var el = overlay && overlay.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+            if (!el) {
+                editingOverlayFieldId = null;
+                renderFieldOverlays();
+                el = overlay && overlay.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+                if (!el) return;
+                editingOverlayFieldId = fieldId;
+            }
+            el.classList.add('active');
+            el.innerHTML = '';
+            var input;
+            if (field.field_type === 'date') {
+                input = document.createElement('input');
+                input.type = 'date';
+                input.className = 'field-overlay-input';
+                input.value = field.value || '';
+            } else if (field.field_type === 'last4') {
+                var wrap = document.createElement('div');
+                wrap.className = 'last4-overlay-wrap';
+                var prefixEl = document.createElement('span');
+                prefixEl.className = 'last4-overlay-prefix';
+                prefixEl.textContent = 'XXX-XX-';
+                input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'field-overlay-input typed-field-input-last4';
+                input.inputMode = 'numeric';
+                input.placeholder = field.input_hint || '1234';
+                input.maxLength = 4;
+                input.value = last4DigitsFromValue(field.value || '');
+                wrap.appendChild(prefixEl);
+                wrap.appendChild(input);
+                el.appendChild(wrap);
+            } else if (field.phone_like) {
+                input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'field-overlay-input typed-field-input-phone';
+                input.inputMode = 'tel';
+                input.placeholder = field.input_hint || '(555) 123-4567';
+                input.maxLength = 14;
+            } else if (field.field_type === 'number' && !field.phone_like) {
+                input = document.createElement('input');
+                input.type = 'number';
+                input.className = 'field-overlay-input';
+                input.placeholder = field.input_hint || '';
+            } else {
+                input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'field-overlay-input';
+                input.placeholder = field.input_hint || '';
+            }
+            if (field.field_type !== 'last4') {
+                input.value = field.value || '';
+                var rect = getFieldScreenRect(field);
+                var fs = Math.max(12, Math.min(18, (rect ? rect.height * 0.55 : 14)));
+                input.style.fontSize = fs + 'px';
+                input.style.background = '#fff';
+                input.style.color = '#000';
+                input.style.webkitTextFillColor = '#000';
+                input.style.caretColor = '#000';
+                el.appendChild(input);
+            } else {
+                var rect2 = getFieldScreenRect(field);
+                var fs2 = Math.max(12, Math.min(18, (rect2 ? rect2.height * 0.55 : 14)));
+                input.style.fontSize = fs2 + 'px';
+            }
+            input.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+            input.addEventListener('click', function(e) { e.stopPropagation(); });
+            initPhoneTypedFieldInputs();
+            initLast4TypedFieldInputs();
+            function commit(forceSave) {
+                editingOverlayFieldId = null;
+                var val = field.field_type === 'last4' ? getLast4FullValue(input) : input.value.trim();
+                if (!val && !forceSave) {
+                    renderFieldOverlays();
+                    return;
+                }
+                if (!val) return;
+                saveTypedFieldValue(fieldId, val, null);
+            }
+            input.addEventListener('blur', function() {
+                setTimeout(function() {
+                    if (editingOverlayFieldId !== fieldId) return;
+                    commit(false);
+                }, 200);
+            });
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    editingOverlayFieldId = null;
+                    renderFieldOverlays();
+                }
+            });
+            setTimeout(function() {
+                input.focus();
+                if (isMobileSignView() && el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }, 0);
+        }
+
+        function updateOverlayFieldState(fieldId, filled, value, signatureImage) {
+            var field = getSignField(fieldId);
+            if (!field) return;
+            field.filled = filled;
+            if (value !== undefined) field.value = value;
+            if (signatureImage !== undefined) field.signature_image = signatureImage;
+            activeOverlayFieldId = null;
+            editingOverlayFieldId = null;
+            renderFieldOverlays();
+        }
+
+        function closeSignaturePopover() {
+            var pop = document.getElementById('signaturePopover');
+            if (pop) pop.remove();
+            popoverPadCanvas = null;
+            popoverFieldId = null;
+        }
+
+        function openSignaturePopover(fieldId) {
+            closeSignaturePopover();
+            popoverFieldId = fieldId;
+            var field = getSignField(fieldId);
+            var overlayEl = document.querySelector('.field-overlay[data-field-id="' + fieldId + '"]');
+            var pop = document.createElement('div');
+            pop.id = 'signaturePopover';
+            pop.className = 'signature-popover';
+            pop.innerHTML = '<p style="margin-bottom:8px;font-weight:600;">' + (field ? field.label : 'Sign') + '</p>' +
+                '<canvas id="popoverSignaturePad" width="320" height="140"></canvas>' +
+                '<label style="display:block;margin-top:8px;font-size:0.85em;"><input type="checkbox" id="popoverConsent"> I agree to apply my signature to this field</label>' +
+                '<div class="signature-popover-actions">' +
+                '<button type="button" id="popoverClearBtn">Clear</button>' +
+                '<button type="button" id="popoverSaveBtn" style="background:#28a745;color:#fff;">Save</button>' +
+                (savedSignatureImageBase64 ? '<button type="button" id="popoverSavedBtn" style="background:#007bff;color:#fff;">Use saved</button>' : '') +
+                '<button type="button" id="popoverCancelBtn">Cancel</button></div>';
+            document.body.appendChild(pop);
+            if (overlayEl && !isMobileSignView()) {
+                var r = overlayEl.getBoundingClientRect();
+                pop.style.left = Math.min(r.left, window.innerWidth - 300) + 'px';
+                pop.style.top = Math.min(r.bottom + 8, window.innerHeight - 220) + 'px';
+            } else {
+                pop.style.left = '50%';
+                pop.style.top = 'max(12px, env(safe-area-inset-top, 0px))';
+                pop.style.transform = 'translateX(-50%)';
+                pop.style.width = 'min(340px, calc(100vw - 24px))';
+            }
+            popoverPadCanvas = document.getElementById('popoverSignaturePad');
+            if (popoverPadCanvas) initPopoverSignaturePad(popoverPadCanvas);
+            document.getElementById('popoverClearBtn').onclick = function() {
+                if (popoverPadCanvas) {
+                    var ctx = popoverPadCanvas.getContext('2d');
+                    ctx.clearRect(0, 0, popoverPadCanvas.width, popoverPadCanvas.height);
+                }
+            };
+            document.getElementById('popoverCancelBtn').onclick = closeSignaturePopover;
+            document.getElementById('popoverSaveBtn').onclick = function() { saveSignatureFromPopover(fieldId, false); };
+            var savedBtn = document.getElementById('popoverSavedBtn');
+            if (savedBtn) savedBtn.onclick = function() { saveSignatureFromPopover(fieldId, true); };
+        }
+
+        function initPopoverSignaturePad(canvas) {
+            var ctx = canvas.getContext('2d');
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.lineCap = 'round';
+            var drawing = false, lx = 0, ly = 0;
+            function pointFromEvent(e) {
+                var rect = canvas.getBoundingClientRect();
+                var clientX = e.clientX;
+                var clientY = e.clientY;
+                if (e.touches && e.touches.length) {
+                    clientX = e.touches[0].clientX;
+                    clientY = e.touches[0].clientY;
+                } else if (e.changedTouches && e.changedTouches.length) {
+                    clientX = e.changedTouches[0].clientX;
+                    clientY = e.changedTouches[0].clientY;
+                }
+                return {
+                    x: (clientX - rect.left) * (canvas.width / rect.width),
+                    y: (clientY - rect.top) * (canvas.height / rect.height)
+                };
+            }
+            function start(e) {
+                if (e.cancelable) e.preventDefault();
+                drawing = true;
+                var p = pointFromEvent(e);
+                lx = p.x; ly = p.y;
+            }
+            function move(e) {
+                if (!drawing) return;
+                if (e.cancelable) e.preventDefault();
+                var p = pointFromEvent(e);
+                ctx.beginPath();
+                ctx.moveTo(lx, ly);
+                ctx.lineTo(p.x, p.y);
+                ctx.stroke();
+                lx = p.x; ly = p.y;
+            }
+            function stop() { drawing = false; }
+            canvas.addEventListener('mousedown', start);
+            canvas.addEventListener('mousemove', move);
+            canvas.addEventListener('mouseup', stop);
+            canvas.addEventListener('mouseout', stop);
+            canvas.addEventListener('touchstart', start, { passive: false });
+            canvas.addEventListener('touchmove', move, { passive: false });
+            canvas.addEventListener('touchend', stop);
+            canvas.addEventListener('touchcancel', stop);
+        }
+
+        function submitSignatureApi(fieldId, base64Data, usedSaved, onSuccess) {
+            fetch('{{ url_for("submit_signature", doc_id=document.id) }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    signature_field_id: fieldId,
+                    signature_image: base64Data,
+                    consent_given: true,
+                    used_saved_signature: usedSaved
+                })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    if (onSuccess) onSuccess();
+                } else {
+                    alert('Error saving signature: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(function(err) {
+                console.error(err);
+                alert('Error saving signature. Please try again.');
+            });
+        }
+
+        function saveSignatureFromPopover(fieldId, useSaved) {
+            var consent = document.getElementById('popoverConsent');
+            if (!consent || !consent.checked) {
+                alert('Please confirm your intent to apply a signature to this field.');
+                return;
+            }
+            var base64Data;
+            if (useSaved) {
+                if (!savedSignatureImageBase64) {
+                    alert('No saved signature found.');
+                    return;
+                }
+                base64Data = savedSignatureImageBase64;
+            } else {
+                if (!popoverPadCanvas) return;
+                var ctx = popoverPadCanvas.getContext('2d');
+                var imageData = ctx.getImageData(0, 0, popoverPadCanvas.width, popoverPadCanvas.height);
+                var hasDrawing = false;
+                for (var i = 0; i < imageData.data.length; i += 4) {
+                    if (imageData.data[i + 3] > 0) { hasDrawing = true; break; }
+                }
+                if (!hasDrawing) {
+                    alert('Please sign before saving.');
+                    return;
+                }
+                base64Data = popoverPadCanvas.toDataURL('image/png').split(',')[1];
+            }
+            submitSignatureApi(fieldId, base64Data, useSaved, function() {
+                updateOverlayFieldState(fieldId, true, null, base64Data);
+                closeSignaturePopover();
+                scrollToFirstIncompleteField();
+            });
+        }
+
+        function updatePageScrollerUI() {
+            document.querySelectorAll('.pdf-page-scroller-item').forEach(function(btn) {
+                var p = parseInt(btn.getAttribute('data-page'), 10);
+                btn.classList.toggle('active', p === currentPage);
+                btn.classList.toggle('has-fields', !!pagesWithFields[p]);
+            });
+        }
+
+        function buildPageScroller(totalPages) {
+            var scroller = document.getElementById('pdfPageScroller');
+            var toolbar = document.getElementById('pdfPageToolbar');
+            if (!scroller) return;
+            if (totalPages <= 1) {
+                scroller.style.display = 'none';
+                if (toolbar) toolbar.style.display = 'none';
+                return;
+            }
+            scroller.style.display = 'flex';
+            if (toolbar) toolbar.style.display = 'flex';
+            scroller.innerHTML = '';
+            var title = document.createElement('div');
+            title.className = 'pdf-page-scroller-title';
+            title.textContent = totalPages + ' pg';
+            scroller.appendChild(title);
+            var list = document.createElement('div');
+            list.className = 'pdf-page-scroller-list';
+            for (var i = 1; i <= totalPages; i++) {
+                (function(pageNum) {
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'pdf-page-scroller-item';
+                    btn.setAttribute('data-page', pageNum);
+                    btn.textContent = pageNum;
+                    btn.addEventListener('click', function() { goToPage(pageNum); });
+                    list.appendChild(btn);
+                })(i);
+            }
+            scroller.appendChild(list);
+            updatePageScrollerUI();
+        }
+
+        function goToPage(pageNum) {
+            if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
+            closeSignaturePopover();
+            renderPage(pageNum);
+        }
+
+        function loadPDF() {
+            var canvas = document.getElementById('pdfCanvas');
+            if (!canvas || typeof pdfjsLib === 'undefined') return;
+            computePagesWithFields();
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            var pdfUrl = '{{ url_for("view_document_embed", doc_id=document.id) }}';
+            pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+                pdfDoc = pdf;
+                buildPageScroller(pdf.numPages);
+                var pageNum = 1;
+                for (var i = 0; i < signOverlayFields.length; i++) {
+                    if (!signOverlayFields[i].filled) {
+                        pageNum = signOverlayFields[i].page;
+                        break;
+                    }
+                }
+                {% if signature_fields %}
+                if (pageNum === 1) pageNum = {{ signature_fields[0].page_number }};
+                {% endif %}
+                var prevBtn = document.getElementById('pdfPrevPage');
+                var nextBtn = document.getElementById('pdfNextPage');
+                if (prevBtn) prevBtn.onclick = function() { goToPage(currentPage - 1); };
+                if (nextBtn) nextBtn.onclick = function() { goToPage(currentPage + 1); };
+                goToPage(Math.min(pageNum, pdf.numPages));
+            }).catch(function(error) {
+                console.error('Error loading PDF:', error);
+                var viewer = document.getElementById('documentViewer');
+                if (viewer) viewer.innerHTML = '<p style="padding: 20px; color: white;">Error loading PDF.</p>';
+            });
+        }
+
+        function renderPage(pageNum) {
+            if (!pdfDoc) return;
+            var canvas = document.getElementById('pdfCanvas');
+            var ctx = canvas.getContext('2d');
+            pdfDoc.getPage(pageNum).then(function(page) {
+                var scale = computePdfScale(page);
+                pdfScale = scale;
+                var scaledViewport = page.getViewport({ scale: scale });
+                canvas.width = scaledViewport.width;
+                canvas.height = scaledViewport.height;
+                page.render({ canvasContext: ctx, viewport: scaledViewport }).promise.then(function() {
+                    currentPage = pageNum;
+                    var viewer = document.getElementById('documentViewer');
+                    var viewerRect = viewer.getBoundingClientRect();
+                    var canvasRect = canvas.getBoundingClientRect();
+                    canvasOffsetX = canvasRect.left - viewerRect.left;
+                    canvasOffsetY = canvasRect.top - viewerRect.top;
+                    var overlay = document.getElementById('fieldOverlay');
+                    if (overlay) {
+                        overlay.style.left = canvasOffsetX + 'px';
+                        overlay.style.top = canvasOffsetY + 'px';
+                        overlay.style.width = canvasRect.width + 'px';
+                        overlay.style.height = canvasRect.height + 'px';
+                        overlay.style.pointerEvents = 'none';
+                    }
+                    setTimeout(renderFieldOverlays, 50);
+                });
+            });
+        }
+
+        function scrollToFirstIncompleteField() {
+            if (editingOverlayFieldId !== null) return;
+            for (var i = 0; i < signOverlayFields.length; i++) {
+                if (isSignFieldIncomplete(signOverlayFields[i])) {
+                    focusSignField(signOverlayFields[i].id);
+                    return;
+                }
+            }
+        }
+
+        var resizeOverlayTimer;
+        var lastRenderWidth = window.innerWidth;
+        window.addEventListener('resize', function() {
+            clearTimeout(resizeOverlayTimer);
+            resizeOverlayTimer = setTimeout(function() {
+                if (editingOverlayFieldId !== null) return;
+                if (pdfDoc && Math.abs(window.innerWidth - lastRenderWidth) > 40) {
+                    lastRenderWidth = window.innerWidth;
+                    goToPage(currentPage);
+                    return;
+                }
+                renderFieldOverlays();
+                buildMobileFieldList();
+            }, 150);
+        });
+        window.addEventListener('orientationchange', function() {
+            setTimeout(function() {
+                if (pdfDoc) goToPage(currentPage);
+            }, 300);
+        });
+
+        var typedFieldPhoneRegex = new RegExp({{ typed_field_phone_regex_js|tojson }});
+        var typedFieldLast4Regex = new RegExp({{ typed_field_last4_regex_js|tojson }});
+        var TYPED_FIELD_LAST4_PREFIX = 'XXX-XX-';
+
+        function typedFieldDigitsOnly(val) {
+            return (val || '').replace(/\\D/g, '');
+        }
+
+        function formatTypedFieldPhone(digits) {
+            digits = (digits || '').slice(0, 10);
+            if (!digits.length) return '';
+            if (digits.length <= 3) return '(' + digits;
+            if (digits.length <= 6) return '(' + digits.slice(0, 3) + ') ' + digits.slice(3);
+            return '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6);
+        }
+
+        function last4DigitsFromValue(val) {
+            var raw = (val || '').toUpperCase();
+            var digits;
+            if (raw.indexOf(TYPED_FIELD_LAST4_PREFIX) === 0) {
+                digits = typedFieldDigitsOnly(raw.slice(TYPED_FIELD_LAST4_PREFIX.length));
+            } else {
+                digits = typedFieldDigitsOnly(raw);
+            }
+            if (digits.length > 4) digits = digits.slice(-4);
+            return digits.slice(0, 4);
+        }
+
+        function getLast4FullValue(input) {
+            if (!input) return '';
+            var digits = last4DigitsFromValue(input.value);
+            if (digits.length !== 4) return '';
+            return TYPED_FIELD_LAST4_PREFIX + digits;
+        }
+
+        function initLast4TypedFieldInputs() {
+            document.querySelectorAll('.typed-field-input-last4').forEach(function(input) {
+                if (input._last4FormatterBound) return;
+                input._last4FormatterBound = true;
+                function applyLast4Digits(digits) {
+                    if (digits.length > 4) digits = digits.slice(-4);
+                    digits = digits.slice(0, 4);
+                    input.value = digits;
+                    var complete = digits.length === 4;
+                    input.classList.toggle('last4-invalid', digits.length > 0 && !complete);
+                    input.classList.toggle('last4-complete', complete);
+                }
+                input.addEventListener('input', function() {
+                    applyLast4Digits(typedFieldDigitsOnly(input.value));
+                });
+                input.addEventListener('paste', function(e) {
+                    e.preventDefault();
+                    var pasted = '';
+                    try {
+                        pasted = (e.clipboardData || window.clipboardData).getData('text') || '';
+                    } catch (err) {}
+                    applyLast4Digits(typedFieldDigitsOnly(pasted));
+                });
+                input.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        input.blur();
+                    }
+                });
+            });
+        }
+
+        function initPhoneTypedFieldInputs() {
+            document.querySelectorAll('.typed-field-input-phone').forEach(function(input) {
+                if (input._phoneFormatterBound) return;
+                input._phoneFormatterBound = true;
+                input.addEventListener('input', function() {
+                    var digits = typedFieldDigitsOnly(input.value);
+                    var formatted = formatTypedFieldPhone(digits);
+                    var oldLen = input.value.length;
+                    var start = input.selectionStart;
+                    input.value = formatted;
+                    if (document.activeElement === input && start != null) {
+                        try {
+                            var delta = formatted.length - oldLen;
+                            var pos = Math.max(0, Math.min(formatted.length, start + delta));
+                            input.setSelectionRange(pos, pos);
+                        } catch (e) {}
+                    }
+                    var complete = digits.length === 10;
+                    input.classList.toggle('phone-invalid', digits.length > 0 && !complete);
+                    input.classList.toggle('phone-complete', complete);
+                });
+                input.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        input.blur();
+                    }
+                });
+            });
+        }
+
+        function applyChoiceGroupSelection(fieldId, value) {
+            var field = getSignField(fieldId);
+            var group = field ? (field.choice_group || '').trim() : '';
+            signOverlayFields.forEach(function(f) {
+                if (f.field_type !== 'checkbox_choice') return;
+                if (group && f.choice_group === group) {
+                    if (f.id === fieldId && value === 'X') {
+                        f.filled = true;
+                        f.value = 'X';
+                    } else {
+                        f.filled = false;
+                        f.value = '';
+                    }
+                } else if (!group && f.id === fieldId) {
+                    f.filled = value === 'X';
+                    f.value = value === 'X' ? 'X' : '';
+                }
+            });
+            activeOverlayFieldId = null;
+            editingOverlayFieldId = null;
+            renderFieldOverlays();
+        }
+
+        function toggleChoiceCheckbox(fieldId) {
+            var field = getSignField(fieldId);
+            var currentlySelected = field && field.filled && (field.value || '').toUpperCase() === 'X';
+            var newValue = currentlySelected ? '' : 'X';
+            saveTypedFieldValue(fieldId, newValue, null);
+        }
+
+        function saveTypedFieldValue(fieldId, value, itemEl) {
+            var field = getSignField(fieldId);
+            var typedType = field ? field.field_type : (itemEl ? itemEl.getAttribute('data-typed-type') : '');
+            if (typedType === 'checkbox_choice') {
+                value = (value || '').trim().toUpperCase() === 'X' ? 'X' : '';
+            } else if (!value) {
+                if (editingOverlayFieldId !== null) {
+                    renderFieldOverlays();
+                    return;
+                }
+                alert('Please enter a value for this field.');
+                return;
+            }
+            var isPhoneField = field ? field.phone_like : (itemEl && itemEl.getAttribute('data-phone-field') === '1');
+            if (isPhoneField && !typedFieldPhoneRegex.test(value)) {
+                alert('Please enter a valid 10-digit phone number (e.g. (555) 123-4567).');
+                return;
+            }
+            var isLast4Field = field ? field.field_type === 'last4' : (itemEl && itemEl.getAttribute('data-last4-field') === '1');
+            if (isLast4Field && !typedFieldLast4Regex.test(value)) {
+                alert('Please enter exactly 4 digits for the last part of your SSN (XXX-XX-####).');
+                return;
+            }
+            
+            // Send to server
+            fetch('{{ url_for("submit_typed_field", doc_id=document.id) }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    typed_field_id: fieldId,
+                    field_value: value
+                })
+            })
+            .then(response => {
+                // Check if response is OK
+                if (!response.ok) {
+                    // Try to get error message from JSON response
+                    return response.json().catch(() => {
+                        // If not JSON, return error with status text
+                        throw new Error('Server error: ' + response.status + ' ' + response.statusText);
+                    }).then(data => {
+                        throw new Error(data.error || 'Server error: ' + response.status);
+                    });
+                }
+                // Parse JSON response
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    if (typedType === 'checkbox_choice') {
+                        applyChoiceGroupSelection(fieldId, value);
+                        updateSignProgress();
+                        return;
+                    }
+                    updateOverlayFieldState(fieldId, true, value, null);
+                    updateSignProgress();
+                    scrollToFirstIncompleteField();
+                } else {
+                    alert('Error saving field: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                var errorMsg = error.message || 'Unknown error occurred';
+                alert('Error saving field: ' + errorMsg);
+            });
+        }
+
+        // Redo signature field - delete existing signature and show input form again
+        function redoSignature(fieldId) {
+            if (!confirm('Are you sure you want to redo this signature? The current signature will be deleted.')) {
+                return;
+            }
+            
+            fetch('{{ url_for("delete_signature", doc_id=document.id) }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    signature_field_id: fieldId
+                })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(data => {
+                        throw new Error(data.error || 'Server error: ' + response.status);
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    updateOverlayFieldState(fieldId, false, null, null);
+                    openSignaturePopover(fieldId);
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error redoing signature: ' + error.message);
+            });
+        }
+        
+        // On load: PDF canvas, overlays, scroll to first incomplete field
+        document.addEventListener('DOMContentLoaded', function() {
+            initPhoneTypedFieldInputs();
+            initLast4TypedFieldInputs();
+            var nextBtn = document.getElementById('signNextFieldBtn');
+            if (nextBtn) nextBtn.addEventListener('click', scrollToFirstIncompleteField);
+            updateSignProgress();
+            {% if is_pdf and not document_file_missing %}
+            loadPDF();
+            {% endif %}
+            setTimeout(scrollToFirstIncompleteField, 600);
+        });
+        
+        // Redo typed field - delete existing value and show input form again
+        function redoTypedField(fieldId) {
+            if (!confirm('Are you sure you want to redo this field? The current value will be deleted.')) {
+                return;
+            }
+            
+            fetch('{{ url_for("delete_typed_field_value", doc_id=document.id) }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    typed_field_id: fieldId
+                })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(data => {
+                        throw new Error(data.error || 'Server error: ' + response.status);
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    updateOverlayFieldState(fieldId, false, '', null);
+                    startInlineTypedEdit(fieldId);
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error redoing field: ' + error.message);
+            });
+        }
+    </script>
+</body>
+</html>
+

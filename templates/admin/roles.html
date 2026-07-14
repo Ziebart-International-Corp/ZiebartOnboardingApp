@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Manage Position/Title - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; }
+        .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+        .header h1 { font-weight: 800; margin: 0; }
+        .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+        .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+        .container { max-width: 900px; margin: 30px auto; padding: 0 20px; }
+        .panel { background: white; padding: 25px; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .panel h2 { margin-bottom: 20px; color: #000; font-size: 1.3em; }
+        .btn { display: inline-block; padding: 10px 20px; background: #FE0100; color: white; text-decoration: none; border-radius: 5px; border: none; cursor: pointer; font-size: 1em; }
+        .btn:hover { background: #c00; color: white; }
+        .btn-success { background: #28a745; }
+        .btn-success:hover { background: #218838; color: white; }
+        .btn-secondary { background: #6c757d; color: white; text-decoration: none; }
+        .btn-secondary:hover { color: white; background: #5a6268; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 14px 16px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #f8f9fa; font-weight: 600; }
+        tr:hover { background: #f8f9fa; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 6px; font-weight: 600; }
+        .form-group input[type="text"] { width: 100%; max-width: 300px; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem; }
+        .role-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎭 Manage Position/Title</h1>
+        <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    <div class="container">
+        <div class="panel">
+            <h2>Add Position/Title</h2>
+            <form method="POST" action="{{ url_for('add_role') }}" style="display: flex; gap: 15px; align-items: flex-end; flex-wrap: wrap;">
+                <div class="form-group" style="margin-bottom: 0;">
+                    <label for="role_name">Position/Title name</label>
+                    <input type="text" name="name" id="role_name" placeholder="e.g., Sales Associate" required>
+                </div>
+                <button type="submit" class="btn btn-success">Add Position/Title</button>
+            </form>
+        </div>
+        <div class="panel">
+            <h2>Position/Titles ({{ roles|length }})</h2>
+            <p style="color: #666; margin-bottom: 15px;">Set default documents per Position/Title. When a Position/Title is selected during onboarding, those documents are pre-selected for the new hire.</p>
+            {% if roles %}
+            <table>
+                <thead>
+                    <tr><th>Position/Title</th><th>Default documents</th><th>Actions</th></tr>
+                </thead>
+                <tbody>
+                    {% for role in roles %}
+                    <tr>
+                        <td><strong>{{ role.name }}</strong></td>
+                        <td>{{ role.default_documents.count() }} document(s)</td>
+                        <td>
+                            <div class="role-actions">
+                                <a href="{{ url_for('role_default_documents', role_id=role.id) }}" class="btn btn-secondary">Default documents</a>
+                                <form method="POST" action="{{ url_for('delete_role', role_id=role.id) }}" style="display: inline;" onsubmit="return confirm('Delete Position/Title {{ role.name }}?');">
+                                    <button type="submit" class="btn" style="background: #dc3545;">Delete</button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color: #666;">No Position/Titles yet. Add one above.</p>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+

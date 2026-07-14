@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Manage Checklist - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .admin-panel {
+            background: white;
+            padding: 25px;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            overflow: visible;
+        }
+        .admin-panel h2 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            color: #000000;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-primary {
+            background: #007bff;
+        }
+        .btn-danger {
+            background: #FE0100;
+        }
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 0.85em;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            font-size: 14px;
+        }
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr 100px;
+            gap: 15px;
+        }
+        .checklist-items {
+            margin-top: 20px;
+        }
+        .checklist-item {
+            background: #f8f9fa;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .item-info {
+            flex: 1;
+        }
+        .item-info h3 {
+            margin-bottom: 5px;
+            color: #000000;
+        }
+        .item-info p {
+            color: #808080;
+            font-size: 0.9em;
+            margin: 5px 0;
+        }
+        .item-meta {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            color: #808080;
+            font-size: 0.9em;
+        }
+        .item-actions {
+            display: flex;
+            gap: 5px;
+        }
+        .order-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            margin-right: 15px;
+        }
+        .order-btn {
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.8em;
+        }
+        .order-btn:hover {
+            background: #5a6268;
+        }
+        .badge {
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            background: #6c757d;
+            color: white;
+        }
+        .badge-active {
+            background: #28a745;
+        }
+        .badge-inactive {
+            background: #6c757d;
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>✅ Manage New Hire Checklist</h1>
+        </div>
+        <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    
+    <div class="container">
+        
+        <div class="admin-panel">
+            <h2>Add New Checklist Item</h2>
+            <form method="POST" action="{{ url_for('add_checklist_item') }}">
+                <div class="form-group">
+                    <label for="task_name">Task Name *</label>
+                    <input type="text" name="task_name" id="task_name" required placeholder="e.g., Complete I-9 Form">
+                </div>
+                <div class="form-group">
+                    <label for="description">Description</label>
+                    <textarea name="description" id="description" placeholder="Optional description of the task..."></textarea>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="assigned_to">Assigned To</label>
+                        <input type="text" name="assigned_to" id="assigned_to" placeholder="e.g., HR, IT, Manager, or username">
+                    </div>
+                    <div class="form-group">
+                        <label for="order">Order</label>
+                        <input type="number" name="order" id="order" value="0" min="0" placeholder="Display order">
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: flex-end;">
+                        <label style="display: flex; align-items: center; gap: 5px;">
+                            <input type="checkbox" name="is_active" value="1" checked style="width: auto;">
+                            Active
+                        </label>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-success">Add Checklist Item</button>
+            </form>
+        </div>
+        
+        <div class="admin-panel">
+            <h2>Checklist Items ({{ checklist_items|length }} total)</h2>
+            <div class="checklist-items">
+                {% if checklist_items %}
+                    {% for item in checklist_items %}
+                    <div class="checklist-item">
+                        <div class="order-controls">
+                            <form method="POST" action="{{ url_for('move_checklist_item') }}" style="display: inline;">
+                                <input type="hidden" name="item_id" value="{{ item.id }}">
+                                <input type="hidden" name="direction" value="up">
+                                <button type="submit" class="order-btn" {% if loop.first %}disabled{% endif %}>↑</button>
+                            </form>
+                            <form method="POST" action="{{ url_for('move_checklist_item') }}" style="display: inline;">
+                                <input type="hidden" name="item_id" value="{{ item.id }}">
+                                <input type="hidden" name="direction" value="down">
+                                <button type="submit" class="order-btn" {% if loop.last %}disabled{% endif %}>↓</button>
+                            </form>
+                        </div>
+                        <div class="item-info">
+                            <h3>{{ item.task_name }}</h3>
+                            {% if item.description %}
+                            <p>{{ item.description }}</p>
+                            {% endif %}
+                            <div class="item-meta">
+                                <span><strong>Assigned to:</strong> {{ item.assigned_to or 'Not assigned' }}</span>
+                                <span><strong>Order:</strong> {{ item.order }}</span>
+                                <span class="badge badge-{{ 'active' if item.is_active else 'inactive' }}">
+                                    {{ 'Active' if item.is_active else 'Inactive' }}
+                                </span>
+                            </div>
+                        </div>
+                        <div class="item-actions">
+                            <a href="{{ url_for('edit_checklist_item', item_id=item.id) }}" class="btn btn-primary btn-small">Edit</a>
+                            <form method="POST" action="{{ url_for('delete_checklist_item') }}" style="display: inline;">
+                                <input type="hidden" name="item_id" value="{{ item.id }}">
+                                <button type="submit" class="btn btn-danger btn-small" 
+                                        onclick="return confirm('Delete this checklist item?')">
+                                    Delete
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p>No checklist items yet. Add one above to get started.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+

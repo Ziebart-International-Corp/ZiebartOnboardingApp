@@ -1,0 +1,27 @@
+{% extends "layouts/user.html" %}
+{% block title %}Form complete — {{ document.name_for_users }}{% endblock %}
+{% block header_title %}{{ document.name_for_users }}{% endblock %}
+{% block extra_css %}
+h1 { font-size: 1.5em; margin-bottom: 12px; }
+p { color: #b7c1d3; line-height: 1.55; margin-bottom: 16px; }
+.stat { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 16px; margin: 20px 0; }
+.btn { display: inline-block; padding: 12px 20px; background: #FE0100; color: #fff; text-decoration: none; border-radius: 6px; margin: 6px 6px 6px 0; border: none; font-size: 1em; }
+.btn-ghost { background: transparent; border: 1px solid rgba(255,255,255,0.25); color: #f2f5fb; }
+{% endblock %}
+{% block content %}
+{% if complete %}
+<h1>Form submitted</h1>
+<p>Your answers have been saved{% if done_count >= total_count %} and your completed PDF is being prepared for HR{% endif %}.</p>
+<div class="stat">{{ done_count }} / {{ total_count }} fields completed</div>
+<p>HR can download your signed copy from <strong>Manage Documents → Download Signed Copies</strong>. You can return to Files or edit your answers if needed.</p>
+{% else %}
+<h1>Almost done</h1>
+<p>You still have required fields to complete.</p>
+<div class="stat">{{ done_count }} / {{ total_count }} fields completed</div>
+{% endif %}
+<a href="{{ url_for('view_documents', wizard=doc_id) }}" class="btn">{% if complete %}Edit answers{% else %}Continue form{% endif %}</a>
+<a href="{{ url_for('view_documents') }}" class="btn btn-ghost">Back to Files</a>
+{% if complete %}
+<a href="{{ user_document_completed_view_url(doc_id) }}" class="btn btn-ghost">View PDF</a>
+{% endif %}
+{% endblock %}

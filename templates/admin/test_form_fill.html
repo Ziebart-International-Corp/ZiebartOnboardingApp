@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fill form — {{ field.label }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; }
+        .header { background: #000; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+        .header a { color: #fff; text-decoration: none; opacity: 0.85; }
+        .wrap { max-width: 640px; margin: 0 auto; padding: 32px 20px 80px; }
+        .progress { height: 6px; background: #1a2332; border-radius: 3px; margin-bottom: 28px; overflow: hidden; }
+        .progress-bar { height: 100%; background: #FE0100; transition: width 0.25s; }
+        .step-label { font-size: 0.85em; color: #8892a8; margin-bottom: 8px; }
+        h1 { font-size: 1.6em; margin-bottom: 8px; line-height: 1.3; }
+        .hint { color: #8892a8; margin-bottom: 24px; line-height: 1.5; }
+        .field-input { width: 100%; padding: 14px 16px; font-size: 1.1em; border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; background: #121a26; color: #f2f5fb; }
+        .field-input:focus { outline: none; border-color: #FE0100; }
+        textarea.field-input { min-height: 100px; resize: vertical; }
+        .choice-list { display: flex; flex-direction: column; gap: 10px; }
+        .choice-option { display: block; cursor: pointer; }
+        .choice-option input[type="radio"] {
+            position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none;
+        }
+        .choice-option .choice-label {
+            display: block; text-align: left; padding: 14px 16px;
+            border: 2px solid rgba(255,255,255,0.25); border-radius: 8px;
+            background: #121a26; color: #f2f5fb; font-size: 1.05em;
+            transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+        }
+        .choice-option input[type="radio"]:checked + .choice-label {
+            border-color: #FE0100; background: #2a1520;
+            box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.35);
+        }
+        .choice-option:hover .choice-label { border-color: #FE0100; background: #1a2332; }
+        .last4-row { display: flex; align-items: stretch; width: 100%; margin-top: 8px; }
+        .last4-prefix {
+            display: flex; align-items: center; padding: 14px 12px;
+            background: #2a3753; color: #aab4c8; border: 1px solid rgba(255,255,255,0.24);
+            border-right: none; border-radius: 8px 0 0 8px; font-family: monospace; letter-spacing: 0.06em;
+        }
+        .last4-input {
+            flex: 1; padding: 14px 16px; font-size: 1.1em; font-family: monospace; letter-spacing: 0.15em;
+            border: 1px solid rgba(255,255,255,0.24); border-radius: 0 8px 8px 0;
+            background: #121a26; color: #f2f5fb; min-width: 5em;
+        }
+        .last4-input:focus { outline: none; border-color: #FE0100; }
+        .nav { display: flex; gap: 12px; margin-top: 32px; flex-wrap: wrap; }
+        .btn-nav { padding: 12px 24px; border-radius: 6px; border: none; cursor: pointer; font-size: 1em; }
+        .btn-primary { background: #FE0100; color: #fff; flex: 1; min-width: 140px; }
+        .btn-ghost { background: transparent; color: #8892a8; border: 1px solid rgba(255,255,255,0.2); }
+        .page-tag { display: inline-block; background: #1a2332; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; margin-bottom: 16px; }
+        .flash { background: #1a3a1a; border: 1px solid #28a745; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; }
+        .flash-error { background: #3a1a1a; border-color: #dc3545; }
+    {{ global_theme_css|safe }}
+        body.test-form-fill-page .btn-nav.btn-primary {
+            background: #FE0100 !important; color: #fff !important;
+        }
+        body.test-form-fill-page .btn-nav.btn-ghost {
+            background: transparent !important; color: #8892a8 !important;
+            border: 1px solid rgba(255,255,255,0.2) !important;
+            box-shadow: none !important;
+        }
+        body.test-form-fill-page .choice-option .choice-label {
+            background: #121a26 !important; color: #f2f5fb !important;
+            border: 2px solid rgba(255,255,255,0.25) !important;
+            box-shadow: none !important;
+        }
+        body.test-form-fill-page .choice-option input[type="radio"]:checked + .choice-label {
+            background: #2a1520 !important; border-color: #FE0100 !important;
+            box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.35) !important;
+        }
+        body.test-form-fill-page button.choice-label,
+        body.test-form-fill-page .choice-option button {
+            display: none !important;
+        }
+        body.test-form-fill-page .last4-prefix {
+            background: #2a3753 !important; color: #c8d0e0 !important;
+            -webkit-text-fill-color: #c8d0e0 !important;
+            border: 1px solid rgba(255,255,255,0.28) !important;
+        }
+        body.test-form-fill-page .last4-input {
+            background: #121a26 !important; color: #f2f5fb !important;
+            -webkit-text-fill-color: #f2f5fb !important;
+            border: 1px solid rgba(255,255,255,0.28) !important;
+        }
+        .sig-pad-wrap {
+            border: 2px solid rgba(255,255,255,0.28); border-radius: 8px;
+            background: #fff; overflow: hidden; margin-top: 8px;
+        }
+        #sigCanvas {
+            display: block; width: 100%; height: 160px; touch-action: none;
+            cursor: crosshair; background: #fff;
+        }
+        .sig-actions { margin-top: 10px; display: flex; gap: 10px; }
+        body.test-form-fill-page .sig-pad-wrap {
+            background: #ffffff !important; border-color: rgba(255,255,255,0.35) !important;
+        }
+        body.test-form-fill-page #sigCanvas {
+            background: #ffffff !important;
+        }
+    </style>
+</head>
+<body class="test-form-fill-page">
+    <div class="header">
+        <span>{{ doc_name }}</span>
+        <a href="{{ url_for('admin_test_form') }}">Exit</a>
+    </div>
+    <div class="wrap">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}{% for category, message in messages %}<div class="flash{% if category == 'error' %} flash-error{% endif %}">{{ message }}</div>{% endfor %}{% endif %}
+        {% endwith %}
+        <div class="progress"><div class="progress-bar" style="width: {{ progress_pct }}%;"></div></div>
+        <div class="step-label">Field {{ idx + 1 }} of {{ total }}</div>
+        <span class="page-tag">Page {{ field.page }} · {% if is_last4 %}Last 4{% else %}{{ field.type|replace('_',' ') }}{% endif %}</span>
+        <h1>{{ field.label }}</h1>
+        {% if field.hint %}<p class="hint">{{ field.hint }}</p>{% endif %}
+        <form id="fieldForm" method="POST" action="{{ url_for('admin_test_form_save_field') }}">
+            <input type="hidden" name="field_id" value="{{ field.id }}">
+            <input type="hidden" name="direction" id="direction" value="next">
+            {% if field.type == 'textarea' %}
+            <textarea name="value" class="field-input" id="mainInput" {% if field.required %}required{% endif %}>{{ current_val }}</textarea>
+            {% elif field.type == 'date' %}
+            <input type="date" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+            {% elif is_last4 %}
+            <p class="hint" style="margin-top:0;">Enter only the last 4 digits. The first part of your SSN stays masked.</p>
+            <div class="last4-row">
+                <span class="last4-prefix" aria-hidden="true">XXX-XX-</span>
+                <input type="text" class="last4-input" id="last4Input" inputmode="numeric" autocomplete="off"
+                       maxlength="4" pattern="[0-9]{4}" placeholder="1234"
+                       value="{{ last4_digits }}" {% if field.required %}required{% endif %}>
+            </div>
+            <input type="hidden" name="value" id="mainInput" value="{{ current_val }}">
+            {% elif field.type == 'number' %}
+            <input type="number" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+            {% elif field.type == 'email' %}
+            <input type="email" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+            {% elif field.type == 'phone' %}
+            <input type="tel" name="value" class="field-input" id="mainInput" value="{{ current_val }}" placeholder="(555) 123-4567" {% if field.required %}required{% endif %}>
+            {% elif field.type == 'checkbox' %}
+            <label style="display:flex;align-items:center;gap:12px;margin-top:8px;font-size:1.1em;">
+                <input type="checkbox" name="value" value="yes" id="mainInput" {% if current_val %}checked{% endif %} style="width:22px;height:22px;">
+                Yes / checked
+            </label>
+            {% elif field.type == 'signature' %}
+            <p class="hint" style="margin-top:0;">Draw your signature in the box using your mouse or finger.</p>
+            <div class="sig-pad-wrap">
+                <canvas id="sigCanvas" width="560" height="160"></canvas>
+            </div>
+            <div class="sig-actions">
+                <button type="button" class="btn-nav btn-ghost" onclick="clearSigPad()">Clear signature</button>
+            </div>
+            <input type="hidden" name="value" id="mainInput" value="{{ current_val }}">
+            {% elif field.type == 'choice' and field.options %}
+            <div class="choice-list" id="choiceList" role="radiogroup" aria-label="{{ field.label }}">
+                {% for opt in field.options %}
+                <label class="choice-option">
+                    <input type="radio" name="value" value="{{ opt }}" {% if current_val == opt %}checked{% endif %}{% if field.required %} required{% endif %}>
+                    <span class="choice-label">{{ opt }}</span>
+                </label>
+                {% endfor %}
+            </div>
+            {% else %}
+            <input type="text" name="value" class="field-input" id="mainInput" value="{{ current_val }}" placeholder="Enter {{ field.label|lower }}" {% if field.required %}required{% endif %}>
+            {% endif %}
+            <div class="nav">
+                {% if idx > 0 %}
+                <button type="button" class="btn-nav btn-ghost" onclick="goBack()">Back</button>
+                {% endif %}
+                {% if not field.required %}
+                <button type="button" class="btn-nav btn-ghost" onclick="skipField()">Skip</button>
+                {% endif %}
+                <button type="submit" class="btn-nav btn-primary" id="nextBtn">{{ 'Finish' if idx + 1 >= total else 'Next' }}</button>
+            </div>
+        </form>
+    </div>
+    <script>
+        (function() {
+            var SIG_PREFIX = {{ TEST_FORM_SIG_PREFIX|tojson }};
+            var sigCanvas = document.getElementById('sigCanvas');
+            var sigDrawing = false;
+            var sigLastX = 0, sigLastY = 0;
+            if (sigCanvas) {
+                var sigCtx = sigCanvas.getContext('2d');
+                sigCtx.strokeStyle = '#000000';
+                sigCtx.lineWidth = 2.2;
+                sigCtx.lineCap = 'round';
+                sigCtx.lineJoin = 'round';
+                function sigPos(e) {
+                    var rect = sigCanvas.getBoundingClientRect();
+                    var scaleX = sigCanvas.width / rect.width;
+                    var scaleY = sigCanvas.height / rect.height;
+                    var cx = (e.clientX !== undefined ? e.clientX : e.touches[0].clientX) - rect.left;
+                    var cy = (e.clientY !== undefined ? e.clientY : e.touches[0].clientY) - rect.top;
+                    return { x: cx * scaleX, y: cy * scaleY };
+                }
+                function sigStart(e) {
+                    e.preventDefault();
+                    sigDrawing = true;
+                    var p = sigPos(e);
+                    sigLastX = p.x; sigLastY = p.y;
+                }
+                function sigMove(e) {
+                    if (!sigDrawing) return;
+                    e.preventDefault();
+                    var p = sigPos(e);
+                    sigCtx.beginPath();
+                    sigCtx.moveTo(sigLastX, sigLastY);
+                    sigCtx.lineTo(p.x, p.y);
+                    sigCtx.stroke();
+                    sigLastX = p.x; sigLastY = p.y;
+                }
+                function sigEnd() { sigDrawing = false; }
+                sigCanvas.addEventListener('mousedown', sigStart);
+                sigCanvas.addEventListener('mousemove', sigMove);
+                sigCanvas.addEventListener('mouseup', sigEnd);
+                sigCanvas.addEventListener('mouseleave', sigEnd);
+                sigCanvas.addEventListener('touchstart', sigStart, { passive: false });
+                sigCanvas.addEventListener('touchmove', sigMove, { passive: false });
+                sigCanvas.addEventListener('touchend', sigEnd);
+                window.clearSigPad = function() {
+                    sigCtx.clearRect(0, 0, sigCanvas.width, sigCanvas.height);
+                    var hid = document.getElementById('mainInput');
+                    if (hid) hid.value = '';
+                };
+                var existingB64 = {{ sig_b64_existing|tojson }};
+                if (existingB64) {
+                    var img = new Image();
+                    img.onload = function() {
+                        sigCtx.drawImage(img, 0, 0, sigCanvas.width, sigCanvas.height);
+                    };
+                    img.src = 'data:image/png;base64,' + existingB64;
+                }
+            }
+            function sigCanvasHasInk() {
+                if (!sigCanvas) return false;
+                var ctx = sigCanvas.getContext('2d');
+                var data = ctx.getImageData(0, 0, sigCanvas.width, sigCanvas.height).data;
+                for (var i = 3; i < data.length; i += 4) {
+                    if (data[i] > 0) return true;
+                }
+                return false;
+            }
+            function syncSigToHidden() {
+                if (!sigCanvas) return false;
+                var hid = document.getElementById('mainInput');
+                if (!hid) return false;
+                if (!sigCanvasHasInk()) {
+                    hid.value = '';
+                    return false;
+                }
+                var dataUrl = sigCanvas.toDataURL('image/png');
+                hid.value = SIG_PREFIX + dataUrl.split(',')[1];
+                return true;
+            }
+            var last4 = document.getElementById('last4Input');
+            var hidden = document.getElementById('mainInput');
+            if (last4 && hidden) {
+                function syncLast4() {
+                    var d = (last4.value || '').replace(/\\D/g, '').slice(0, 4);
+                    last4.value = d;
+                    hidden.value = d.length === 4 ? ('XXX-XX-' + d) : '';
+                }
+                last4.addEventListener('input', syncLast4);
+                syncLast4();
+            }
+            var form = document.getElementById('fieldForm');
+            if (form) {
+                form.addEventListener('submit', function(e) {
+                    if (sigCanvas) {
+                        if (!syncSigToHidden()) {
+                            e.preventDefault();
+                            alert('Please draw your signature in the box before continuing.');
+                            return;
+                        }
+                    }
+                    if (last4 && hidden && last4.hasAttribute('required')) {
+                        syncLast4();
+                        if (!hidden.value) {
+                            e.preventDefault();
+                            alert('Please enter exactly 4 digits for the last part of your SSN.');
+                            last4.focus();
+                            return;
+                        }
+                    }
+                    var radios = form.querySelectorAll('input[type="radio"][name="value"]');
+                    if (radios.length && radios[0].hasAttribute('required')) {
+                        var picked = form.querySelector('input[type="radio"][name="value"]:checked');
+                        if (!picked) {
+                            e.preventDefault();
+                            alert('Please select one option before continuing.');
+                        }
+                    }
+                });
+            }
+        })();
+        function goBack() {
+            document.getElementById('direction').value = 'back';
+            document.getElementById('fieldForm').submit();
+        }
+        function skipField() {
+            document.getElementById('direction').value = 'skip';
+            document.querySelectorAll('#fieldForm input, #fieldForm textarea').forEach(function(inp) {
+                inp.removeAttribute('required');
+            });
+            document.getElementById('fieldForm').submit();
+        }
+    </script>
+</body>
+</html>
+

@@ -1,0 +1,339 @@
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <title>{{ field.label }} — {{ document.name_for_users }}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="color-scheme" content="dark">
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+            body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; }
+            .header { background: #000; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+            .header a { color: #fff; text-decoration: none; opacity: 0.9; white-space: nowrap; }
+            .wrap { max-width: 640px; margin: 0 auto; padding: 24px 20px 80px; }
+            .progress { height: 6px; background: #1a2332; border-radius: 3px; margin-bottom: 20px; overflow: hidden; }
+            .progress-bar { height: 100%; background: #FE0100; transition: width 0.25s; }
+            .step-label { font-size: 0.85em; color: #8892a8; margin-bottom: 8px; }
+            .section-tag { display: inline-block; background: rgba(254, 1, 0, 0.15); color: #ffb4b4; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; margin-bottom: 10px; border: 1px solid rgba(254, 1, 0, 0.25); }
+            .page-tag { display: inline-block; background: #1a2332; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; margin-bottom: 12px; }
+            h1 { font-size: 1.45em; margin-bottom: 8px; line-height: 1.3; }
+            .hint { color: #8892a8; margin-bottom: 20px; line-height: 1.5; }
+            .field-input { width: 100%; padding: 14px 16px; font-size: 16px; border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; background: #121a26; color: #f2f5fb; min-height: 48px; }
+            .field-input:focus { outline: none; border-color: #FE0100; }
+            textarea.field-input { min-height: 100px; resize: vertical; }
+            .choice-list { display: flex; flex-direction: column; gap: 10px; }
+            .choice-option { display: block; cursor: pointer; }
+            .choice-option input[type="radio"] { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+            .choice-option .choice-label { display: block; text-align: left; padding: 14px 16px; border: 2px solid rgba(255,255,255,0.25); border-radius: 8px; background: #121a26; color: #f2f5fb; font-size: 1.05em; min-height: 48px; }
+            .choice-option input[type="radio"]:checked + .choice-label { border-color: #FE0100; background: #2a1520; box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.35); }
+            .choice-option-followup { display: none; margin-top: 12px; }
+            .choice-option-followup-date { display: block; }
+            .choice-option-followup .followup-caption { font-size: 0.9em; color: #8892a8; margin: 0 0 8px; line-height: 1.4; }
+            input[type="date"].field-input,
+            input[type="date"].wizard-date-input {
+                color-scheme: dark;
+                cursor: pointer;
+                font-size: 16px;
+            }
+            input[type="date"].field-input::-webkit-calendar-picker-indicator,
+            input[type="date"].wizard-date-input::-webkit-calendar-picker-indicator {
+                filter: invert(1);
+                cursor: pointer;
+                opacity: 0.95;
+                width: 24px;
+                height: 24px;
+            }
+            .last4-row { display: flex; align-items: stretch; width: 100%; margin-top: 8px; }
+            .last4-prefix { display: flex; align-items: center; padding: 14px 12px; background: #2a3753; color: #c8d0e0; border: 1px solid rgba(255,255,255,0.24); border-right: none; border-radius: 8px 0 0 8px; font-family: monospace; }
+            .last4-input { flex: 1; padding: 14px 16px; font-size: 16px; font-family: monospace; border: 1px solid rgba(255,255,255,0.24); border-radius: 0 8px 8px 0; background: #121a26; color: #f2f5fb; min-width: 5em; }
+            .wizard-phone-input.phone-invalid { border-color: #dc3545; }
+            .wizard-phone-input.phone-complete { border-color: #28a745; }
+            .nav { display: flex; gap: 12px; margin-top: 28px; flex-wrap: wrap; }
+            .btn-nav { padding: 12px 24px; border-radius: 6px; border: none; cursor: pointer; font-size: 1em; min-height: 48px; }
+            .btn-primary { background: #FE0100; color: #fff; flex: 1; min-width: 140px; }
+            .btn-ghost { background: transparent; color: #8892a8; border: 1px solid rgba(255,255,255,0.2); }
+            .sig-pad-wrap { border: 2px solid rgba(255,255,255,0.28); border-radius: 8px; background: #fff; overflow: hidden; margin-top: 8px; }
+            #sigCanvas { display: block; width: 100%; height: 160px; touch-action: none; cursor: crosshair; background: #fff; }
+            .consent-row { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0; font-size: 0.95em; color: #b7c1d3; }
+            .consent-row input { width: 20px; height: 20px; margin-top: 2px; flex-shrink: 0; }
+            .policy-panel { background: #121a26; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 16px 18px; margin-bottom: 20px; max-height: 50vh; overflow-y: auto; line-height: 1.55; color: #d8dee9; font-size: 0.95em; }
+            .policy-panel p { margin: 0 0 12px; }
+            .policy-panel p:last-child { margin-bottom: 0; }
+            .alt-link { margin-top: 20px; font-size: 0.9em; }
+            .alt-link a { color: #7eb8ff; }
+        {{ global_theme_css|safe }}
+        </style>
+    </head>
+    <body class="user-app-shell doc-wizard-fill-page">
+        <div class="header">
+            <span>{{ document.name_for_users }}</span>
+            <a href="{{ url_for('view_documents') }}">← Files</a>
+        </div>
+        <div class="wrap">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}{% for category, message in messages %}<div class="flash">{{ message }}</div>{% endfor %}{% endif %}
+            {% endwith %}
+            <div class="progress"><div class="progress-bar" style="width: {{ progress_pct }}%;"></div></div>
+            <div class="step-label">{{ done_count }} / {{ total_count }} complete · Field {{ idx + 1 }} of {{ total_count }}</div>
+            {% if field.section %}<span class="section-tag">{{ field.section }}</span>{% endif %}
+            <span class="page-tag">Page {{ field.page }}</span>
+            <h1>{{ field.label }}</h1>
+            {% if field.hint %}<p class="hint">{{ field.hint }}</p>{% endif %}
+            <form id="fieldForm" method="POST" action="{{ url_for('document_wizard_save_field', doc_id=doc_id) }}">
+                <input type="hidden" name="wizard_id" value="{{ field.wizard_id }}">
+                <input type="hidden" name="direction" id="direction" value="next">
+                {% if field.kind == 'info' %}
+                <div class="policy-panel">{{ field.policy_html|safe }}</div>
+                {% elif field.kind == 'gate' and field.options %}
+                <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
+                    {% for opt in field.options %}
+                    <label class="choice-option">
+                        <input type="radio" name="value" value="{{ opt.value }}" {% if field.value == opt.value %}checked{% endif %} required>
+                        <span class="choice-label">{{ opt.label }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% elif field.wizard_type == 'yes_no' and field.options %}
+                <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
+                    {% for opt in field.options %}
+                    <label class="choice-option">
+                        <input type="radio" name="value" value="{{ opt.value }}" {% if field.value == opt.value %}checked{% endif %} {% if field.required %}required{% endif %}>
+                        <span class="choice-label">{{ opt.label }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% elif field.kind == 'ack_group' and field.options %}
+                <div class="choice-list" role="group" aria-label="{{ field.label }}">
+                    {% for opt in field.options %}
+                    <label class="choice-option" style="align-items:flex-start;">
+                        <input type="checkbox" name="ack_field" value="{{ opt.field_id }}" {% if opt.checked %}checked{% endif %} style="width:22px;height:22px;margin-top:2px;flex-shrink:0;">
+                        <span class="choice-label">{{ opt.label }}{% if opt.required %} *{% endif %}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% elif field.kind == 'choice_group' and field.options %}
+                <div class="choice-list" role="radiogroup" aria-label="{{ field.label }}">
+                    {% for opt in field.options %}
+                    <label class="choice-option">
+                        <input type="radio" name="value" value="{{ opt.field_id }}" data-acro="{{ opt.acro or '' }}" {% if field.value == opt.field_id|string %}checked{% endif %} required>
+                        <div class="choice-label">
+                            <span>{{ opt.label }}</span>
+                        {% if opt.followup %}
+                        {% set fu = opt.followup %}
+                        <div class="choice-option-followup{% if fu.wizard_type == 'date' %} choice-option-followup-date{% endif %}">
+                            {% if fu.wizard_type == 'date' %}
+                            <p class="followup-caption">{{ fu.hint or 'Select a date' }}</p>
+                            <input type="date" name="followup_value" class="field-input wizard-date-input choice-followup-input" id="followupInput{{ fu.field_id }}" data-field-id="{{ fu.field_id }}" data-required="{{ '1' if fu.required else '0' }}" value="{{ fu.value }}">
+                            {% elif fu.wizard_type == 'textarea' %}
+                            {% if fu.hint %}<p class="followup-caption">{{ fu.hint }}</p>{% endif %}
+                            <textarea name="followup_value" class="field-input choice-followup-input" id="followupInput{{ fu.field_id }}" rows="4" data-field-id="{{ fu.field_id }}" data-required="{{ '1' if fu.required else '0' }}" placeholder="Enter your answer">{{ fu.value }}</textarea>
+                            {% else %}
+                            {% if fu.hint %}<p class="followup-caption">{{ fu.hint }}</p>{% endif %}
+                            <input type="text" name="followup_value" class="field-input choice-followup-input" id="followupInput{{ fu.field_id }}" data-field-id="{{ fu.field_id }}" data-required="{{ '1' if fu.required else '0' }}" value="{{ fu.value }}" placeholder="Enter {{ fu.label|lower }}">
+                            {% endif %}
+                        </div>
+                        {% endif %}
+                        </div>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% if field.followups %}
+                <input type="hidden" name="followup_field_id" id="followupFieldId" value="">
+                {% endif %}
+                {% elif field.wizard_type == 'date' %}
+                <input type="date" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+                {% elif is_last4 %}
+                <p class="hint" style="margin-top:0;">Enter only the last 4 digits of your SSN.</p>
+                <div class="last4-row">
+                    <span class="last4-prefix" aria-hidden="true">XXX-XX-</span>
+                    <input type="text" class="last4-input" id="last4Input" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="1234" value="{{ last4_digits }}" {% if field.required %}required{% endif %}>
+                </div>
+                <input type="hidden" name="value" id="mainInput" value="{{ current_val }}">
+                {% elif field.wizard_type == 'number' %}
+                <input type="number" name="value" class="field-input" id="mainInput" value="{{ current_val }}" {% if field.required %}required{% endif %}>
+                {% elif field.wizard_type == 'phone' %}
+                <p class="hint" style="margin-top:0;">Enter a 10-digit US phone number (e.g. (555) 123-4567).</p>
+                <input type="tel" name="value" class="field-input wizard-phone-input" id="mainInput" value="{{ current_val }}" inputmode="tel" autocomplete="tel" placeholder="(555) 123-4567" {% if field.required %}required{% endif %}>
+                {% elif field.wizard_type == 'textarea' %}
+                <textarea name="value" class="field-input" id="mainInput" rows="5" placeholder="Enter your answer" {% if field.required %}required{% endif %}>{{ current_val }}</textarea>
+                {% elif field.wizard_type == 'checkbox' %}
+                <label style="display:flex;align-items:center;gap:12px;margin-top:8px;font-size:1.1em;min-height:48px;">
+                    <input type="checkbox" name="value" value="X" id="mainInput" {% if current_val == 'X' %}checked{% endif %} {% if field.required %}required{% endif %} style="width:22px;height:22px;">
+                    Yes / checked
+                </label>
+                {% elif is_signature %}
+                <p class="hint" style="margin-top:0;">Draw your signature below.</p>
+                <div class="sig-pad-wrap"><canvas id="sigCanvas" width="560" height="160"></canvas></div>
+                <label class="consent-row"><input type="checkbox" name="consent" value="1" id="consentBox" required> I agree to apply my electronic signature to this field.</label>
+                <input type="hidden" name="value" id="mainInput" value="">
+                {% else %}
+                <input type="text" name="value" class="field-input" id="mainInput" value="{{ current_val }}" placeholder="Enter {{ field.label|lower }}" {% if field.required %}required{% endif %}>
+                {% endif %}
+                <div class="nav">
+                    {% if idx > 0 %}
+                    <button type="button" class="btn-nav btn-ghost" onclick="goBack()">Back</button>
+                    {% endif %}
+                    {% if not field.required %}
+                    <button type="button" class="btn-nav btn-ghost" onclick="skipField()">Skip{% if field.skip_value %} (N/A){% endif %}</button>
+                    {% endif %}
+                    <button type="submit" class="btn-nav btn-primary">{{ 'Finish' if idx + 1 >= total_count else ('Continue' if field.kind == 'info' else 'Next') }}</button>
+                </div>
+            </form>
+            {% if not field.required and field.skip_value %}
+            <p class="hint alt-link" style="margin-top:16px;">Not applicable? Tap <strong>Skip (N/A)</strong> and we will mark this field as N/A on your form.</p>
+            {% elif not field.required %}
+            <p class="hint alt-link" style="margin-top:16px;">Not applicable? Tap <strong>Skip</strong> to leave this blank.</p>
+            {% endif %}
+            <p class="alt-link">Prefer the PDF view? <a href="{{ user_sign_document_classic_url(doc_id) }}">Open classic sign page</a></p>
+        </div>
+        <script>
+        (function() {
+            var sigCanvas = document.getElementById('sigCanvas');
+            if (sigCanvas) {
+                var sigCtx = sigCanvas.getContext('2d');
+                sigCtx.strokeStyle = '#000'; sigCtx.lineWidth = 2.2; sigCtx.lineCap = 'round';
+                var sigDrawing = false, sigLastX = 0, sigLastY = 0;
+                function sigPos(e) {
+                    var rect = sigCanvas.getBoundingClientRect();
+                    var scaleX = sigCanvas.width / rect.width, scaleY = sigCanvas.height / rect.height;
+                    var cx = (e.clientX !== undefined ? e.clientX : e.touches[0].clientX) - rect.left;
+                    var cy = (e.clientY !== undefined ? e.clientY : e.touches[0].clientY) - rect.top;
+                    return { x: cx * scaleX, y: cy * scaleY };
+                }
+                function sigStart(e) { e.preventDefault(); sigDrawing = true; var p = sigPos(e); sigLastX = p.x; sigLastY = p.y; }
+                function sigMove(e) { if (!sigDrawing) return; e.preventDefault(); var p = sigPos(e); sigCtx.beginPath(); sigCtx.moveTo(sigLastX, sigLastY); sigCtx.lineTo(p.x, p.y); sigCtx.stroke(); sigLastX = p.x; sigLastY = p.y; }
+                function sigEnd() { sigDrawing = false; }
+                sigCanvas.addEventListener('mousedown', sigStart); sigCanvas.addEventListener('mousemove', sigMove);
+                sigCanvas.addEventListener('mouseup', sigEnd); sigCanvas.addEventListener('mouseleave', sigEnd);
+                sigCanvas.addEventListener('touchstart', sigStart, { passive: false });
+                sigCanvas.addEventListener('touchmove', sigMove, { passive: false });
+                sigCanvas.addEventListener('touchend', sigEnd);
+                var existingB64 = {{ sig_b64_existing|tojson }};
+                if (existingB64) { var img = new Image(); img.onload = function() { sigCtx.drawImage(img, 0, 0, sigCanvas.width, sigCanvas.height); }; img.src = 'data:image/png;base64,' + existingB64; }
+            }
+            var last4 = document.getElementById('last4Input');
+            var hidden = document.getElementById('mainInput');
+            if (last4 && hidden && last4.classList.contains('last4-input')) {
+                function syncLast4() { var d = (last4.value || '').replace(/\\D/g, '').slice(0, 4); last4.value = d; hidden.value = d.length === 4 ? ('XXX-XX-' + d) : ''; }
+                last4.addEventListener('input', syncLast4); syncLast4();
+            }
+            var phoneInput = document.getElementById('mainInput');
+            var typedFieldPhoneRegex = new RegExp({{ typed_field_phone_regex_js|tojson }});
+            if (phoneInput && phoneInput.classList.contains('wizard-phone-input')) {
+                function digitsOnly(v) { return (v || '').replace(/\\D/g, ''); }
+                function formatPhone(digits) {
+                    digits = (digits || '').slice(0, 10);
+                    if (!digits.length) return '';
+                    if (digits.length <= 3) return '(' + digits;
+                    if (digits.length <= 6) return '(' + digits.slice(0, 3) + ') ' + digits.slice(3);
+                    return '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6);
+                }
+                phoneInput.addEventListener('input', function() {
+                    var digits = digitsOnly(phoneInput.value);
+                    var formatted = formatPhone(digits);
+                    var oldLen = phoneInput.value.length;
+                    var start = phoneInput.selectionStart;
+                    phoneInput.value = formatted;
+                    if (document.activeElement === phoneInput && start != null) {
+                        try {
+                            var delta = formatted.length - oldLen;
+                            var pos = Math.max(0, Math.min(formatted.length, start + delta));
+                            phoneInput.setSelectionRange(pos, pos);
+                        } catch (e) {}
+                    }
+                    var complete = digits.length === 10;
+                    phoneInput.classList.toggle('phone-invalid', digits.length > 0 && !complete);
+                    phoneInput.classList.toggle('phone-complete', complete);
+                });
+                if (phoneInput.value) {
+                    phoneInput.dispatchEvent(new Event('input'));
+                }
+            }
+            var choiceRadios = document.querySelectorAll('.choice-list input[name="value"]');
+            function syncChoiceFollowups() {
+                var fieldIdInput = document.getElementById('followupFieldId');
+                var activeInput = null;
+                document.querySelectorAll('.choice-option').forEach(function(option) {
+                    var radio = option.querySelector('input[type="radio"]');
+                    var panel = option.querySelector('.choice-option-followup');
+                    if (!panel) return;
+                    var show = !!(radio && radio.checked);
+                    var isDateFollowup = panel.classList.contains('choice-option-followup-date');
+                    panel.style.display = (show || isDateFollowup) ? 'block' : 'none';
+                    var input = panel.querySelector('.choice-followup-input');
+                    if (!input) return;
+                    input.disabled = !show;
+                    if (show) {
+                        activeInput = input;
+                        if (input.getAttribute('data-required') === '1') input.setAttribute('required', 'required');
+                        else input.removeAttribute('required');
+                    } else {
+                        input.removeAttribute('required');
+                    }
+                });
+                if (fieldIdInput) {
+                    fieldIdInput.value = activeInput ? (activeInput.getAttribute('data-field-id') || '') : '';
+                }
+            }
+            if (choiceRadios.length) {
+                choiceRadios.forEach(function(r) { r.addEventListener('change', syncChoiceFollowups); });
+                document.querySelectorAll('.choice-option-followup .choice-followup-input').forEach(function(inp) {
+                    inp.addEventListener('click', function(e) { e.stopPropagation(); });
+                    inp.addEventListener('focus', function() {
+                        var radio = inp.closest('.choice-option') && inp.closest('.choice-option').querySelector('input[type="radio"]');
+                        if (radio) radio.checked = true;
+                        syncChoiceFollowups();
+                    });
+                });
+                syncChoiceFollowups();
+            }
+            var form = document.getElementById('fieldForm');
+            if (form) form.addEventListener('submit', function(e) {
+                if (phoneInput && phoneInput.classList.contains('wizard-phone-input')) {
+                    var ph = (phoneInput.value || '').trim();
+                    if (ph && !typedFieldPhoneRegex.test(ph)) {
+                        e.preventDefault();
+                        alert('Please enter a valid 10-digit phone number (e.g. (555) 123-4567).');
+                        phoneInput.focus();
+                        return;
+                    }
+                }
+                if (sigCanvas) {
+                    var ctx = sigCanvas.getContext('2d');
+                    var data = ctx.getImageData(0, 0, sigCanvas.width, sigCanvas.height).data;
+                    var hasInk = false;
+                    for (var i = 3; i < data.length; i += 4) { if (data[i] > 0) { hasInk = true; break; } }
+                    if (!hasInk) { e.preventDefault(); alert('Please draw your signature.'); return; }
+                    hidden.value = sigCanvas.toDataURL('image/png').split(',')[1];
+                }
+                // Progressive enhance: save via fetch to avoid full page reload
+                e.preventDefault();
+                var fd = new FormData(form);
+                fd.set('xhr', '1');
+                var submitBtn = form.querySelector('button[type="submit"]');
+                if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Saving…'; }
+                fetch(form.action, {
+                    method: 'POST',
+                    body: fd,
+                    headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                    credentials: 'same-origin'
+                }).then(function(r) { return r.json().then(function(j) { return { ok: r.ok, json: j }; }); })
+                .then(function(res) {
+                    if (res.json && res.json.redirect) {
+                        window.location.href = res.json.redirect;
+                        return;
+                    }
+                    if (res.json && res.json.error) alert(res.json.error);
+                    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = submitBtn.getAttribute('data-label') || 'Next'; }
+                }).catch(function() {
+                    // Fallback to classic full-page submit
+                    fd.set('xhr', '0');
+                    HTMLFormElement.prototype.submit.call(form);
+                });
+            });
+        })();
+        function goBack() { document.getElementById('direction').value = 'back'; document.getElementById('fieldForm').requestSubmit ? document.getElementById('fieldForm').requestSubmit() : document.getElementById('fieldForm').dispatchEvent(new Event('submit', {cancelable:true})); }
+        function skipField() { document.getElementById('direction').value = 'skip'; document.getElementById('fieldForm').querySelectorAll('[required]').forEach(function(el){ el.removeAttribute('required'); }); document.getElementById('fieldForm').requestSubmit ? document.getElementById('fieldForm').requestSubmit() : document.getElementById('fieldForm').dispatchEvent(new Event('submit', {cancelable:true})); }
+        </script>
+    </body>
+    </html>
+    

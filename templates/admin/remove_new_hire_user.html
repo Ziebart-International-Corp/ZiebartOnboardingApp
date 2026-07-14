@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Confirm User Removal - {{ new_hire.first_name }} {{ new_hire.last_name }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #fff; color: #000; padding: 20px; }
+        .top-header { background: #000; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; margin: -20px -20px 20px -20px; }
+        .logo-section { color: #fff; font-weight: 800; }
+        .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+        .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .card { background: #f8f9fa; border-radius: 12px; padding: 24px; margin-bottom: 20px; border: 1px solid #e0e0e0; }
+        .card h2 { margin-bottom: 12px; color: #000; }
+        .card p { color: #333; margin-bottom: 16px; }
+        .btn { display: inline-block; padding: 10px 20px; border-radius: 5px; text-decoration: none; font-weight: 600; border: none; cursor: pointer; font-size: 1em; }
+        .btn-danger { background: #FE0100; color: white; }
+        .btn-danger:hover { background: #c00; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-secondary:hover { background: #5a6268; color: white; }
+        .actions { display: flex; gap: 12px; margin-top: 20px; }
+        form { display: inline; }
+        .info-msg { color: #0c5460; background: #d1ecf1; padding: 10px; border-radius: 0.5rem; margin-bottom: 16px; }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <div class="logo-section">Confirm User Removal</div>
+        <a href="{{ url_for('view_new_hire_details', username=username) }}" class="back-btn">← Cancel</a>
+    </div>
+    <div class="container">
+        <div class="card">
+            <h2>Confirm removal: {{ new_hire.first_name }} {{ new_hire.last_name }}</h2>
+            {% if no_account_msg %}<p class="info-msg">{{ no_account_msg }}</p>{% endif %}
+            <p>This will revoke their login access so they can no longer sign in. Use this when a new hire withdraws or does not complete onboarding.</p>
+            <p><strong>Username:</strong> {{ new_hire.username }}</p>
+            <p>Their new hire record will be retained and marked as removed so they no longer appear in the active list.</p>
+            <div class="actions">
+                <form method="post" action="{{ url_for('remove_new_hire_user', username=username) }}" onsubmit="return confirm('Confirm removal? This user will no longer be able to sign in.');">
+                    <button type="submit" class="btn btn-danger">Remove user</button>
+                </form>
+                <a href="{{ url_for('view_new_hire_details', username=username) }}" class="btn btn-secondary">Cancel</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+

@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Manage Signature - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; color: #000; }
+        .header {
+            background: #000;
+            color: white;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .container { max-width: 1100px; margin: 24px auto; padding: 0 20px; }
+        .panel {
+            background: #fff;
+            border-radius: 0.75rem;
+            border: 1px solid #e0e0e0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .sig-pad {
+            width: 100%;
+            height: 220px;
+            border: 1px solid #ccc;
+            border-radius: 0.5rem;
+            background: #fff;
+            cursor: crosshair;
+        }
+        .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+        .btn {
+            display: inline-block;
+            padding: 10px 16px;
+            border-radius: 0.5rem;
+            border: none;
+            cursor: pointer;
+            text-decoration: none;
+            color: #fff;
+            background: #fe0100;
+        }
+        .btn-secondary { background: #6c757d; }
+        .preview {
+            border: 1px dashed #999;
+            border-radius: 0.5rem;
+            background: #fff;
+            min-height: 120px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+        }
+        .preview img { max-width: 100%; max-height: 100px; object-fit: contain; }
+        @media (max-width: 768px) {
+            body.signature-manage-page {
+                overflow-x: hidden;
+            }
+            body.signature-manage-page .header {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 12px;
+                padding: max(10px, env(safe-area-inset-top, 0px)) 14px 12px;
+            }
+            body.signature-manage-page .header h1 {
+                font-size: 1.15em;
+            }
+            body.signature-manage-page .back-btn {
+                text-align: center;
+                min-height: 44px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            body.signature-manage-page .container {
+                padding: 0 12px;
+                margin: 16px auto;
+                padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+            }
+            body.signature-manage-page .grid {
+                grid-template-columns: 1fr;
+            }
+            body.signature-manage-page .sig-pad {
+                height: 180px;
+            }
+            body.signature-manage-page .row .btn,
+            body.signature-manage-page .row a.btn {
+                flex: 1 1 100%;
+                min-height: 44px;
+                text-align: center;
+                font-size: 16px;
+            }
+            body.signature-manage-page input#typedName {
+                font-size: 16px;
+                min-height: 44px;
+            }
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body class="signature-manage-page">
+    <div class="header">
+        <h1>✍️ Manage Signature</h1>
+        <a href="{{ url_for('profile') }}" class="back-btn">← Back to Profile</a>
+    </div>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+            <div style="padding: 12px 16px; margin-bottom: 12px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da{% else %}#d4edda{% endif %}; color: {% if category == 'error' %}#721c24{% else %}#155724{% endif %};">
+                {{ msg }}
+            </div>
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+        <div class="grid">
+            <div class="panel">
+                <h3 style="margin-bottom: 12px;">Draw Signature</h3>
+                <canvas id="drawPad" class="sig-pad" width="500" height="220"></canvas>
+                <div class="row">
+                    <button type="button" class="btn-secondary btn" onclick="clearPad()">Clear</button>
+                    <button type="button" class="btn" onclick="saveFromPad()">Save Drawn Signature</button>
+                </div>
+            </div>
+            <div class="panel">
+                <h3 style="margin-bottom: 12px;">Type Signature</h3>
+                <input id="typedName" type="text" placeholder="Type your name as signature" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:0.5rem;">
+                <div class="preview" id="typedPreview" style="margin-top:10px;">Preview</div>
+                <div class="row">
+                    <button type="button" class="btn-secondary btn" onclick="renderTyped()">Preview Typed</button>
+                    <button type="button" class="btn" onclick="saveTyped()">Save Typed Signature</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-bottom:10px;">Current Saved Signature</h3>
+            {% if user_record.saved_signature_image %}
+                <div class="preview"><img src="data:image/png;base64,{{ user_record.saved_signature_image }}" alt="Saved signature"></div>
+                <p style="margin-top:8px; color:#666;">Type: {{ user_record.saved_signature_kind or 'unknown' }}{% if user_record.saved_signature_updated_at %} • Updated: {{ user_record.saved_signature_updated_at.strftime('%Y-%m-%d %H:%M') }}{% endif %}</p>
+                <div class="row">
+                    <a class="btn btn-secondary" href="{{ url_for('manage_signature', clear='1') }}" onclick="return confirm('Remove your saved default signature?');">Clear Saved Signature</a>
+                </div>
+            {% else %}
+                <p style="color:#666;">No saved signature yet.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <form id="saveForm" method="POST" action="{{ url_for('manage_signature') }}" style="display:none;">
+        <input type="hidden" name="signature_mode" id="sigMode">
+        <input type="hidden" name="signature_image" id="sigImage">
+    </form>
+
+    <script>
+        const canvas = document.getElementById('drawPad');
+        const ctx = canvas.getContext('2d');
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        let drawing = false;
+        let lastX = 0, lastY = 0;
+        function getPos(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = (e.touches && e.touches[0] ? e.touches[0].clientX : e.clientX);
+            const clientY = (e.touches && e.touches[0] ? e.touches[0].clientY : e.clientY);
+            return { x: clientX - rect.left, y: clientY - rect.top };
+        }
+        function startDraw(e){ drawing = true; const p = getPos(e); lastX = p.x; lastY = p.y; }
+        function moveDraw(e){
+            if (!drawing) return;
+            e.preventDefault();
+            const p = getPos(e);
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            lastX = p.x; lastY = p.y;
+        }
+        function endDraw(){ drawing = false; }
+        canvas.addEventListener('mousedown', startDraw);
+        canvas.addEventListener('mousemove', moveDraw);
+        canvas.addEventListener('mouseup', endDraw);
+        canvas.addEventListener('mouseleave', endDraw);
+        canvas.addEventListener('touchstart', startDraw, { passive: true });
+        canvas.addEventListener('touchmove', moveDraw, { passive: false });
+        canvas.addEventListener('touchend', endDraw);
+
+        function clearPad(){ ctx.clearRect(0, 0, canvas.width, canvas.height); }
+        function canvasHasInk() {
+            const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+            for (let i = 3; i < img.length; i += 4) if (img[i] > 0) return true;
+            return false;
+        }
+        function postSignature(mode, dataUrl) {
+            document.getElementById('sigMode').value = mode;
+            document.getElementById('sigImage').value = dataUrl;
+            document.getElementById('saveForm').submit();
+        }
+        function saveFromPad() {
+            if (!canvasHasInk()) { alert('Please draw your signature first.'); return; }
+            postSignature('drawn', canvas.toDataURL('image/png'));
+        }
+        function renderTyped() {
+            const name = (document.getElementById('typedName').value || '').trim();
+            if (!name) { alert('Type your name first.'); return; }
+            const tCanvas = document.createElement('canvas');
+            tCanvas.width = 500; tCanvas.height = 120;
+            const tCtx = tCanvas.getContext('2d');
+            tCtx.fillStyle = '#fff'; tCtx.fillRect(0, 0, tCanvas.width, tCanvas.height);
+            tCtx.fillStyle = '#111';
+            tCtx.font = '52px "Brush Script MT", "Segoe Script", cursive';
+            tCtx.fillText(name, 20, 80);
+            document.getElementById('typedPreview').innerHTML = '<img src="' + tCanvas.toDataURL('image/png') + '" alt="Typed signature preview">';
+            window.__typedSigData = tCanvas.toDataURL('image/png');
+        }
+        function saveTyped() {
+            if (!window.__typedSigData) renderTyped();
+            if (!window.__typedSigData) return;
+            postSignature('typed', window.__typedSigData);
+        }
+    </script>
+</body>
+</html>
+

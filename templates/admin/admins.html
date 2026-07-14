@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Manage Admins - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header h1 { font-size: 1.4em; font-weight: 800; }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-size: 0.95em;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover { background: rgba(255,255,255,0.3); color: #FFFFFF; }
+        .container { max-width: 1000px; margin: 24px auto; padding: 0 20px; }
+        .card {
+            background: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        .card h2 { font-size: 1.2em; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 2px solid #E0E0E0; }
+        .form-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+        .form-group { flex: 1; min-width: 140px; }
+        .form-group label { display: block; font-size: 0.85em; color: #666; margin-bottom: 4px; }
+        .form-group input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 0.35rem;
+            font-size: 15px;
+        }
+        .btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 0.35rem;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+            text-decoration: none;
+            display: inline-block;
+            white-space: nowrap;
+        }
+        .btn-sm { padding: 4px 10px; font-size: 0.8em; }
+        .btn-primary { background: #FE0100; color: white; }
+        .btn-primary:hover { background: #cc0000; color: white; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-success:hover { background: #218838; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-secondary:hover { background: #5a6268; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-danger:hover { background: #c82333; color: white; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 0.95em; }
+        th { background: #f8f9fa; font-weight: 600; font-size: 0.85em; }
+        .actions-cell {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 6px;
+            align-items: center;
+        }
+        .actions-cell .btn { margin: 0; }
+        .actions-cell form { display: inline; margin: 0; }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0; top: 0;
+            width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            align-items: center;
+            justify-content: center;
+        }
+        .modal.show { display: flex; }
+        .modal-content {
+            background: white;
+            border-radius: 0.5rem;
+            padding: 24px;
+            max-width: 420px;
+            width: 90%;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }
+        .modal-content h3 { margin-bottom: 16px; }
+        .modal-content .form-group { margin-bottom: 16px; }
+        .modal-actions { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
+        .flash { padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; }
+        .flash.success { background: #d4edda; color: #155724; }
+        .flash.error { background: #f8d7da; color: #721c24; }
+        @media (max-width: 768px) {
+            .form-row { flex-direction: column; }
+            .form-group { min-width: 100%; }
+            th, td { padding: 10px; font-size: 0.9em; }
+            .actions-cell { flex-direction: column; }
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🛡️ Manage Admins</h1>
+        <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+            <div class="flash {{ category }}">{{ msg }}</div>
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+
+        <div class="card">
+            <h2>Add Admin</h2>
+            <form method="POST" action="{{ url_for('manage_admins_add') }}">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Username</label>
+                        <input type="text" name="username" placeholder="Username" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Email (for login)</label>
+                        <input type="email" name="email" placeholder="admin@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" name="password" placeholder="••••••••" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Full name (optional)</label>
+                        <input type="text" name="full_name" placeholder="Full Name">
+                    </div>
+                    <div class="form-group" style="flex: 0; align-self: flex-end;">
+                        <label>&nbsp;</label>
+                        <button type="submit" class="btn btn-primary btn-sm">Add Admin</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Admin Users</h2>
+            {% if admins %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Email</th>
+                        <th>Full Name</th>
+                        <th>Last Login</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for admin in admins %}
+                    <tr>
+                        <td>{{ admin.username }}</td>
+                        <td>{{ admin.email or '-' }}</td>
+                        <td>{{ admin.full_name or '-' }}</td>
+                        <td>{{ admin.last_login.strftime('%Y-%m-%d %H:%M') if admin.last_login else 'Never' }}</td>
+                        <td class="actions-cell">
+                            <button type="button" class="btn btn-secondary btn-sm btn-edit-admin" data-id="{{ admin.id }}" data-username="{{ admin.username|e }}" data-email="{{ (admin.email or '')|e }}" data-full-name="{{ (admin.full_name or '')|e }}">Edit</button>
+                            <button type="button" class="btn btn-secondary btn-sm btn-password-admin" data-id="{{ admin.id }}" data-username="{{ admin.username|e }}">Password</button>
+                            {% if admin.username != current_user.username %}
+                            <form method="POST" action="{{ url_for('manage_admins_remove', user_id=admin.id) }}" style="display: inline;" onsubmit="return confirm('Remove admin role from {{ admin.username }}? They will become a regular user.');">
+                                <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+                            </form>
+                            {% else %}
+                            <span style="color: #999; font-size: 0.8em;">(you)</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="color: #666;">No admin users yet. Add one above.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <h3>Edit Admin</h3>
+            <form method="POST" id="editForm">
+                <input type="hidden" name="user_id" id="editUserId">
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" id="editUsername" readonly style="background: #f0f0f0;">
+                </div>
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" name="email" id="editEmail" readonly style="background: #f0f0f0;" placeholder="Email is locked after creation">
+                    <small style="color: #666;">Login email is locked after account creation.</small>
+                </div>
+                <div class="form-group">
+                    <label>Full name</label>
+                    <input type="text" name="full_name" id="editFullName" placeholder="Full Name">
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="passwordModal" class="modal">
+        <div class="modal-content">
+            <h3>Change Password</h3>
+            <p id="passwordModalUsername" style="margin-bottom: 12px; color: #666;"></p>
+            <form method="POST" id="passwordForm">
+                <input type="hidden" name="user_id" id="passwordUserId">
+                <div class="form-group">
+                    <label>New password</label>
+                    <input type="password" name="new_password" id="newPassword" placeholder="••••••••" required minlength="6">
+                </div>
+                <div class="form-group">
+                    <label>Confirm password</label>
+                    <input type="password" name="confirm_password" id="confirmPassword" placeholder="••••••••" required minlength="6">
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closePasswordModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Update Password</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        document.querySelectorAll('.btn-edit-admin').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var id = this.getAttribute('data-id');
+                var username = this.getAttribute('data-username') || '';
+                var email = this.getAttribute('data-email') || '';
+                var fullName = this.getAttribute('data-full-name') || '';
+                document.getElementById('editUserId').value = id;
+                document.getElementById('editUsername').value = username;
+                document.getElementById('editEmail').value = email;
+                document.getElementById('editFullName').value = fullName;
+                document.getElementById('editForm').action = '/admin/manage-admins/' + id + '/update';
+                document.getElementById('editModal').classList.add('show');
+            });
+        });
+        document.querySelectorAll('.btn-password-admin').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                var id = this.getAttribute('data-id');
+                var username = this.getAttribute('data-username') || '';
+                document.getElementById('passwordUserId').value = id;
+                document.getElementById('passwordModalUsername').textContent = 'Set new password for: ' + username;
+                document.getElementById('passwordForm').action = '/admin/manage-admins/' + id + '/change-password';
+                document.getElementById('newPassword').value = '';
+                document.getElementById('confirmPassword').value = '';
+                document.getElementById('passwordModal').classList.add('show');
+            });
+        });
+        function closeEditModal() {
+            document.getElementById('editModal').classList.remove('show');
+        }
+        function closePasswordModal() {
+            document.getElementById('passwordModal').classList.remove('show');
+        }
+        function closePasswordModal() {
+            document.getElementById('passwordModal').classList.remove('show');
+        }
+        document.getElementById('passwordForm').onsubmit = function() {
+            var p1 = document.getElementById('newPassword').value;
+            var p2 = document.getElementById('confirmPassword').value;
+            if (p1 !== p2) {
+                alert('Passwords do not match.');
+                return false;
+            }
+            if (p1.length < 6) {
+                alert('Password must be at least 6 characters.');
+                return false;
+            }
+            return true;
+        };
+        window.onclick = function(e) {
+            if (e.target.classList.contains('modal')) {
+                e.target.classList.remove('show');
+            }
+        };
+    </script>
+</body>
+</html>
+

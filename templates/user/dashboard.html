@@ -1,0 +1,1425 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dashboard - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        html, body {
+            width: 100%;
+            min-width: 100%;
+            margin: 0;
+            padding: 0;
+            overflow-x: hidden;
+        }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #FFFFFF;
+            color: #000000;
+        }
+        p, span, div, td, th, label, input, textarea, select, button, a {
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .construction-banner {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            background: #fff8e1;
+            color: #5d4e00;
+            text-align: center;
+            padding: 10px 16px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            border-bottom: 1px solid #e6c200;
+            width: 100%;
+        }
+        .construction-banner-icon {
+            flex-shrink: 0;
+            font-size: 1.05em;
+            line-height: 1;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+            position: relative;
+            z-index: 101;
+            height: 100%;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .nav-links {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 6px;
+            border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.16);
+            background: rgba(255,255,255,0.06);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
+            backdrop-filter: blur(6px);
+        }
+        .nav-links a {
+            color: #ffffff;
+            text-decoration: none;
+            font-size: 0.95em;
+            font-weight: 600;
+            font-family: 'URW Form', Arial, sans-serif;
+            transition: all 0.2s;
+            padding: 8px 14px;
+            border-radius: 999px;
+            border: 1px solid transparent;
+            background: transparent;
+            box-shadow: none;
+        }
+        .nav-links a:hover {
+            color: #ffffff;
+            background: rgba(255,255,255,0.08);
+        }
+        .user-section {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            position: relative;
+        }
+        .notification-icon {
+            font-size: 1.3em;
+            cursor: pointer;
+            position: relative;
+            color: #ffffff;
+        }
+        .notification-icon .notification-bell-svg {
+            display: block;
+            width: 22px;
+            height: 22px;
+            color: #f2f5fb;
+        }
+        .notification-dropdown {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: white;
+            min-width: 350px;
+            max-width: 400px;
+            max-height: 500px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: 0.5rem;
+            margin-top: 10px;
+            z-index: 1000;
+            overflow: hidden;
+        }
+        .notification-dropdown.show {
+            display: block;
+        }
+        .notification-header {
+            padding: 15px 20px;
+            border-bottom: 1px solid #eee;
+            background: #f8f9fa;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .notification-header h3 {
+            font-size: 1em;
+            font-weight: 600;
+            color: #000000;
+            margin: 0;
+        }
+        .notification-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .notification-item {
+            padding: 15px 20px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .notification-item:hover {
+            background: #f8f9fa;
+        }
+        .notification-item:last-child {
+            border-bottom: none;
+        }
+        .notification-item.unread {
+            background: #e7f3ff;
+        }
+        .notification-item.unread:hover {
+            background: #d0e7ff;
+        }
+        .notification-title {
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #000000;
+            margin-bottom: 5px;
+            font-size: 0.95em;
+        }
+        .notification-message {
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #808080;
+            font-size: 0.85em;
+            line-height: 1.4;
+        }
+        .notification-empty {
+            padding: 40px 20px;
+            text-align: center;
+            color: #999;
+        }
+        .user-dropdown {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 20px;
+            transition: background 0.2s;
+            color: #ffffff;
+        }
+        .user-dropdown:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        .user-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #FE0100;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: white;
+            min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: 0.5rem;
+            margin-top: 10px;
+            z-index: 1000;
+            overflow: hidden;
+        }
+        .dropdown-menu.show {
+            display: block;
+        }
+        .dropdown-item {
+            padding: 12px 20px;
+            color: #000000;
+            text-decoration: none;
+            display: block;
+            transition: background 0.2s;
+        }
+        .dropdown-item:hover {
+            background: #f5f5f5;
+        }
+        .dropdown-divider {
+            height: 1px;
+            background: #eee;
+        }
+        /* Wrapper so hero can "break out" to full viewport width */
+        .dashboard-view {
+            max-width: 1200px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        .dashboard-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        /* Full-bleed welcome bar: 100vw + negative margin so it spans edge-to-edge */
+        .dashboard-hero-full {
+            width: 100vw;
+            max-width: none;
+            margin: 0;
+            padding: 0;
+            margin-left: calc(50% - 50vw);
+            background: #e5e5e5;
+            box-sizing: border-box;
+        }
+        .dashboard-hero-banner {
+            width: 100%;
+            max-width: 2000px;
+            margin: 0 auto;
+            padding: 40px 20px 48px;
+            color: #333;
+            position: relative;
+            overflow: hidden;
+            background: transparent;
+        }
+        .dashboard-hero-banner .hero-confetti-bg {
+            position: absolute;
+            inset: 0;
+            z-index: 0;
+        }
+        .dashboard-hero-banner .hero-confetti-bg img,
+        .dashboard-hero-banner .hero-confetti-bg video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .dashboard-hero-banner .hero-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(0,0,0,0.35);
+            z-index: 1;
+        }
+        .dashboard-hero-banner .hero-inner {
+            position: relative;
+            z-index: 2;
+            text-align: left;
+        }
+        .dashboard-hero-banner .hero-title {
+            font-size: 2.2em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #fff;
+            margin: 0 0 8px;
+            line-height: 1.2;
+        }
+        .dashboard-hero-banner .hero-subtitle {
+            font-size: 1.1em;
+            color: rgba(255,255,255,0.9);
+            margin: 0;
+            font-weight: 400;
+        }
+        .dashboard-page-wrap {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px 20px 40px;
+        }
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 320px;
+            gap: 24px;
+            align-items: start;
+            margin-top: 24px;
+            position: relative;
+            z-index: 2;
+        }
+        .main-content.main-content-two-col {
+            grid-template-columns: 1fr;
+        }
+        .dashboard-tasks-col {
+            min-width: 0;
+        }
+        .dashboard-tasks-card,
+        .dashboard-card {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 1.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            min-height: 280px;
+            display: flex;
+            flex-direction: column;
+            overflow: visible;
+        }
+        .dashboard-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .dashboard-tasks-card .section-title,
+        .dashboard-card .section-title {
+            margin-bottom: 0;
+            flex-shrink: 0;
+        }
+        .dashboard-tasks-card .progress-bar-container {
+            flex-shrink: 0;
+            margin-bottom: 12px;
+        }
+        .dashboard-tasks-card .task-cards {
+            overflow-y: auto;
+            flex: 1;
+            min-height: 0;
+        }
+        .section-title-dash {
+            font-size: 0.95em;
+            font-weight: 700;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #333;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin: 0 0 12px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #E0E0E0;
+        }
+        .dashboard-cta-link {
+            padding: 8px 16px;
+            background: rgba(254,1,0,0.12);
+            color: #FE0100;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            font-size: 0.9em;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .dashboard-cta-link:hover {
+            background: #FE0100;
+            color: #fff;
+        }
+        .sidebar-right {
+            min-width: 0;
+        }
+        .sidebar-right .section {
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 1.5rem;
+            min-height: 280px;
+            display: flex;
+            flex-direction: column;
+            overflow: visible;
+        }
+        .sidebar-right .section-title-dash {
+            margin-bottom: 16px;
+        }
+        .sidebar-right .quick-links {
+            overflow-y: visible;
+            flex: 1;
+            min-height: 0;
+        }
+        @keyframes heroFadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes heroGradientShift {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.96; }
+        }
+        @keyframes heroBarShine {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        @keyframes heroBadgePulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.9; transform: scale(1.02); }
+        }
+        .welcome-section {
+            text-align: left;
+            margin-bottom: 20px;
+            padding: 1.25rem 1.5rem;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 1rem;
+        }
+        .welcome-section h1 {
+            font-size: 1.45em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: var(--text-primary, #f2f5fb);
+            margin-bottom: 8px;
+        }
+        .welcome-section p,
+        .welcome-section .welcome-body {
+            font-size: 0.98em;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: var(--text-muted, #b7c1d3);
+            font-weight: 400;
+            line-height: 1.55;
+        }
+        .welcome-section .welcome-body p { margin: 0 0 0.6em; }
+        .welcome-section .welcome-body p:last-child { margin-bottom: 0; }
+        .dashboard-progress-hint {
+            text-align: center;
+            margin-top: 4px;
+            font-size: 0.8em;
+            color: var(--text-muted, #b7c1d3);
+        }
+        .task-card.task-card-locked {
+            opacity: 0.72;
+        }
+        .task-card-locked .task-btn,
+        .task-lock-badge {
+            background: #4a5568 !important;
+            color: #e2e8f0 !important;
+            cursor: default;
+            pointer-events: none;
+        }
+        .section {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 2rem;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .section-title {
+            font-size: 1.6em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            margin-bottom: 20px;
+            color: #000000;
+        }
+        .progress-bar-container {
+            background: #e9ecef;
+            height: 30px;
+            border-radius: 15px;
+            overflow: hidden;
+            margin-bottom: 25px;
+        }
+        .progress-bar-fill {
+            background: linear-gradient(90deg, #FE0100 0%, #cc0000 100%);
+            height: 100%;
+            transition: width 0.3s;
+        }
+        .task-cards {
+            display: grid;
+            gap: 15px;
+        }
+        .task-card {
+            background: #ffffff;
+            border-radius: 0.5rem;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            border-left: 4px solid #dc3545;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .task-icon {
+            font-size: 2em;
+            width: 50px;
+            height: 50px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: white;
+            border-radius: 0.5rem;
+        }
+        .task-content {
+            flex: 1;
+        }
+        .task-content h3 {
+            font-size: 1.1em;
+            margin-bottom: 5px;
+            color: #000000;
+        }
+        .task-content p {
+            color: #808080;
+            font-size: 0.9em;
+        }
+        .task-btn {
+            padding: 12px 24px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            font-size: 1em;
+            font-weight: 600;
+            font-family: 'URW Form', Arial, sans-serif;
+            transition: background 0.2s;
+        }
+        .task-btn:hover {
+            background: #FE0100;
+        }
+        .videos-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+        }
+        .video-card {
+            background: #f8f9fa;
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+        .video-thumbnail {
+            width: 100%;
+            height: 160px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 3em;
+        }
+        .video-info {
+            padding: 15px;
+        }
+        .video-info h3 {
+            font-size: 1em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            margin-bottom: 10px;
+            color: #000000;
+        }
+        .video-btn {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 0.5rem;
+            text-align: center;
+            font-size: 1em;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        .video-btn:hover {
+            background: #FE0100;
+        }
+        .quick-links {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .quick-link {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 15px;
+            text-decoration: none;
+            color: #000000;
+            padding: 15px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            transition: all 0.2s;
+        }
+        .quick-link:hover {
+            transform: translateX(5px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+        }
+        .quick-link-icon {
+            width: 80px;
+            height: 80px;
+            background: #ffffff;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2.5em;
+            overflow: hidden;
+            flex-shrink: 0;
+            border: 1px solid #e0e0e0;
+            padding: 8px;
+        }
+        .quick-link-icon img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #ffffff;
+        }
+        .quick-link-content {
+            flex: 1;
+        }
+        .quick-link-text {
+            font-size: 1.1em;
+            font-weight: 600;
+            text-align: left;
+            color: #f2f5fb;
+            margin-bottom: 4px;
+        }
+        .quick-link-description {
+            font-size: 0.9em;
+            color: #c4ccda;
+            text-align: left;
+        }
+        
+        @media (max-width: 768px) {
+            .nav-links { display: none !important; }
+            .top-header {
+                padding: max(10px, env(safe-area-inset-top, 0px)) 14px 10px;
+                flex-wrap: nowrap;
+                gap: 8px;
+            }
+            .logo-section img {
+                height: 42px;
+                margin-bottom: 0;
+                align-self: center;
+            }
+            .dashboard-page-wrap {
+                padding: 12px 14px 20px;
+            }
+            .dashboard-hero-banner {
+                padding: 28px 20px 36px;
+            }
+            .dashboard-hero-banner .hero-title {
+                font-size: 1.75em;
+            }
+            .dashboard-hero-banner .hero-subtitle {
+                font-size: 1em;
+            }
+            .main-content {
+                grid-template-columns: 1fr;
+                margin-top: 0;
+                gap: 16px;
+            }
+            .dashboard-tasks-card {
+                max-height: none;
+                min-height: 0;
+            }
+            .finale-card {
+                min-height: 0 !important;
+                padding: 24px 16px !important;
+            }
+            .dashboard-progress-label {
+                color: var(--text-primary, #f2f5fb) !important;
+            }
+            .dashboard-progress-meta {
+                color: var(--text-muted, #b7c1d3) !important;
+            }
+            .welcome-section h1 {
+                font-size: 2em;
+            }
+            .welcome-section p {
+                font-size: 1em;
+            }
+            .videos-grid {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+            .task-card {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 15px;
+            }
+            .task-btn {
+                width: 100%;
+                text-align: center;
+            }
+            .quick-link {
+                padding: 12px;
+            }
+            .quick-link-icon {
+                width: 60px;
+                height: 60px;
+                font-size: 2em;
+            }
+            .quick-link-text {
+                font-size: 1em;
+            }
+            .quick-link-description {
+                font-size: 0.85em;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .welcome-section h1 {
+                font-size: 1.5em;
+            }
+            .task-card {
+                padding: 15px;
+            }
+        }
+        :root {
+            --bg-base: #0c1017;
+            --bg-panel: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+            --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.03) 40%, rgba(255,255,255,0.1) 74%, rgba(255,255,255,0.02) 100%);
+            --accent-red: #fe0100;
+            --text-primary: #f2f5fb;
+            --text-muted: #9ea8b8;
+            --border-soft: rgba(255,255,255,0.17);
+            --shadow-elev: 0 18px 42px rgba(0,0,0,0.36);
+        }
+        body {
+            background:
+                radial-gradient(circle at 20% 0%, rgba(255,255,255,0.07), transparent 46%),
+                linear-gradient(136deg, #090d14 0%, #111824 56%, #0c121d 100%);
+            color: var(--text-primary);
+        }
+        .construction-banner {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            background: linear-gradient(125deg, rgba(255, 227, 140, 0.2), rgba(255, 184, 40, 0.1));
+            color: #ffe5a3;
+            border-bottom: 1px solid rgba(255, 218, 108, 0.35);
+            backdrop-filter: blur(8px);
+        }
+        .construction-banner-icon {
+            flex-shrink: 0;
+            opacity: 0.95;
+        }
+        .top-header {
+            background: linear-gradient(160deg, #121821 0%, #090d14 100%);
+            border-bottom: 1px solid var(--border-soft);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        .nav-links a, .mobile-nav a { color: #dbe2f0; }
+        .nav-links a:hover {
+            color: #ffffff;
+            border-color: transparent;
+            background: rgba(255,255,255,0.08);
+            box-shadow: none;
+        }
+        .user-dropdown:hover, .back-btn:hover { background: rgba(255,255,255,0.14); }
+        .user-icon {
+            background: linear-gradient(180deg, #ff2726 0%, #cf0000 100%);
+            box-shadow: 0 6px 16px rgba(254,1,0,0.35);
+        }
+        .notification-dropdown, .dropdown-menu {
+            background: #151b28;
+            border: 1px solid var(--border-soft);
+            box-shadow: var(--shadow-elev);
+        }
+        .notification-header {
+            background: linear-gradient(145deg, #1b2230, #121826);
+            border-bottom-color: rgba(255,255,255,0.1);
+        }
+        .notification-header h3, .dropdown-item { color: var(--text-primary); }
+        .notification-item, .dropdown-item {
+            border-bottom-color: rgba(255,255,255,0.08);
+        }
+        .notification-item:hover, .dropdown-item:hover {
+            background: rgba(255,255,255,0.06);
+        }
+        .section, .dashboard-card, .dashboard-tasks-card, .video-card, .task-card, .quick-link {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-soft);
+            box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.12);
+            color: var(--text-primary);
+            position: relative;
+            overflow: hidden;
+        }
+        .section::before, .dashboard-card::before, .dashboard-tasks-card::before, .video-card::before, .task-card::before, .quick-link::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: var(--metal-sheen);
+            pointer-events: none;
+        }
+        .section-title, .section-title-dash, .task-content h3, .video-card h3, .welcome-section h1 {
+            color: var(--text-primary);
+        }
+        .task-content p, .video-card p, .quick-link-description {
+            color: var(--text-muted);
+        }
+        .btn, .task-btn, .video-btn, .dashboard-cta-link {
+            background: linear-gradient(180deg, #ff2624 0%, #d50000 65%, #9e0000 100%);
+            color: #ffffff;
+            border: 1px solid rgba(255,255,255,0.28);
+            box-shadow: 0 10px 22px rgba(254,1,0,0.28), inset 0 1px 0 rgba(255,255,255,0.3);
+        }
+        .btn:hover, .task-btn:hover, .video-btn:hover, .dashboard-cta-link:hover {
+            filter: brightness(1.06);
+            transform: translateY(-1px);
+        }
+        .progress-bar-container {
+            background: rgba(255,255,255,0.14);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .progress-bar-fill {
+            background: linear-gradient(90deg, #ff2f2e 0%, #fe0100 100%);
+        }
+        .task-icon, .quick-link-icon {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        .quick-link-icon img {
+            background: transparent !important;
+        }
+        .quick-link {
+            position: relative;
+            z-index: 0;
+        }
+        .quick-link-icon,
+        .quick-link-content,
+        .quick-link-external {
+            position: relative;
+            z-index: 1;
+        }
+        .quick-link-external {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            color: #fe0100;
+            opacity: 0.95;
+        }
+        .quick-link-external svg {
+            display: block;
+        }
+        .external-links-title {
+            font-size: 0.82rem !important;
+            font-weight: 800 !important;
+            letter-spacing: 0.14em !important;
+            text-transform: uppercase !important;
+            border-bottom: none !important;
+            padding-bottom: 0 !important;
+            margin-bottom: 14px !important;
+        }
+        .finale-card {
+            text-align: center;
+            padding: 48px 36px;
+            min-height: 420px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .finale-inner {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            max-width: 520px;
+            margin: 0 auto;
+        }
+        .finale-logo {
+            height: 76px;
+            width: auto;
+            margin-bottom: 22px;
+            filter: drop-shadow(0 6px 16px rgba(0,0,0,0.45));
+        }
+        .finale-kicker {
+            margin: 0 0 10px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.28em;
+            text-transform: uppercase;
+            color: #fe0100;
+        }
+        .finale-headline {
+            margin: 0 0 18px;
+            font-size: clamp(1.45rem, 4.2vw, 2.1rem);
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-primary);
+            line-height: 1.15;
+        }
+        .finale-divider {
+            width: min(100%, 400px);
+            height: 2px;
+            margin: 0 0 22px;
+            border-radius: 2px;
+            background: linear-gradient(
+                90deg,
+                transparent 0%,
+                rgba(255,255,255,0.08) 22%,
+                rgba(254, 1, 0, 0.95) 50%,
+                rgba(255,255,255,0.08) 78%,
+                transparent 100%
+            );
+        }
+        .finale-message {
+            white-space: pre-wrap;
+            text-align: center;
+            font-size: 1.05em;
+            line-height: 1.7;
+            color: rgba(242, 245, 251, 0.92);
+            margin-bottom: 28px;
+        }
+        .finale-message a {
+            color: #ff6b6b;
+            text-decoration: underline;
+        }
+        .finale-message a:hover {
+            color: #ff9999;
+        }
+        .finale-doc-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 14px 26px;
+            background: linear-gradient(180deg, #ff2624 0%, #d50000 65%, #9e0000 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 12px;
+            font-weight: 600;
+            border: 1px solid rgba(255,255,255,0.3);
+            box-shadow: 0 8px 20px rgba(254,1,0,0.3), inset 0 1px 0 rgba(255,255,255,0.35);
+        }
+    {{ global_theme_css|safe }}
+        /* External links sidebar: fixed columns so icons, titles, and arrows line up */
+        .sidebar-right .quick-links {
+            gap: 10px;
+        }
+        .sidebar-right .quick-link {
+            display: grid !important;
+            grid-template-columns: 52px minmax(0, 1fr) 32px;
+            align-items: center;
+            column-gap: 14px;
+            padding: 12px 14px !important;
+            border-radius: 14px !important;
+            transform: none !important;
+            background: linear-gradient(168deg, rgba(255,255,255,0.11) 0%, rgba(255,255,255,0.04) 55%, rgba(0,0,0,0.12) 100%) !important;
+            border: 1px solid rgba(255,255,255,0.14) !important;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.1) !important;
+        }
+        .sidebar-right .quick-link:hover {
+            transform: none !important;
+            filter: brightness(1.06);
+            border-color: rgba(255,255,255,0.22) !important;
+        }
+        .sidebar-right .quick-link-icon {
+            width: 52px !important;
+            height: 52px !important;
+            min-width: 52px !important;
+            padding: 6px !important;
+            border-radius: 10px !important;
+            box-sizing: border-box;
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
+            background: #ffffff !important;
+            border: 1px solid rgba(0,0,0,0.1) !important;
+        }
+        .sidebar-right .quick-link-content {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: flex-start;
+            text-align: left;
+        }
+        .sidebar-right .quick-link-text {
+            margin-bottom: 0 !important;
+            font-size: 1rem !important;
+            line-height: 1.3;
+        }
+        .sidebar-right .quick-link-description {
+            margin-top: 3px;
+            font-size: 0.78rem !important;
+            line-height: 1.35;
+        }
+        .sidebar-right .quick-link-external {
+            width: 32px !important;
+            height: 32px !important;
+            justify-self: end;
+        }
+        .sidebar-right .external-links-title {
+            margin-bottom: 0 !important;
+            padding-bottom: 0 !important;
+            border-bottom: none !important;
+        }
+        .sidebar-right .external-links-title::after {
+            content: "";
+            display: block;
+            height: 2px;
+            margin-top: 10px;
+            margin-bottom: 14px;
+            border-radius: 1px;
+            background: linear-gradient(90deg, #fe0100 0, #fe0100 52px, rgba(255,255,255,0.2) 52px, rgba(255,255,255,0.2) 100%);
+        }
+        @media (max-width: 768px) {
+            .sidebar-right .quick-link {
+                grid-template-columns: 44px minmax(0, 1fr) 28px;
+                column-gap: 10px;
+                padding: 10px 12px !important;
+            }
+            .sidebar-right .quick-link-icon {
+                width: 44px !important;
+                height: 44px !important;
+                min-width: 44px !important;
+                padding: 5px !important;
+            }
+            .sidebar-right .quick-link-external {
+                width: 28px !important;
+                height: 28px !important;
+            }
+            .sidebar-right .quick-link-external svg {
+                width: 16px;
+                height: 16px;
+            }
+        }
+    </style>
+</head>
+<body class="user-app-shell{% if show_finale and external_links %} dashboard-home-compact{% endif %}">
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+            <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
+        </div>
+        <div class="nav-links">
+            <a href="{{ url_for('dashboard') }}" class="nav-tab-active">Home</a>
+            <a href="{{ url_for('user_tasks') }}">Tasks</a>
+            <a href="{{ url_for('view_documents') }}">Files</a>
+            <a href="{{ url_for('list_training_videos') }}">Videos</a>
+            <a href="{{ url_for('profile') }}">Profile</a>
+        </div>
+        <div class="user-section">
+            <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
+                <svg class="notification-bell-svg" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M12 5a4 4 0 00-4 4v2.3L6.5 17h11L16 11.3V9a4 4 0 00-4-4z"/>
+                    <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M10.5 17a1.5 1.5 0 003 0"/>
+                </svg>
+                {% if pending_count > 0 %}
+                <span class="notification-badge notification-badge-dot" id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;">{{ pending_count }}</span>
+                {% endif %}
+                <div class="notification-dropdown" id="notificationDropdown">
+                    <div class="notification-header">
+                        <h3>Notifications</h3>
+                        <button onclick="markAllAsRead()" style="background: none; border: none; color: #FE0100; cursor: pointer; font-size: 0.85em; padding: 0;">Mark all read</button>
+                    </div>
+                    <div class="notification-list">
+                        {% if notifications %}
+                            {% for notification in notifications %}
+                            <div class="notification-item {% if not notification.is_read %}unread{% endif %}" onclick="handleNotificationClick({{ notification.id }}, '{{ notification.type }}', '{{ notification.url }}', event)">
+                                <div class="notification-title">{{ notification.title }}</div>
+                                <div class="notification-message">{{ notification.message }}</div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="notification-empty">
+                                <p>No new notifications</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="user-dropdown" onclick="toggleUserDropdown()">
+                <div class="user-icon">{{ user_first_name[0].upper() if user_first_name else 'U' }}</div>
+                <span class="user-dropdown-label">{{ user_full_name }}</span>
+                <span class="user-dropdown-caret" aria-hidden="true">▼</span>
+            </div>
+            <div class="dropdown-menu" id="userDropdown">
+                {{ staff_console_dropdown_links }}
+            </div>
+        </div>
+    </div>
+    
+    <div class="construction-banner" role="status">
+        <span class="construction-banner-icon" aria-hidden="true">🔧</span>
+        <span>This app is currently under construction. Some features may change.</span>
+    </div>
+    <div class="dashboard-view">
+    <div class="dashboard-container">
+    <div class="dashboard-page-wrap">
+        <div class="main-content{% if not external_links %} main-content-two-col{% endif %}">
+            {% if show_finale %}
+            <div class="dashboard-tasks-col">
+                <div class="section dashboard-tasks-card finale-card">
+                    <div class="finale-inner">
+                        <img src="{{ url_for('serve_ziebart_logo') }}" alt="" class="finale-logo">
+                        <p class="finale-kicker">Welcome to Ziebart</p>
+                        <h2 class="finale-headline"><span class="finale-head-emoji" aria-hidden="true">🎉</span><span>Message for you</span></h2>
+                        <div class="finale-divider" aria-hidden="true"></div>
+                        <div class="finale-message">{{ finale_message_html|safe }}</div>
+                        {% if finale_document %}
+                        <p style="margin-bottom: 0;">
+                            <a href="{{ url_for('view_document_embed', doc_id=finale_document.id) }}" target="_blank" rel="noopener noreferrer" class="finale-doc-btn"><span aria-hidden="true">📄</span><span>{{ finale_document.name_for_users or finale_document.original_filename }}</span></a>
+                        </p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <div class="dashboard-tasks-col">
+                {% if required_videos or user_tasks or upcoming_tasks %}
+                <div class="section dashboard-tasks-card">
+                    <div class="dashboard-card-header">
+                        <h2 class="section-title-dash">Tasks</h2>
+                        <a href="{{ url_for('user_tasks') }}" class="dashboard-cta-link">Complete items &gt;</a>
+                    </div>
+                    {% if has_new_assigned_work %}
+                    <p class="dashboard-new-work-hint" style="margin: 0 0 12px; color: #b7c1d3; font-size: 0.95em;">You have new assigned items to complete.</p>
+                    {% endif %}
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <div class="progress-bar-container" style="flex: 1; min-width: 0;">
+                            <div class="progress-bar-fill" style="width: {{ progress_percentage }}%;"></div>
+                        </div>
+                        <span class="dashboard-progress-label" style="font-size: 0.9em; font-weight: 600; flex-shrink: 0;">{{ progress_percentage }}%</span>
+                    </div>
+                    <div class="dashboard-progress-meta" style="text-align: center; margin-top: 8px; font-size: 0.85em; flex-shrink: 0;">
+                    {{ completed_tasks }} of {{ total_tasks }} tasks completed
+                </div>
+                {% if upcoming_tasks %}
+                <p class="dashboard-progress-hint">Complete your current step to unlock the next items in order.</p>
+                {% endif %}
+                
+                {% if incomplete_training or user_tasks or upcoming_tasks %}
+                <div class="task-cards">
+                    {% for video in incomplete_training %}
+                    <div class="task-card">
+                        <div class="task-icon">▶️</div>
+                        <div class="task-content">
+                            <h3>{{ video.title }}</h3>
+                            <p>Complete required training video</p>
+                        </div>
+                        <a href="{{ url_for('view_training_video', video_id=video.id) }}" class="task-btn">Start ></a>
+                    </div>
+                    {% endfor %}
+                    {% for task in user_tasks %}
+                    <div class="task-card">
+                        <div class="task-icon">
+                            {% if task.task_type == 'document' %}
+                            ✍️
+                            {% elif task.task_type == 'training' %}
+                            ▶️
+                            {% else %}
+                            📋
+                            {% endif %}
+                        </div>
+                        <div class="task-content">
+                            <h3>{{ task.task_title }}</h3>
+                            <p>{{ task.task_description or 'Complete this task' }}</p>
+                        </div>
+                        {% if task.task_type == 'document' and task.document_id %}
+                        <a href="{{ user_sign_document_url(task.document_id) }}" class="task-btn">Fill &amp; Sign ></a>
+                        {% elif task.task_type == 'training' and task.video_id %}
+                        <a href="{{ url_for('view_training_video', video_id=task.video_id) }}" class="task-btn">Watch Training ></a>
+                        {% else %}
+                        <a href="{{ url_for('user_tasks') }}" class="task-btn">View Task ></a>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                    {% for task in upcoming_tasks %}
+                    <div class="task-card task-card-locked">
+                        <div class="task-icon">&#128274;</div>
+                        <div class="task-content">
+                            <h3>{{ task.task_title }}</h3>
+                            <p>Unlocks after you finish the step above</p>
+                        </div>
+                        <span class="task-btn task-lock-badge">Up next</span>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div style="text-align: center; padding: 40px 20px; color: #28a745;">
+                    <div style="font-size: 3em; margin-bottom: 15px;">✓</div>
+                    <h3 style="font-size: 1.5em; margin-bottom: 10px; color: var(--text-primary, #f2f5fb); font-weight: 800; font-family: 'URW Form', Arial, sans-serif;">All Tasks Completed!</h3>
+                    <p style="color: var(--text-muted, #b7c1d3); font-size: 1.1em;">Great job! You've completed all your onboarding tasks.</p>
+                </div>
+                {% endif %}
+            </div>
+            {% else %}
+            <div class="section dashboard-card">
+                <h2 class="section-title-dash">Tasks</h2>
+                <p style="color: var(--text-muted, #b7c1d3); font-size: 0.95em;">No tasks assigned yet. Check back soon or contact HR.</p>
+            </div>
+            {% endif %}
+            </div>
+            {% endif %}
+        
+            {% if external_links %}
+            <div class="sidebar-right">
+                <div class="section">
+                    <h2 class="section-title-dash external-links-title">External Links</h2>
+                <div class="quick-links">
+                    {% for link in external_links %}
+                    <a href="{{ link.url }}" target="_blank" rel="noopener noreferrer" class="quick-link">
+                        <div class="quick-link-icon">
+                            {% if link.image_filename %}
+                            <img src="{{ url_for('serve_quick_link_image', filename=link.image_filename) }}" alt="{{ link.title }}">
+                            {% elif link.icon and link.icon != '??' %}
+                            {{ link.icon }}
+                            {% elif link.title and ('mobile' in link.title|lower or 'app' in link.title|lower) %}
+                            📱
+                            {% else %}
+                            🔗
+                            {% endif %}
+                        </div>
+                        <div class="quick-link-content">
+                            <div class="quick-link-text">{{ link.title }}</div>
+                            {% if link.description %}
+                            <div class="quick-link-description">{{ link.description }}</div>
+                            {% endif %}
+                        </div>
+                        <span class="quick-link-external" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M14 3h7v7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 14L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M21 14v6a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+            {% endif %}
+        </div>
+    </div>
+    </div>
+    </div>
+    
+    <script>
+        function toggleUserDropdown() {
+            var dropdown = document.getElementById('userDropdown');
+            dropdown.classList.toggle('show');
+        }
+        
+        function toggleNotificationDropdown(event) {
+            event.stopPropagation();
+            var dropdown = document.getElementById('notificationDropdown');
+            dropdown.classList.toggle('show');
+        }
+        
+        function handleNotificationClick(notificationId, notificationType, url, event) {
+            if (event) {
+                event.stopPropagation();
+            }
+            // Mark notification as read
+            fetch('/api/notifications/mark-read', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    notification_type: notificationType,
+                    notification_id: String(notificationId)
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Update badge count immediately
+                    updateNotificationBadge();
+                    // Also remove the notification item from the dropdown
+                    var clickedElement = event ? event.currentTarget : null;
+                    if (clickedElement) {
+                        clickedElement.classList.remove('unread');
+                        // Remove after a short delay to show visual feedback
+                        setTimeout(function() {
+                            clickedElement.remove();
+                            // Check if there are any notifications left
+                            var notificationList = document.querySelector('.notification-list');
+                            if (notificationList && notificationList.querySelectorAll('.notification-item').length === 0) {
+                                notificationList.innerHTML = '<div class="notification-empty"><p>No new notifications</p></div>';
+                            }
+                        }, 100);
+                    }
+                }
+                // Navigate to the notification URL (only if it's not the same page)
+                if (url && url !== window.location.pathname) {
+                    window.location.href = url;
+                } else {
+                    // If same page, just reload to refresh the notification count
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 200);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                // Still navigate even if marking as read fails
+                if (url && url !== window.location.pathname) {
+                    window.location.href = url;
+                } else {
+                    window.location.reload();
+                }
+            });
+        }
+        
+        function markAllAsRead() {
+            fetch('/api/notifications/mark-all-read', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Update badge count immediately
+                    updateNotificationBadge();
+                    // Update the notification list
+                    var notificationList = document.querySelector('.notification-list');
+                    if (notificationList) {
+                        notificationList.innerHTML = '<div class="notification-empty"><p>No new notifications</p></div>';
+                    }
+                    // Remove unread styling from any remaining items
+                    var unreadItems = document.querySelectorAll('.notification-item.unread');
+                    unreadItems.forEach(function(item) {
+                        item.classList.remove('unread');
+                    });
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+        
+        function updateNotificationBadge() {
+            fetch('/api/notifications/count')
+            .then(response => response.json())
+            .then(data => {
+                var badge = document.getElementById('notificationBadge');
+                if (data.count > 0) {
+                    if (badge) {
+                        badge.textContent = data.count;
+                        badge.style.display = 'flex';
+                    } else {
+                        // Create badge if it doesn't exist
+                        var icon = document.querySelector('.notification-icon');
+                        if (icon) {
+                            var newBadge = document.createElement('span');
+                            newBadge.id = 'notificationBadge';
+                            newBadge.className = 'notification-badge notification-badge-dot';
+                            newBadge.textContent = data.count;
+                            newBadge.style.cssText = 'position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;';
+                            icon.appendChild(newBadge);
+                        }
+                    }
+                } else {
+                    if (badge) {
+                        badge.style.display = 'none';
+                        badge.textContent = '0';
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+        
+        window.onclick = function(event) {
+            if (!event.target.closest('.user-dropdown')) {
+                var dropdown = document.getElementById('userDropdown');
+                if (dropdown.classList.contains('show')) {
+                    dropdown.classList.remove('show');
+                }
+            }
+            if (!event.target.closest('.notification-icon')) {
+                var notifDropdown = document.getElementById('notificationDropdown');
+                if (notifDropdown && notifDropdown.classList.contains('show')) {
+                    notifDropdown.classList.remove('show');
+                }
+            }
+        }
+    </script>
+    {{ user_mobile_bottom_nav }}
+</body>
+</html>
+

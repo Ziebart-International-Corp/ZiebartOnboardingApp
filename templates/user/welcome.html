@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Welcome - Ziebart Onboarding</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            --bg-base: #0a0d12;
+            --bg-panel: linear-gradient(155deg, #1a1f2b 0%, #0f141d 62%, #090d14 100%);
+            --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.03) 42%, rgba(255,255,255,0.11) 74%, rgba(255,255,255,0.02) 100%);
+            --accent-red: #fe0100;
+            --accent-red-hover: #d20000;
+            --text-primary: #f4f7fc;
+            --text-muted: #b5becf;
+            --border-soft: rgba(255,255,255,0.2);
+            --shadow-elev: 0 20px 55px rgba(0,0,0,0.5);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background:
+                radial-gradient(circle at 22% 15%, rgba(255,255,255,0.08) 0%, transparent 48%),
+                linear-gradient(135deg, #0a0d12 0%, #111722 55%, #090d14 100%);
+            color: var(--text-primary);
+            position: relative;
+            overflow: hidden;
+            padding: 24px;
+        }
+        body::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background:
+                repeating-linear-gradient(-28deg, rgba(255,255,255,0.02) 0 10px, transparent 10px 34px),
+                linear-gradient(145deg, rgba(254,1,0,0.24) 0%, transparent 42%);
+            pointer-events: none;
+        }
+        .welcome-card {
+            position: relative;
+            z-index: 1;
+            max-width: 760px;
+            width: 92%;
+            padding: 56px 52px;
+            border-radius: 16px;
+            border: 1px solid var(--border-soft);
+            background: var(--bg-panel);
+            box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.18);
+            text-align: center;
+            overflow: hidden;
+        }
+        .welcome-card::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: var(--metal-sheen);
+            pointer-events: none;
+        }
+        .welcome-card h1 {
+            position: relative;
+            z-index: 1;
+            font-size: 2em;
+            font-weight: 800;
+            margin-bottom: 24px;
+            color: var(--text-primary);
+            line-height: 1.35;
+            letter-spacing: 0.01em;
+        }
+        .welcome-card p,
+        .welcome-card .welcome-body {
+            position: relative;
+            z-index: 1;
+            font-size: 1.1em;
+            line-height: 1.7;
+            color: var(--text-muted);
+            margin-bottom: 34px;
+        }
+        .welcome-card .btn {
+            position: relative;
+            z-index: 1;
+            display: inline-block;
+            padding: 13px 34px;
+            background: linear-gradient(180deg, #ff2928 0%, var(--accent-red) 62%, #b30000 100%);
+            color: #fff;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 1.02em;
+            border: 1px solid rgba(255,255,255,0.28);
+            cursor: pointer;
+            box-shadow: 0 8px 18px rgba(254,1,0,0.28), inset 0 1px 0 rgba(255,255,255,0.35);
+            transition: transform 0.15s, box-shadow 0.2s, background 0.2s;
+        }
+        .welcome-card .btn:hover {
+            background: linear-gradient(180deg, #ff2d2c 0%, var(--accent-red-hover) 66%, #980000 100%);
+            color: #fff;
+            box-shadow: 0 10px 24px rgba(254,1,0,0.35), inset 0 1px 0 rgba(255,255,255,0.4);
+            transform: translateY(-1px);
+        }
+        .welcome-card p a,
+        .welcome-card .welcome-body a {
+            color: #ff6b6b;
+            text-decoration: underline;
+        }
+        .welcome-card p a:hover,
+        .welcome-card .welcome-body a:hover {
+            color: #ff9999;
+        }
+        .welcome-card .welcome-logo {
+            position: relative;
+            z-index: 1;
+            display: block;
+            margin: 0 auto 26px;
+            height: 80px;
+            width: auto;
+            object-fit: contain;
+            filter: drop-shadow(0 4px 12px rgba(0,0,0,0.35));
+        }
+        @media (max-width: 768px) {
+            .welcome-card {
+                padding: 42px 28px;
+                width: 96%;
+            }
+            .welcome-card h1 { font-size: 1.6em; }
+            .welcome-card p,
+            .welcome-card .welcome-body { font-size: 1em; }
+        }
+    {{ global_theme_css|safe }}
+        /* Manage Documents: keep Upload panel dark like the rest of admin pages */
+        .collapsible-upload-panel .upload-form {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+            border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            color: #f2f5fb !important;
+        }
+        .collapsible-upload-panel .upload-form label,
+        .collapsible-upload-panel .upload-form small,
+        .collapsible-upload-panel .upload-form .checkbox-group label {
+            color: #b7c1d3 !important;
+        }
+        .collapsible-upload-panel .upload-form input[type="text"],
+        .collapsible-upload-panel .upload-form input[type="file"],
+        .collapsible-upload-panel .upload-form textarea,
+        .collapsible-upload-panel .upload-form select {
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255, 255, 255, 0.24) !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="welcome-card">
+        <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart" class="welcome-logo">
+        <h1>{{ welcome_headline }}</h1>
+        <div class="welcome-body">{{ welcome_body_html|safe }}</div>
+        <a href="{{ next_url }}" class="btn">Continue</a>
+    </div>
+</body>
+</html>
+

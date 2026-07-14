@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ new_hire.first_name }} {{ new_hire.last_name }} - Checklist</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #FFFFFF;
+            color: #000000;
+        }
+        p, span, div, td, th, label, input, textarea, select, button, a {
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+            position: relative;
+            z-index: 101;
+            height: 100%;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn:hover {
+            background: #FE0100;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-success:hover {
+            background: #218838;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .section {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 2rem;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .section-title {
+            font-size: 1.6em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            margin-bottom: 20px;
+            color: #000000;
+        }
+        .user-header {
+            background: #FE0100;
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        .user-header h1 {
+            font-size: 2em;
+            margin-bottom: 5px;
+        }
+        .checklist-item {
+            background: #f8f9fa;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-radius: 0.5rem;
+            border-left: 4px solid #007bff;
+            display: flex;
+            align-items: flex-start;
+            gap: 15px;
+            transition: all 0.3s;
+        }
+        .checklist-item.completed {
+            background: #d4edda;
+            border-left-color: #28a745;
+        }
+        .checkbox-container {
+            margin-top: 5px;
+        }
+        .checkbox-container input[type="checkbox"] {
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            accent-color: #28a745;
+        }
+        .item-content {
+            flex: 1;
+        }
+        .item-content h3 {
+            margin-bottom: 8px;
+            color: #000000;
+            font-size: 1.1em;
+        }
+        .item-content.completed h3 {
+            text-decoration: line-through;
+            color: #6c757d;
+        }
+        .item-meta {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            color: #808080;
+            font-size: 0.9em;
+        }
+        .progress-bar {
+            background: #e9ecef;
+            height: 30px;
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 20px 0;
+            position: relative;
+        }
+        .progress-fill {
+            background: linear-gradient(90deg, #28a745 0%, #20c997 100%);
+            height: 100%;
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: rgba(255,255,255,0.2);
+            padding: 15px;
+            border-radius: 0.5rem;
+            text-align: center;
+        }
+        .stat-card .number {
+            font-size: 2em;
+            font-weight: bold;
+            color: white;
+        }
+        .stat-card .label {
+            color: rgba(255,255,255,0.9);
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text">Ziebart Onboarding</span>
+        </div>
+        <div class="header-actions"><a href="{{ url_for('view_user_checklists') }}" class="back-btn">← Back to User List</a></div>
+    </div>
+    
+    <div class="container">
+        <div class="user-header">
+            <h1>{{ new_hire.first_name }} {{ new_hire.last_name }}</h1>
+            <p style="opacity: 0.9;">{{ new_hire.username }}</p>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">Onboarding Checklist</h2>
+            
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="number" id="totalTasks">{{ checklist_items|length }}</div>
+                    <div class="label">Total Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="completedTasks">0</div>
+                    <div class="label">Completed</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number" id="remainingTasks">{{ checklist_items|length }}</div>
+                    <div class="label">Remaining</div>
+                </div>
+            </div>
+            
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <div class="progress-bar" style="flex: 1; min-width: 0;">
+                    <div class="progress-fill" id="progressFill" style="width: 0%;"></div>
+                </div>
+                <span id="progressPct" style="font-size: 0.9em; font-weight: 600; flex-shrink: 0;">0%</span>
+            </div>
+            
+            <form id="checklistForm" method="POST" action="{{ url_for('update_user_checklist', username=username) }}">
+                {% if checklist_items %}
+                    {% for item in checklist_items %}
+                    {% set completion = user_completions.get(item.id) %}
+                    <div class="checklist-item {% if completion and completion.is_completed %}completed{% endif %}" id="item-{{ item.id }}">
+                        <div class="checkbox-container">
+                            <input type="checkbox" 
+                                   name="completed_items" 
+                                   value="{{ item.id }}" 
+                                   id="check-{{ item.id }}"
+                                   {% if completion and completion.is_completed %}checked{% endif %}
+                                   onchange="updateProgress()">
+                        </div>
+                        <div class="item-content {% if completion and completion.is_completed %}completed{% endif %}" id="content-{{ item.id }}">
+                            <h3>{{ item.task_name }}</h3>
+                            {% if item.description %}
+                            <p style="color: #666; margin-top: 5px;">{{ item.description }}</p>
+                            {% endif %}
+                            <div class="item-meta">
+                                {% if item.assigned_to %}
+                                <span>Assigned to: {{ item.assigned_to }}</span>
+                                {% endif %}
+                                {% if completion and completion.completed_at %}
+                                <span>Completed: {{ completion.completed_at.strftime('%B %d, %Y') }}</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                    <button type="submit" class="btn btn-success" style="margin-top: 20px;">💾 Save Checklist Status</button>
+                    <button type="button" class="btn" style="margin-top: 20px; margin-left: 10px; background: #17a2b8;" onclick="openFinaleModal()">📩 Send Finale Message</button>
+                {% else %}
+                    <p style="color: #666;">No checklist items available. <a href="{{ url_for('manage_checklist') }}">Add some tasks</a> to get started.</p>
+                    <button type="button" class="btn" style="margin-top: 20px; background: #17a2b8;" onclick="openFinaleModal()">📩 Send Finale Message</button>
+                {% endif %}
+            </form>
+        </div>
+    </div>
+
+    <div id="finaleModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: #fff; border-radius: 12px; padding: 24px; max-width: 500px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.2);">
+            <h3 style="margin-bottom: 16px;">Send Finale Message</h3>
+            <p style="color: #666; font-size: 0.9em; margin-bottom: 16px;">This message will appear in the center of the user's dashboard the next time they log in. You can optionally attach a document.</p>
+            <form method="POST" action="{{ url_for('send_finale_message', username=username) }}">
+                <div style="margin-bottom: 16px;">
+                    <label style="display: block; font-weight: 600; margin-bottom: 6px;">Message</label>
+                    <textarea name="finale_message" id="finaleMessageText" rows="4" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-family: inherit;" placeholder="e.g. Congratulations on completing onboarding! ..." required>{{ default_finale_message }}</textarea>
+                </div>
+                <div style="margin-bottom: 16px;">
+                    <label style="display: block; font-weight: 600; margin-bottom: 6px;">Attach document (optional)</label>
+                    <select name="finale_document_id" id="finaleDocumentSelect" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px;">
+                        <option value="">— None —</option>
+                        {% for doc in documents %}
+                        <option value="{{ doc.id }}" {% if default_finale_document_id and doc.id == default_finale_document_id|int %}selected{% endif %}>{{ doc.name_for_users or doc.original_filename }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div style="margin-bottom: 16px;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" name="save_as_default" value="1" style="width: 18px; height: 18px;">
+                        <span>Save this message as default for future finale messages</span>
+                    </label>
+                </div>
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button type="button" class="btn btn-secondary" style="background: #6c757d; color: white;" onclick="closeFinaleModal()">Cancel</button>
+                    <button type="submit" class="btn btn-success">Send Message</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <script>
+        function openFinaleModal() {
+            document.getElementById('finaleModal').style.display = 'flex';
+        }
+        function closeFinaleModal() {
+            document.getElementById('finaleModal').style.display = 'none';
+        }
+    </script>
+    
+    <script>
+        function updateProgress() {
+            var checkboxes = document.querySelectorAll('input[type="checkbox"][name="completed_items"]');
+            var total = checkboxes.length;
+            var completed = 0;
+            
+            checkboxes.forEach(function(checkbox) {
+                if (checkbox.checked) {
+                    completed++;
+                    var itemId = checkbox.value;
+                    var item = document.getElementById('item-' + itemId);
+                    var content = document.getElementById('content-' + itemId);
+                    if (item && content) {
+                        item.classList.add('completed');
+                        content.classList.add('completed');
+                    }
+                } else {
+                    var itemId = checkbox.value;
+                    var item = document.getElementById('item-' + itemId);
+                    var content = document.getElementById('content-' + itemId);
+                    if (item && content) {
+                        item.classList.remove('completed');
+                        content.classList.remove('completed');
+                    }
+                }
+            });
+            
+            var percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+            document.getElementById('progressFill').style.width = percentage + '%';
+            var pctEl = document.getElementById('progressPct');
+            if (pctEl) pctEl.textContent = percentage + '%';
+            document.getElementById('completedTasks').textContent = completed;
+            document.getElementById('remainingTasks').textContent = total - completed;
+        }
+        
+        // Initialize progress on page load
+        window.onload = function() {
+            updateProgress();
+        };
+    </script>
+</body>
+</html>
+

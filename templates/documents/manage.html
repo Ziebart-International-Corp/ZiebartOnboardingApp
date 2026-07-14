@@ -1,0 +1,1050 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Manage Documents - Onboarding App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .admin-panel {
+            background: white;
+            padding: 25px;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            overflow: visible;
+        }
+        .admin-panel h2 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            color: #000000;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-danger {
+            background: #FE0100;
+        }
+        .btn-primary {
+            background: #007bff;
+        }
+        .collapsible-upload-panel .collapsible-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            padding: 0;
+            border: none;
+            background: none;
+            cursor: pointer;
+            text-align: left;
+            font-family: inherit;
+        }
+        .collapsible-upload-panel .collapsible-chevron {
+            font-size: 0.75em;
+            transition: transform 0.2s ease;
+            color: #333;
+        }
+        .collapsible-upload-panel .collapsible-header[aria-expanded="false"] .collapsible-chevron {
+            transform: rotate(-90deg);
+        }
+        .collapsible-upload-panel .collapsible-body {
+            overflow: hidden;
+        }
+        .collapsible-upload-panel .collapsible-body.collapsed {
+            display: none;
+        }
+        .upload-form {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 0.5rem;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .form-group input[type="file"],
+        .form-group input[type="text"],
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            font-size: 14px;
+        }
+        .form-group textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+        .form-group input[type="checkbox"] {
+            width: auto;
+            margin-right: 10px;
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+        }
+        table {
+            width: 100%;
+            background: white;
+            border-radius: 0.5rem;
+            overflow: visible;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+            vertical-align: middle;
+        }
+        td {
+            position: relative;
+        }
+        th {
+            background: #f8f9fa;
+            font-weight: bold;
+        }
+        .badge {
+            padding: 5px 10px;
+            border-radius: 0.35rem;
+            font-size: 0.85em;
+            font-weight: 500;
+        }
+        .badge-visible {
+            background: #5a6268;
+            color: white;
+        }
+        .badge-hidden {
+            background: #868e96;
+            color: white;
+        }
+        .store-cell { position: relative; }
+        .store-dropdown { position: relative; }
+        .store-dropdown-btn {
+            padding: 6px 12px;
+            background: #5a6268;
+            color: white;
+            border: none;
+            border-radius: 0.35rem;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+        .store-dropdown-btn:hover {
+            background: #495057;
+            color: white;
+        }
+        .store-dropdown-panel {
+            position: absolute;
+            left: 0;
+            top: 100%;
+            margin-top: 4px;
+            background: white;
+            border: 1px solid #ccc;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            padding: 12px;
+            min-width: 220px;
+            max-height: 320px;
+            overflow-y: auto;
+            z-index: 1000;
+        }
+        .store-check-row { display: block; margin: 6px 0; font-size: 0.9em; cursor: pointer; }
+        .store-check-row input { margin-right: 8px; }
+        .store-form .btn-sm { padding: 6px 12px; font-size: 0.85em; }
+        .action-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 0.35rem;
+            cursor: pointer;
+            font-size: 0.85em;
+            text-decoration: none;
+            display: inline-block;
+            margin: 2px 3px;
+            white-space: nowrap;
+            background: #5a6268;
+            color: white;
+            font-weight: 500;
+        }
+        .action-btn:hover {
+            background: #495057;
+            color: white;
+        }
+        .actions-group {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 5px;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+        }
+        .actions-primary {
+            display: flex;
+            gap: 5px;
+            flex-wrap: nowrap;
+            flex-shrink: 0;
+        }
+        .actions-secondary {
+            position: relative;
+            display: inline-block;
+            flex-shrink: 0;
+            margin-left: auto;
+        }
+        .actions-menu-btn {
+            padding: 6px 12px;
+            background: #5a6268;
+            color: white;
+            border: none;
+            border-radius: 0.35rem;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+        }
+        .actions-menu-btn:hover {
+            background: #495057;
+        }
+        .actions-dropdown {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: white;
+            min-width: 180px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-radius: 0.5rem;
+            margin-top: 5px;
+            z-index: 1000;
+            border: 1px solid #ddd;
+        }
+        .actions-dropdown.show {
+            display: block;
+        }
+        .actions-dropdown.show-up {
+            top: auto;
+            bottom: 100%;
+            margin-top: 0;
+            margin-bottom: 5px;
+        }
+        .actions-dropdown-item {
+            padding: 10px 15px;
+            color: #000000;
+            text-decoration: none;
+            display: block;
+            transition: background 0.2s;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 0.9em;
+        }
+        .actions-dropdown-item:last-child {
+            border-bottom: none;
+        }
+        .actions-dropdown-item:hover {
+            background: #f5f5f5;
+        }
+        .actions-dropdown-item.danger {
+            color: #FE0100;
+        }
+        .actions-dropdown-item.danger:hover {
+            background: #f8d7da;
+        }
+        .signature-status {
+            font-size: 0.85em;
+        }
+        .signature-status-badge {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 0.35rem;
+            font-size: 0.85em;
+            font-weight: 500;
+            background: #5a6268;
+            color: white;
+            margin-top: 2px;
+        }
+        .signature-status-signed {
+            font-size: 0.75em;
+            color: #6c757d;
+            margin-top: 4px;
+        }
+        .file-size {
+            color: #808080;
+            font-size: 0.9em;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 10000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.7);
+            overflow: auto;
+        }
+        .modal.show {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-content {
+            background-color: white;
+            margin: auto;
+            padding: 0;
+            border: none;
+            border-radius: 0.5rem;
+            width: 90%;
+            max-width: 1600px;
+            max-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #f8f9fa;
+            border-radius: 8px 8px 0 0;
+        }
+        .modal-header h2 {
+            margin: 0;
+            color: #000000;
+        }
+        .close-modal {
+            color: #aaa;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .close-modal:hover {
+            color: #000;
+        }
+        .modal-body {
+            padding: 0;
+            overflow: auto;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #525252;
+        }
+        .modal-body iframe {
+            width: 100%;
+            height: 70vh;
+            border: none;
+        }
+        .modal-body img {
+            max-width: 100%;
+            max-height: 70vh;
+            object-fit: contain;
+        }
+        .modal-body .document-viewer {
+            width: 100%;
+            height: 70vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+        
+        /* Mobile Responsive Styles */
+        @media (max-width: 768px) {
+            .header {
+                padding: 12px 15px;
+                flex-wrap: wrap;
+            }
+            .header-content h1 {
+                font-size: 1.2em;
+            }
+            .back-btn {
+                font-size: 0.85em;
+                padding: 6px 12px;
+            }
+            .container {
+                padding: 15px;
+            }
+            .admin-panel {
+                padding: 15px;
+            }
+            .admin-panel h2 {
+                font-size: 1.3em;
+            }
+            .upload-form {
+                padding: 15px;
+            }
+            .form-group input[type="text"],
+            .form-group textarea,
+            .form-group input[type="file"] {
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px;
+            }
+            table {
+                display: block;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                font-size: 0.85em;
+            }
+            th, td {
+                padding: 10px 8px;
+                white-space: nowrap;
+            }
+            .actions-group {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .actions-primary {
+                flex-direction: column;
+                width: 100%;
+            }
+            .actions-primary .action-btn {
+                width: 100%;
+                margin: 5px 0;
+                min-height: 44px;
+            }
+            .actions-secondary {
+                width: 100%;
+                margin-left: 0;
+                margin-top: 10px;
+            }
+            .actions-menu-btn {
+                width: 100%;
+                min-height: 44px;
+            }
+            .modal-content {
+                width: 95%;
+                max-height: 95vh;
+            }
+            .modal-body iframe {
+                height: 60vh !important;
+            }
+            .btn {
+                min-height: 44px;
+                padding: 12px 20px;
+                font-size: 1em;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .header-content h1 {
+                font-size: 1em;
+            }
+            .admin-panel {
+                padding: 12px;
+            }
+            .admin-panel h2 {
+                font-size: 1.2em;
+            }
+            th, td {
+                padding: 8px 6px;
+                font-size: 0.8em;
+            }
+            .modal-content {
+                width: 100%;
+                max-height: 100vh;
+                border-radius: 0;
+            }
+            .modal-body iframe {
+                height: 50vh !important;
+            }
+        }
+    {{ global_theme_css|safe }}
+        /* Manage Documents page-specific override: dark upload section */
+        .collapsible-upload-panel .upload-form {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+            border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            color: #f2f5fb !important;
+        }
+        .collapsible-upload-panel .upload-form label,
+        .collapsible-upload-panel .upload-form small,
+        .collapsible-upload-panel .upload-form .checkbox-group label {
+            color: #b7c1d3 !important;
+        }
+        .collapsible-upload-panel .upload-form input[type="text"],
+        .collapsible-upload-panel .upload-form input[type="file"],
+        .collapsible-upload-panel .upload-form textarea,
+        .collapsible-upload-panel .upload-form select {
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255, 255, 255, 0.24) !important;
+        }
+        .collapsible-upload-panel .upload-form select option,
+        .collapsible-upload-panel .upload-form select optgroup {
+            background: #1a202c !important;
+            color: #f2f5fb !important;
+        }
+        .actions-dropdown {
+            background: #151b28 !important;
+            border: 1px solid rgba(255, 255, 255, 0.2) !important;
+        }
+        .actions-dropdown-item {
+            color: #f2f5fb !important;
+            border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+        }
+        .actions-dropdown-item:hover {
+            background: rgba(255, 255, 255, 0.09) !important;
+            color: #ffffff !important;
+        }
+        .actions-dropdown-item.danger {
+            color: #ffd7d7 !important;
+        }
+        .actions-dropdown-item.danger:hover {
+            background: rgba(254, 1, 0, 0.35) !important;
+            color: #ffffff !important;
+        }
+        .store-dropdown-panel {
+            background: #151b28 !important;
+            border: 1px solid rgba(255, 255, 255, 0.2) !important;
+            color: #f2f5fb !important;
+        }
+        .store-check-row {
+            color: #f2f5fb !important;
+        }
+        .store-check-row:hover {
+            background: rgba(255, 255, 255, 0.06) !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>📄 Manage Documents</h1>
+        </div>
+        <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+            <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+        {% if not is_manager_view and orphaned_document_task_count > 0 %}
+        <div class="admin-panel" style="margin-bottom: 16px; padding: 14px 18px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 0.5rem; color: #664d03;">
+            <strong>{{ orphaned_document_task_count }}</strong> leftover &ldquo;Sign Document&rdquo; task(s) are still on users&rsquo; Tasks pages from forms deleted before a recent fix.
+            <form method="POST" action="{{ url_for('cleanup_orphaned_document_tasks_route') }}" style="display: inline-block; margin-left: 12px;"
+                  onsubmit="return confirm('Remove {{ orphaned_document_task_count }} orphaned task(s)? Users will no longer see these on their Tasks page.');">
+                <button type="submit" class="btn" style="background: #856404; color: #fff; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer;">Clean up orphaned tasks</button>
+            </form>
+        </div>
+        {% endif %}
+        {% if not is_manager_view %}
+        <div class="admin-panel collapsible-upload-panel">
+            <button type="button" class="collapsible-header" id="upload-section-toggle" aria-expanded="true" aria-controls="upload-form-body">
+                <span class="collapsible-chevron" aria-hidden="true">▼</span>
+                <h2 style="margin: 0; display: inline;">Upload New Document</h2>
+            </button>
+            <div class="collapsible-body" id="upload-form-body">
+            <form method="POST" action="{{ url_for('upload_document') }}" enctype="multipart/form-data" class="upload-form">
+                <div class="form-group">
+                    <label for="file">Select File:</label>
+                    <input type="file" name="file" id="file" required>
+                    <small style="color: #666;">Allowed: PDF, DOC, DOCX, XLS, XLSX, TXT, JPG, PNG, GIF (Max 50MB)</small>
+                </div>
+                <div class="form-group">
+                    <label for="display_name">Name (visible to users):</label>
+                    <input type="text" name="display_name" id="display_name" placeholder="Leave blank to use file name" maxlength="255" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem;">
+                    <small style="color: #666;">Optional. This is the title users see (e.g. "Employee Handbook"). If blank, the file name is used.</small>
+                </div>
+                <div class="form-group">
+                    <label for="description">Description (optional):</label>
+                    <textarea name="description" id="description" placeholder="Enter document description..."></textarea>
+                </div>
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" name="is_visible" id="is_visible" value="1">
+                        <label for="is_visible">Show in document library for users</label>
+                    </div>
+                    <small style="color: #666; display: block; margin-top: 6px;">Optional browse list on Files for users who are <strong>not</strong> assigned. Use <strong>Assign to Users</strong> when someone must sign. Assigned users always see the document on Files and Tasks.</small>
+                </div>
+                <div class="form-group">
+                    <label for="store_id">Library available at</label>
+                    <select name="store_id" id="store_id" style="width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 0.5rem;">
+                        <option value="">All stores</option>
+                        {% for store in stores %}
+                        <option value="{{ store.id }}">{{ store.name }} ({{ store.code }})</option>
+                        {% endfor %}
+                    </select>
+                    <small style="color: #666;">Only applies when &ldquo;Show in document library&rdquo; is checked. Assigned users are not limited by this setting.</small>
+                </div>
+                <button type="submit" class="btn btn-success">Upload Document</button>
+            </form>
+            </div>
+        </div>
+        {% endif %}
+        <div class="admin-panel">
+            <h2>{% if is_manager_view %}Forms for your location (view only){% else %}Uploaded Documents{% endif %}</h2>
+            {% if not is_manager_view %}
+            <p style="color: #b7c1d3; font-size: 0.9em; margin-bottom: 12px; max-width: 720px;"><strong>Assign to Users</strong> = required signing (Files + Tasks). <strong>Library</strong> = optional extra listing on Files for users who were not assigned.</p>
+            {% endif %}
+            {% if documents %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Filename</th>
+                        <th>Description</th>
+                        <th>Size</th>
+                        {% if not is_manager_view %}
+                        <th>Library</th>
+                        <th>Stores (library)</th>
+                        {% endif %}
+                        <th>Signature Status</th>
+                        {% if not is_manager_view %}
+                        <th>Uploaded By</th>
+                        {% endif %}
+                        <th>Uploaded</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for doc in documents %}
+                    <tr>
+                        <td><strong>{{ doc.display_name or doc.original_filename }}</strong></td>
+                        <td>{{ doc.description or '-' }}</td>
+                        <td class="file-size">
+                            {% if doc.file_size %}
+                                {% if doc.file_size < 1024 %}
+                                    {{ doc.file_size }} B
+                                {% elif doc.file_size < 1048576 %}
+                                    {{ "%.1f"|format(doc.file_size / 1024) }} KB
+                                {% else %}
+                                    {{ "%.1f"|format(doc.file_size / 1048576) }} MB
+                                {% endif %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        {% if not is_manager_view %}
+                        <td>
+                            <form method="POST" action="{{ url_for('toggle_document_visibility') }}" class="visibility-toggle-form" data-doc-id="{{ doc.id }}" style="display: inline;">
+                                <input type="hidden" name="doc_id" value="{{ doc.id }}">
+                                <button type="submit" class="badge badge-{{ 'visible' if doc.is_visible else 'hidden' }}" style="border: none; cursor: pointer; font-size: inherit; padding: 5px 10px; border-radius: 0.35rem; font-weight: 500;" title="{{ 'Click to remove from the optional document library (assigned users are not affected)' if doc.is_visible else 'Click to show in the optional document library for stores listed in Stores (library)' }}">
+                                    {{ 'In library' if doc.is_visible else 'Not in library' }}
+                                </button>
+                            </form>
+                        </td>
+                        <td class="store-cell">
+                            <div class="store-dropdown">
+                                <button type="button" class="store-dropdown-btn" onclick="toggleStoreDropdown({{ doc.id }})" title="Which stores see this form in the optional library (does not affect assigned users)">
+                                    <span class="store-dropdown-label" id="store-label-{{ doc.id }}">{% if not doc.store_ids %}All stores{% else %}{{ doc.store_ids|length }} store(s){% endif %}</span> ▾
+                                </button>
+                                <div class="store-dropdown-panel" id="store-panel-{{ doc.id }}" style="display: none;">
+                                    <form method="POST" action="{{ url_for('document_update_stores', doc_id=doc.id) }}" class="store-form store-update-form" data-doc-id="{{ doc.id }}">
+                                        <label class="store-check-row"><input type="checkbox" name="all" value="1" {% if not doc.store_ids %}checked{% endif %} onchange="toggleAllStores({{ doc.id }})"> <strong>All stores</strong></label>
+                                        {% for store in stores %}
+                                        <label class="store-check-row"><input type="checkbox" name="store_ids" value="{{ store.id }}" class="store-cb-{{ doc.id }}" {% if store.id in (doc.store_ids|map(attribute='id')|list) %}checked{% endif %}> {{ store.name }} ({{ store.code }})</label>
+                                        {% endfor %}
+                                        <button type="submit" class="btn btn-primary btn-sm" style="margin-top: 8px;">Save</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </td>
+                        {% endif %}
+                        <td class="signature-status">
+                            {% if doc.configured_fields_count > 0 %}
+                                <div class="signature-status-badge">
+                                    {{ doc.configured_fields_count }} field(s)
+                                    {% if doc.typed_fields_count %}({{ doc.typed_fields_count }} typed{% if doc.signature_fields_count %}, {{ doc.signature_fields_count }} sig{% endif %}){% elif doc.signature_fields_count %}({{ doc.signature_fields_count }} sig){% endif %}
+                                </div>
+                                {% if doc.acro_widget_count > 0 and doc.acro_widget_count != doc.configured_fields_count %}
+                                <div style="font-size: 0.8em; color: #ffc107; margin-top: 4px;" title="PDF has more built-in fields than configured — open Set Signature Fields and Re-import from PDF">
+                                    PDF has {{ doc.acro_widget_count }} AcroForm field(s)
+                                </div>
+                                {% endif %}
+                                <div class="signature-status-signed">
+                                    {{ doc.signed_users_count }} user(s) signed
+                                </div>
+                            {% elif doc.acro_widget_count > 0 %}
+                                <div class="signature-status-badge" style="background: #ffc107; color: #000;">
+                                    {{ doc.acro_widget_count }} PDF field(s) not imported
+                                </div>
+                                <div style="font-size: 0.8em; margin-top: 4px;">→ Set Signature Fields → Import</div>
+                            {% else %}
+                                <span style="color: #999;">-</span>
+                            {% endif %}
+                        </td>
+                        {% if not is_manager_view %}
+                        <td>{{ doc.uploaded_by }}</td>
+                        {% endif %}
+                        <td>{{ doc.created_at.strftime('%Y-%m-%d %H:%M') if doc.created_at else '-' }}</td>
+                        <td>
+                            <div class="actions-group">
+                                <div class="actions-primary">
+                                    <button type="button" onclick="openDocumentModal({{ doc.id }}, '{{ doc.original_filename }}', '{{ doc.file_type or '' }}')" class="action-btn" title="View Document">👁️ View</button>
+                                    <a href="{{ url_for('download_document', doc_id=doc.id) }}" class="action-btn" title="Download Document">⬇️ Download</a>
+                                    {% if not is_manager_view %}
+                                    <a href="{{ url_for('set_signature_fields', doc_id=doc.id) }}" class="action-btn" title="Set Signature Fields">✍️ Signatures</a>
+                                </div>
+                                <div class="actions-secondary">
+                                    <button class="actions-menu-btn" onclick="toggleActionsMenu({{ doc.id }})" title="More Options">⋮</button>
+                                    <div class="actions-dropdown" id="menu-{{ doc.id }}">
+                                        {% if doc.signature_fields_count > 0 and doc.signed_users_count > 0 %}
+                                        <a href="{{ url_for('view_signed_documents', doc_id=doc.id) }}" class="actions-dropdown-item">
+                                            📥 Download Signed Copies
+                                        </a>
+                                    {% endif %}
+                                    <a href="{{ url_for('assign_document', doc_id=doc.id) }}" class="actions-dropdown-item">
+                                            👤 Assign to Users
+                                        </a>
+                                        <a href="{{ url_for('rename_document', doc_id=doc.id) }}" class="actions-dropdown-item">
+                                            ✏️ Rename
+                                        </a>
+                                        <a href="{{ url_for('view_document_embed', doc_id=doc.id) }}" class="actions-dropdown-item" target="_blank" title="Open in new tab to print">
+                                            🖨️ Print
+                                        </a>
+                                        <label class="actions-dropdown-item" style="cursor: pointer; display: block;" title="Upload a clean copy to replace the underlying PDF (preserves signature fields and DB signatures)">
+                                            🔄 Replace File…
+                                            <input type="file" accept=".pdf,application/pdf" style="display: none;"
+                                                   data-doc-id="{{ doc.id }}"
+                                                   data-doc-name="{{ doc.original_filename|e }}"
+                                                   onchange="replaceDocumentFile(this)">
+                                        </label>
+                                        <form method="POST" action="{{ url_for('delete_document') }}" style="display: block;">
+                                            <input type="hidden" name="doc_id" value="{{ doc.id }}">
+                                            <button type="submit" class="actions-dropdown-item danger" style="width: 100%; text-align: left; border: none; background: none; cursor: pointer;" 
+                                                    onclick="return confirm('Delete {{ doc.original_filename }}?')">
+                                                🗑️ Delete
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p>{% if is_manager_view %}No forms available for your location.{% else %}No documents uploaded yet.{% endif %}</p>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- Document Viewer Modal -->
+    <div id="documentModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">Document Viewer</h2>
+                <button class="close-modal" onclick="closeDocumentModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <div class="document-viewer">Loading document...</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function replaceDocumentFile(input) {
+            if (!input.files || !input.files[0]) return;
+            var docId = input.getAttribute('data-doc-id');
+            var docName = input.getAttribute('data-doc-name') || 'this document';
+            var msg = 'Replace the underlying PDF for "' + docName + '" with this new file?\n\n'
+                + 'The old file will be kept as .bak next to it. Signature fields, assignments, and database signatures are preserved.';
+            if (!confirm(msg)) { input.value = ''; return; }
+            var fd = new FormData();
+            fd.append('file', input.files[0]);
+            fetch('/admin/documents/' + docId + '/replace-file', { method: 'POST', body: fd })
+                .then(function () { location.reload(); })
+                .catch(function () { alert('Replace failed'); input.value = ''; });
+        }
+
+        function openDocumentModal(docId, filename, fileType) {
+            var modal = document.getElementById('documentModal');
+            var modalTitle = document.getElementById('modalTitle');
+            var modalBody = document.getElementById('modalBody');
+            
+            modalTitle.textContent = filename;
+            modalBody.innerHTML = '<div class="document-viewer">Loading document...</div>';
+            modal.classList.add('show');
+            
+            // Determine file type
+            var ext = filename.split('.').pop().toLowerCase();
+            var viewUrl = "{{ url_for('view_document_embed', doc_id=0) }}".replace('0', docId);
+            
+            // Check if it's an image
+            if (['jpg', 'jpeg', 'png', 'gif'].includes(ext) || (fileType && fileType.startsWith('image/'))) {
+                modalBody.innerHTML = '<img src="' + viewUrl + '" alt="' + filename + '">';
+            }
+            // Check if it's a PDF
+            else if (ext === 'pdf' || fileType === 'application/pdf') {
+                modalBody.innerHTML = '<iframe src="' + viewUrl + '"></iframe>';
+            }
+            // Check if it's a text file
+            else if (ext === 'txt' || fileType === 'text/plain') {
+                fetch(viewUrl)
+                    .then(response => response.text())
+                    .then(text => {
+                        modalBody.innerHTML = '<pre style="padding: 20px; white-space: pre-wrap; word-wrap: break-word; color: white;">' + escapeHtml(text) + '</pre>';
+                    })
+                    .catch(error => {
+                        modalBody.innerHTML = '<div class="document-viewer">Error loading document. Please download it instead.</div>';
+                    });
+            }
+            // For other file types, show message
+            else {
+                modalBody.innerHTML = '<div class="document-viewer">This file type cannot be viewed in browser. Please download it.</div>';
+            }
+        }
+        
+        function closeDocumentModal() {
+            var modal = document.getElementById('documentModal');
+            modal.classList.remove('show');
+            var modalBody = document.getElementById('modalBody');
+            modalBody.innerHTML = '';
+        }
+        
+        function escapeHtml(text) {
+            var map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+        }
+        
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            var modal = document.getElementById('documentModal');
+            if (event.target == modal) {
+                closeDocumentModal();
+            }
+            
+            // Close dropdown menus when clicking outside
+            if (!event.target.matches('.actions-menu-btn') && !event.target.closest('.actions-dropdown')) {
+                var dropdowns = document.querySelectorAll('.actions-dropdown');
+                dropdowns.forEach(function(dropdown) {
+                    if (dropdown.classList.contains('show')) {
+                        dropdown.classList.remove('show');
+                    }
+                });
+            }
+        }
+        
+        // Close modal with Escape key
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeDocumentModal();
+            }
+        });
+        
+        // Collapsible Upload New Document section
+        (function() {
+            var toggle = document.getElementById('upload-section-toggle');
+            var body = document.getElementById('upload-form-body');
+            if (toggle && body) {
+                toggle.addEventListener('click', function() {
+                    var isExpanded = toggle.getAttribute('aria-expanded') === 'true';
+                    toggle.setAttribute('aria-expanded', isExpanded ? 'false' : 'true');
+                    body.classList.toggle('collapsed', isExpanded);
+                });
+            }
+        })();
+        
+        // Visibility toggle via AJAX so page does not reload (stays at same scroll position)
+        document.querySelectorAll('.visibility-toggle-form').forEach(function(form) {
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                var docId = form.getAttribute('data-doc-id');
+                var btn = form.querySelector('button[type="submit"]');
+                var formData = new FormData(form);
+                var action = form.getAttribute('action');
+                fetch(action, { method: 'POST', body: formData, credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                    .then(function(res) {
+                        if (res.redirected || res.ok) {
+                            if (btn.classList.contains('badge-visible')) {
+                                btn.textContent = 'Not in library';
+                                btn.classList.remove('badge-visible');
+                                btn.classList.add('badge-hidden');
+                                btn.title = 'Click to show in the optional document library for stores listed in Stores (library)';
+                            } else {
+                                btn.textContent = 'In library';
+                                btn.classList.remove('badge-hidden');
+                                btn.classList.add('badge-visible');
+                                btn.title = 'Click to remove from the optional document library (assigned users are not affected)';
+                            }
+                            var menuBtn = document.querySelector('#menu-' + docId + ' .visibility-dropdown-btn');
+                            if (menuBtn) {
+                                menuBtn.textContent = btn.textContent === 'In library' ? '📚 Remove from library' : '📚 Show in library';
+                            }
+                        }
+                    })
+                    .catch(function() { form.submit(); });
+            });
+        });
+        
+        // Store selection form via AJAX so page does not reload (stays at same scroll position)
+        document.querySelectorAll('.store-update-form').forEach(function(form) {
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                var docId = form.getAttribute('data-doc-id');
+                var formData = new FormData(form);
+                var action = form.getAttribute('action');
+                fetch(action, { method: 'POST', body: formData, credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                    .then(function(res) {
+                        if (res.redirected || res.ok) {
+                            var allCb = form.querySelector('input[name="all"]');
+                            var labelEl = document.getElementById('store-label-' + docId);
+                            if (labelEl) {
+                                if (allCb && allCb.checked) {
+                                    labelEl.textContent = 'All stores';
+                                } else {
+                                    var checked = form.querySelectorAll('input[name="store_ids"]:checked');
+                                    labelEl.textContent = checked.length + ' store(s)';
+                                }
+                            }
+                            var panel = document.getElementById('store-panel-' + docId);
+                            if (panel) panel.style.display = 'none';
+                        }
+                    })
+                    .catch(function() { form.submit(); });
+            });
+        });
+        
+        // Toggle actions dropdown menu
+        function toggleActionsMenu(docId) {
+            var menu = document.getElementById('menu-' + docId);
+            var allMenus = document.querySelectorAll('.actions-dropdown');
+            
+            // Close all other menus
+            allMenus.forEach(function(m) {
+                if (m !== menu) {
+                    m.classList.remove('show');
+                    m.classList.remove('show-up');
+                }
+            });
+            
+            // Toggle current menu
+            var isShowing = menu.classList.contains('show');
+            menu.classList.toggle('show');
+            
+            if (!isShowing) {
+                // Check if there's enough space below, if not, show above
+                setTimeout(function() {
+                    var rect = menu.getBoundingClientRect();
+                    var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+                    var spaceBelow = viewportHeight - rect.bottom;
+                    var spaceAbove = rect.top;
+                    var menuHeight = rect.height;
+                    
+                    // If not enough space below (less than 50px buffer) and more space above, show upward
+                    if (spaceBelow < 50 && spaceAbove > menuHeight) {
+                        menu.classList.add('show-up');
+                    } else {
+                        menu.classList.remove('show-up');
+                    }
+                }, 10);
+            }
+        }
+        
+        // Toggle store dropdown panel (which stores can see this form)
+        function toggleStoreDropdown(docId) {
+            var panel = document.getElementById('store-panel-' + docId);
+            if (!panel) return;
+            var isHidden = panel.style.display === 'none';
+            document.querySelectorAll('.store-dropdown-panel').forEach(function(p) {
+                p.style.display = 'none';
+            });
+            panel.style.display = isHidden ? 'block' : 'none';
+        }
+        
+        function toggleAllStores(docId) {
+            var panel = document.getElementById('store-panel-' + docId);
+            if (!panel) return;
+            var allCb = panel.querySelector('input[name="all"]');
+            var checkboxes = document.querySelectorAll('.store-cb-' + docId);
+            if (allCb.checked) {
+                checkboxes.forEach(function(cb) { cb.checked = true; });
+            } else {
+                checkboxes.forEach(function(cb) { cb.checked = false; });
+            }
+        }
+        
+        document.addEventListener('click', function(event) {
+            if (!event.target.closest('.store-dropdown') && !event.target.closest('.store-dropdown-panel')) {
+                document.querySelectorAll('.store-dropdown-panel').forEach(function(p) {
+                    p.style.display = 'none';
+                });
+            }
+        });
+    </script>
+</body>
+</html>
+

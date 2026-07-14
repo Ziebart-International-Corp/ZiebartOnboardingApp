@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Reports - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #FFFFFF;
+            color: #000000;
+        }
+        p, span, div, td, th, label, input, textarea, select, button, a {
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+            position: relative;
+            z-index: 101;
+            height: 100%;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .btn:hover {
+            background: #FE0100;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .section {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 2rem;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .section-title {
+            font-size: 1.6em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            margin-bottom: 20px;
+            color: #000000;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            background: white;
+        }
+        th, td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid #e5e5e5;
+        }
+        th {
+            background: #2d2d2d;
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        tbody tr {
+            transition: background-color 0.2s;
+        }
+        tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+        .progress-bar {
+            width: 120px;
+            height: 22px;
+            background: #e5e5e5;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        .progress-fill {
+            height: 100%;
+            background: #28a745;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 0.75em;
+            font-weight: 600;
+            min-width: 0;
+        }
+        .progress-fill[style*="width: 0%"] {
+            display: none;
+        }
+        .progress-fill.failed {
+            background: #dc3545;
+        }
+        .progress-fill.in-progress {
+            background: #ffc107;
+        }
+        .section-title {
+            font-size: 1.4em;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #000000;
+            border-bottom: 2px solid #dc3545;
+            padding-bottom: 10px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .status-badge.passed {
+            background: #28a745;
+            color: white;
+        }
+        .status-badge.failed {
+            background: #dc3545;
+            color: white;
+        }
+        .status-badge.in-progress {
+            background: #ffc107;
+            color: #000;
+        }
+        .status-badge.not-watched {
+            background: #6c757d;
+            color: white;
+        }
+        
+        /* Mobile Responsive Styles */
+        @media (max-width: 768px) {
+            .top-header {
+                padding: 12px 15px;
+                flex-wrap: wrap;
+            }
+            .logo-section {
+                font-size: 1.1em;
+            }
+            .logo-section img {
+                height: 60px;
+                margin-bottom: -30px;
+            }
+            .back-btn {
+                font-size: 0.85em;
+                padding: 6px 12px;
+            }
+            .container {
+                padding: 15px;
+            }
+            .section {
+                padding: 20px;
+            }
+            .section-title {
+                font-size: 1.3em;
+            }
+            table {
+                display: block;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            th, td {
+                padding: 10px 8px;
+                font-size: 0.85em;
+                white-space: nowrap;
+            }
+            .btn {
+                min-height: 44px;
+                padding: 12px 20px;
+                font-size: 1em;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .top-header {
+                padding: 10px 12px;
+            }
+            .logo-section {
+                font-size: 1em;
+            }
+            .logo-section img {
+                height: 50px;
+                margin-bottom: -25px;
+            }
+            .section {
+                padding: 15px;
+            }
+            .section-title {
+                font-size: 1.2em;
+            }
+            th, td {
+                padding: 8px 6px;
+                font-size: 0.8em;
+            }
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text">Ziebart Onboarding</span>
+        </div>
+        <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    
+    <div class="container">
+        <div class="section">
+            <h2 class="section-title">Summary Statistics</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Total New Hires</strong></td>
+                        <td>{{ total_new_hires }}</td>
+                        <td>Active onboarding records</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Training Videos</strong></td>
+                        <td>{{ total_training_videos }}</td>
+                        <td>Active training modules</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Documents</strong></td>
+                        <td>{{ total_documents }}</td>
+                        <td>{{ visible_documents }} visible to users</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Checklist Items</strong></td>
+                        <td>{{ total_checklist_items }}</td>
+                        <td>Active onboarding tasks</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">Training Completion Report</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Count</th>
+                        <th>Percentage</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Completed & Passed</td>
+                        <td>{{ completed_trainings }}</td>
+                        <td>
+                            {% if total_training_progress > 0 %}
+                            {{ "%.1f"|format((completed_trainings / total_training_progress * 100)) }}%
+                            {% else %}
+                            0%
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>Failed</td>
+                        <td>{{ failed_trainings }}</td>
+                        <td>
+                            {% if total_training_progress > 0 %}
+                            {{ "%.1f"|format((failed_trainings / total_training_progress * 100)) }}%
+                            {% else %}
+                            0%
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>In Progress</td>
+                        <td>{{ in_progress_trainings }}</td>
+                        <td>
+                            {% if total_training_progress > 0 %}
+                            {{ "%.1f"|format((in_progress_trainings / total_training_progress * 100)) }}%
+                            {% else %}
+                            0%
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr style="background: #f8f9fa; font-weight: 600;">
+                        <td>Total Attempts</td>
+                        <td>{{ total_training_progress }}</td>
+                        <td>100%</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">Document Signing Report</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Count</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Documents in user library</td>
+                        <td>{{ visible_documents }}</td>
+                    </tr>
+                    <tr>
+                        <td>Documents with Signature Fields</td>
+                        <td>{{ documents_with_signatures }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Signatures Collected</td>
+                        <td>{{ total_signatures }}</td>
+                    </tr>
+                    <tr>
+                        <td>Unique Users Who Signed</td>
+                        <td>{{ unique_signed_users }}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">Checklist Completion Report</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Count</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Active Checklist Items</td>
+                        <td>{{ total_checklist_items }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Checklist Completions</td>
+                        <td>{{ total_checklist_completions }}</td>
+                    </tr>
+                    <tr>
+                        <td>Average Completions per Item</td>
+                        <td>
+                            {% if total_checklist_items > 0 %}
+                            {{ "%.1f"|format(total_checklist_completions / total_checklist_items) }}
+                            {% else %}
+                            0
+                            {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">User Progress Report</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Employee Name</th>
+                        <th>Username</th>
+                        <th>Department</th>
+                        <th>Training Progress</th>
+                        <th>Tasks Completed</th>
+                        <th>Checklist Progress</th>
+                        <th>Overall Completion</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for stats in user_progress_stats %}
+                    <tr>
+                        <td><strong>{{ stats.new_hire.first_name }} {{ stats.new_hire.last_name }}</strong></td>
+                        <td>{{ stats.new_hire.username }}</td>
+                        <td>{{ stats.new_hire.department or '-' }}</td>
+                        <td>
+                            {% if stats.training.total > 0 %}
+                            {{ stats.training.completed }}/{{ stats.training.total }} 
+                            ({{ "%.0f"|format((stats.training.completed / stats.training.total * 100)) }}%)
+                            {% else %}
+                            N/A
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if stats.tasks.total > 0 %}
+                            {{ stats.tasks.completed }}/{{ stats.tasks.total }}
+                            {% else %}
+                            0/0
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if stats.checklist.total > 0 %}
+                            {{ stats.checklist.completed }}/{{ stats.checklist.total }}
+                            ({{ "%.0f"|format((stats.checklist.completed / stats.checklist.total * 100)) }}%)
+                            {% else %}
+                            N/A
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="progress-bar" style="display: inline-block; vertical-align: middle;">
+                                {% if stats.overall_progress > 0 %}
+                                <div class="progress-fill" style="width: {{ stats.overall_progress }}%;"></div>
+                                {% else %}
+                                <div class="progress-fill" style="width: 0%;"></div>
+                                {% endif %}
+                            </div>
+                            <span style="font-size: 0.85em; color: #666; margin-left: 8px; vertical-align: middle;">{{ stats.overall_progress }}%</span>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">Department Performance</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Department</th>
+                        <th>Total Employees</th>
+                        <th>Fully Completed</th>
+                        <th>Completion Rate</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for dept, stats in department_stats.items() %}
+                    <tr>
+                        <td><strong>{{ dept }}</strong></td>
+                        <td>{{ stats.count }}</td>
+                        <td>{{ stats.completed }}</td>
+                        <td>
+                            <div class="progress-bar" style="display: inline-block; vertical-align: middle;">
+                                {% set completion_rate = (stats.completed / stats.count * 100) if stats.count > 0 else 0 %}
+                                {% if completion_rate > 0 %}
+                                <div class="progress-fill" style="width: {{ completion_rate }}%;"></div>
+                                {% else %}
+                                <div class="progress-fill" style="width: 0%;"></div>
+                                {% endif %}
+                            </div>
+                            <span style="font-size: 0.85em; color: #666; margin-left: 8px; vertical-align: middle;">{{ "%.0f"|format(completion_rate) }}%</span>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">Detailed Training Information</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Employee Name</th>
+                        <th>Username</th>
+                        <th>Training Video</th>
+                        <th>Watched</th>
+                        <th>Watch Progress</th>
+                        <th>Time Watched</th>
+                        <th>Video Duration</th>
+                        <th>Score</th>
+                        <th>Status</th>
+                        <th>Attempts</th>
+                        <th>Completed Date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for detail in training_details %}
+                    <tr>
+                        <td><strong>{{ detail.user.first_name }} {{ detail.user.last_name }}</strong></td>
+                        <td>{{ detail.user.username }}</td>
+                        <td>{{ detail.video.title }}</td>
+                        <td>
+                            {% if detail.watched %}
+                                <span class="status-badge {% if detail.is_completed and detail.is_passed %}passed{% elif detail.is_completed and not detail.is_passed %}failed{% else %}in-progress{% endif %}">
+                                    {% if detail.is_completed and detail.is_passed %}Yes ✓{% elif detail.is_completed and not detail.is_passed %}Yes ✗{% else %}In Progress{% endif %}
+                                </span>
+                            {% else %}
+                                <span class="status-badge not-watched">No</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if detail.watched %}
+                                <div style="display: inline-flex; align-items: center; gap: 8px;">
+                                    <div class="progress-bar" style="width: 100px;">
+                                        <div class="progress-fill {% if detail.is_completed and not detail.is_passed %}failed{% elif not detail.is_completed %}in-progress{% endif %}" style="width: {{ detail.watch_percentage }}%;"></div>
+                                    </div>
+                                    <span style="font-size: 0.85em; color: #666;">{{ "%.0f"|format(detail.watch_percentage) }}%</span>
+                                </div>
+                            {% else %}
+                                <span style="color: #999;">-</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ detail.time_watched }}</td>
+                        <td>{{ detail.video_duration }}</td>
+                        <td>
+                            {% if detail.score is not none %}
+                                <strong>{{ "%.1f"|format(detail.score) }}%</strong>
+                            {% else %}
+                                <span style="color: #999;">-</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if detail.watched %}
+                                {% if detail.is_completed and detail.is_passed %}
+                                    <span class="status-badge passed">Passed</span>
+                                {% elif detail.is_completed and not detail.is_passed %}
+                                    <span class="status-badge failed">Failed</span>
+                                {% else %}
+                                    <span class="status-badge in-progress">In Progress</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="status-badge not-watched">Not Started</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if detail.attempt_number > 0 %}
+                                {{ detail.attempt_number }}
+                            {% else %}
+                                <span style="color: #999;">-</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if detail.completed_at %}
+                                {{ detail.completed_at.strftime('%Y-%m-%d %H:%M') }}
+                            {% else %}
+                                <span style="color: #999;">-</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
+

@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ new_hires_list_heading }} - Onboarding</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #FFFFFF;
+            color: #000000;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            min-height: 60px;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .header-right { display: flex; align-items: center; gap: 16px; }
+        .user-dropdown { cursor: pointer; position: relative; display: flex; align-items: center; }
+        .user-icon {
+            width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff;
+            display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em;
+        }
+        .user-dropdown:hover .user-icon { background: #d90000; }
+        .dropdown-menu {
+            display: none; position: absolute; top: 100%; right: 0; margin-top: 8px;
+            background: #fff; color: #000; min-width: 180px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+            z-index: 1000; padding: 8px 0; border: 1px solid #eee;
+        }
+        .dropdown-menu.show { display: block; }
+        .dropdown-item { display: block; padding: 10px 16px; color: #333; text-decoration: none; font-size: 0.95em; }
+        .dropdown-item:hover { background: #f5f5f5; }
+        .container {
+            max-width: 1600px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 20px;
+        }
+        .section-title {
+            font-size: 1.6em;
+            font-weight: 800;
+            color: #000000;
+            margin-bottom: 20px;
+        }
+        .new-hires-table-wrap {
+            width: 100%;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            border-radius: 0.5rem;
+        }
+        .new-hires-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95em;
+        }
+        .new-hires-table th {
+            text-align: left;
+            padding: 12px 14px;
+            font-weight: 700;
+            font-size: 0.82em;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #505050;
+            border-bottom: 2px solid #e0e0e0;
+            white-space: nowrap;
+        }
+        .new-hires-table td {
+            padding: 14px;
+            border-bottom: 1px solid #eee;
+            vertical-align: middle;
+        }
+        .new-hires-table tbody tr:hover {
+            background: #f5f6f8;
+        }
+        .new-hires-table .col-name a {
+            color: #000000;
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .new-hires-table .col-name a:hover {
+            color: #FE0100;
+        }
+        .new-hires-table .col-actions {
+            white-space: nowrap;
+            text-align: right;
+        }
+        .remove-user-link {
+            color: #0d6efd;
+            font-size: 0.88em;
+            text-decoration: none;
+            margin-left: 10px;
+        }
+        .remove-user-link:hover {
+            text-decoration: underline;
+        }
+        .section-title-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 18px;
+        }
+        .section-title-row .section-title { margin-bottom: 0; }
+        .nh-filter-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px 16px;
+            font-size: 0.88em;
+            color: #333;
+        }
+        .nh-filter-bar fieldset {
+            border: none;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 12px 16px;
+        }
+        .nh-filter-bar legend {
+            font-weight: 700;
+            padding: 0;
+            margin: 0 10px 0 0;
+            display: inline;
+        }
+        .nh-filter-bar label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .nh-filter-bar input { accent-color: #FE0100; cursor: pointer; }
+        .nh-filter-empty {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 0.95em;
+        }
+        .new-hires-table th.sortable {
+            cursor: pointer;
+            user-select: none;
+        }
+        .new-hires-table th.sortable:hover {
+            color: #111;
+            background: rgba(0,0,0,0.05);
+        }
+        .new-hires-table th.sortable:focus {
+            outline: 2px solid #FE0100;
+            outline-offset: 2px;
+        }
+        .new-hires-table th .th-inner {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .new-hires-table th .sort-ind {
+            font-size: 0.72em;
+            opacity: 0.5;
+            min-width: 1em;
+            display: inline-block;
+        }
+        .new-hires-table th.sortable[data-sort-dir="asc"] .sort-ind::after { content: '▲'; opacity: 1; }
+        .new-hires-table th.sortable[data-sort-dir="desc"] .sort-ind::after { content: '▼'; opacity: 1; }
+        .new-hires-table tr.row-inactive td { opacity: 0.72; }
+        @media (max-width: 768px) {
+            .top-header {
+                padding: 12px 15px;
+                flex-wrap: wrap;
+            }
+            .logo-section {
+                font-size: 1.1em;
+            }
+            .logo-section img {
+                height: 60px;
+                margin-bottom: -30px;
+            }
+            .container {
+                padding: 15px;
+            }
+            .section {
+                padding: 20px;
+            }
+            .section-title-row {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .new-hires-table th,
+            .new-hires-table td {
+                padding: 10px 8px;
+                font-size: 0.85em;
+            }
+        }
+    {{ global_theme_css|safe }}
+        .nh-filter-bar, .nh-filter-bar label, .nh-filter-bar legend {
+            color: var(--text-primary, #f2f5fb);
+        }
+        .nh-filter-empty {
+            color: var(--text-muted, #9aa4b6);
+        }
+        .new-hires-table th.sortable:hover {
+            background: rgba(255,255,255,0.07);
+            color: var(--text-primary, #f2f5fb);
+        }
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text">Ziebart Onboarding</span>
+        </div>
+        <div class="header-right">
+            <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
+            <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('viewNewHiresUserDropdown').classList.toggle('show');">
+                <div class="user-icon">{{ (admin_name or 'A')[0].upper() }}</div>
+                <div class="dropdown-menu" id="viewNewHiresUserDropdown">
+                    {{ staff_console_dropdown_links }}
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('viewNewHiresUserDropdown').classList.remove('show'); });</script>
+    
+    <div class="container">
+        <div class="section">
+            <div class="section-title-row">
+                <h2 class="section-title">{{ new_hires_list_heading }}</h2>
+                {% if new_hires_with_progress %}
+                <div class="nh-filter-bar" role="group" aria-label="Filter new hires by login access">
+                    <fieldset>
+                        <legend>Show</legend>
+                        <label><input type="radio" name="nhShowFilter" value="active" checked> Active only</label>
+                        <label><input type="radio" name="nhShowFilter" value="all"> All</label>
+                        <label><input type="radio" name="nhShowFilter" value="inactive"> Inactive only</label>
+                    </fieldset>
+                </div>
+                {% endif %}
+            </div>
+            {% if new_hires_with_progress %}
+            <p id="nhFilterEmpty" class="nh-filter-empty" hidden>No rows match this filter.</p>
+            <div class="new-hires-table-wrap">
+                <table class="new-hires-table" id="newHiresTable">
+                    <thead>
+                        <tr>
+                            <th class="col-name sortable" data-sort="name" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Name<span class="sort-ind" aria-hidden="true"></span></span></th>
+                            <th class="sortable" data-sort="username" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Username<span class="sort-ind" aria-hidden="true"></span></span></th>
+                            <th class="sortable" data-sort="position" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Position/Title<span class="sort-ind" aria-hidden="true"></span></span></th>
+                            <th class="sortable" data-sort="email" data-sort-type="text" tabindex="0" scope="col"><span class="th-inner">Email<span class="sort-ind" aria-hidden="true"></span></span></th>
+                            <th class="sortable" data-sort="start" data-sort-type="date" tabindex="0" scope="col"><span class="th-inner">Start date<span class="sort-ind" aria-hidden="true"></span></span></th>
+                            <th class="sortable" data-sort="active" data-sort-type="number" tabindex="0" scope="col"><span class="th-inner">Active?<span class="sort-ind" aria-hidden="true"></span></span></th>
+                            <th class="col-actions sortable" data-sort="progress" data-sort-type="number" tabindex="0" scope="col"><span class="th-inner">Actions<span class="sort-ind" aria-hidden="true"></span></span></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in new_hires_with_progress %}
+                        <tr class="{% if not item.login_active %}row-inactive{% endif %}" data-login-active="{% if item.login_active %}1{% else %}0{% endif %}"
+                            data-sort-name="{{ ((item.new_hire.first_name or '') ~ ' ' ~ (item.new_hire.last_name or ''))|trim|lower|e }}"
+                            data-sort-username="{{ (item.new_hire.username or '')|lower|e }}"
+                            data-sort-position="{{ (role_name_by_id.get(item.new_hire.role_id, '') or '')|lower|e }}"
+                            data-sort-email="{{ ((item.new_hire.email or '')|lower)|e }}"
+                            data-sort-start="{{ item.new_hire.start_date.isoformat() if item.new_hire.start_date else '' }}"
+                            data-sort-active="{{ 1 if item.login_active else 0 }}"
+                            data-sort-progress="{{ item.progress }}">
+                            <td class="col-name">
+                                <a href="{{ view_new_hire_details_url(item.new_hire.username) }}" title="Open details — onboarding progress {{ item.progress }}%{% if item.total > 0 %} ({{ item.completed }}/{{ item.total }} items){% endif %}">{{ item.new_hire.first_name }} {{ item.new_hire.last_name }}</a>
+                            </td>
+                            <td>{{ item.new_hire.username }}</td>
+                            <td>{{ role_name_by_id.get(item.new_hire.role_id, '') or '—' }}</td>
+                            <td>{{ item.new_hire.email or '—' }}</td>
+                            <td>{% if item.new_hire.start_date %}{{ item.new_hire.start_date.strftime('%b %d, %Y') }}{% else %}—{% endif %}</td>
+                            <td>{% if item.login_active %}Yes{% else %}No{% endif %}</td>
+                            <td class="col-actions">
+                                <a href="{{ url_for('remove_new_hire_user', username=item.new_hire.username) }}" class="remove-user-link" title="Remove user from active list">Remove</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <script>
+            (function() {
+                var table = document.getElementById('newHiresTable');
+                if (!table) return;
+                var tbody = table.querySelector('tbody');
+                var sortState = { key: null, dir: 'asc' };
+                function rowVal(tr, key) { return tr.getAttribute('data-sort-' + key) || ''; }
+                function cmp(a, b, type) {
+                    if (type === 'number') return (parseFloat(a) || 0) - (parseFloat(b) || 0);
+                    return String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true });
+                }
+                function applySort() {
+                    if (!sortState.key || !tbody) return;
+                    var th = table.querySelector('th.sortable[data-sort="' + sortState.key + '"]');
+                    var type = (th && th.getAttribute('data-sort-type')) || 'text';
+                    var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+                    rows.sort(function(r1, r2) {
+                        var c = cmp(rowVal(r1, sortState.key), rowVal(r2, sortState.key), type);
+                        return sortState.dir === 'asc' ? c : -c;
+                    });
+                    rows.forEach(function(r) { tbody.appendChild(r); });
+                }
+                function onSortClick(th) {
+                    var k = th.getAttribute('data-sort');
+                    if (!k) return;
+                    if (sortState.key === k) sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+                    else { sortState.key = k; sortState.dir = 'asc'; }
+                    table.querySelectorAll('th.sortable').forEach(function(h) { h.removeAttribute('data-sort-dir'); });
+                    th.setAttribute('data-sort-dir', sortState.dir);
+                    applySort();
+                }
+                table.querySelectorAll('th.sortable').forEach(function(th) {
+                    th.addEventListener('click', function() { onSortClick(th); });
+                    th.addEventListener('keydown', function(ev) {
+                        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onSortClick(th); }
+                    });
+                });
+                var radios = document.querySelectorAll('input[name="nhShowFilter"]');
+                var emptyEl = document.getElementById('nhFilterEmpty');
+                function applyFilter() {
+                    var mode = 'active';
+                    for (var i = 0; i < radios.length; i++) { if (radios[i].checked) mode = radios[i].value; }
+                    var n = 0;
+                    tbody.querySelectorAll('tr').forEach(function(tr) {
+                        var on = tr.getAttribute('data-login-active') === '1';
+                        var show = mode === 'all' || (mode === 'active' && on) || (mode === 'inactive' && !on);
+                        tr.style.display = show ? '' : 'none';
+                        if (show) n++;
+                    });
+                    if (emptyEl) emptyEl.hidden = n > 0;
+                }
+                for (var j = 0; j < radios.length; j++) radios[j].addEventListener('change', applyFilter);
+                applyFilter();
+            })();
+            </script>
+            {% else %}
+            <p style="color: #666; text-align: center; padding: 40px;">No new hires found.</p>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+

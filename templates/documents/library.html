@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Documents - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+            position: relative;
+            z-index: 101;
+            height: 100%;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .nav-links {
+            display: flex;
+            gap: 30px;
+            align-items: center;
+        }
+        .nav-links a {
+            color: #ffffff;
+            text-decoration: none;
+            font-size: 1em;
+            font-weight: 500;
+            font-family: 'URW Form', Arial, sans-serif;
+            transition: color 0.2s;
+        }
+        .nav-links a:hover {
+            color: #FE0100;
+        }
+        .nav-links a.active {
+            color: #FE0100;
+        }
+        .user-section {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            position: relative;
+        }
+        .user-dropdown {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 20px;
+            transition: background 0.2s;
+            color: #ffffff;
+        }
+        .user-dropdown:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        .user-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #FE0100;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: white;
+            min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: 0.5rem;
+            margin-top: 10px;
+            z-index: 1000;
+            overflow: hidden;
+        }
+        .dropdown-menu.show {
+            display: block;
+        }
+        .dropdown-item {
+            padding: 12px 20px;
+            color: #000000;
+            text-decoration: none;
+            display: block;
+            transition: background 0.2s;
+        }
+        .dropdown-item:hover {
+            background: #f5f5f5;
+        }
+        .dropdown-divider {
+            height: 1px;
+            background: #eee;
+        }
+        body { background: #f5f5f5; }
+        .main-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px 20px;
+        }
+        .page-title {
+            font-size: 2em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #000000;
+            margin-bottom: 8px;
+        }
+        .page-subtitle {
+            color: #808080;
+            font-size: 1em;
+            margin-bottom: 24px;
+        }
+        .section-title-dash {
+            font-size: 0.95em;
+            font-weight: 700;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #333;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin: 0 0 16px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #E0E0E0;
+        }
+        .documents-list {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 1.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 24px;
+        }
+        .document-list {
+            display: grid;
+            gap: 15px;
+        }
+        .document-item {
+            background: #ffffff;
+            border-radius: 0.5rem;
+            padding: 20px;
+            border-left: 4px solid #FE0100;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+        .document-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .document-item.signed {
+            border-left-color: #28a745;
+        }
+        .document-item.needs-signature {
+            border-left-color: #FE0100;
+        }
+        .document-info {
+            flex: 1;
+            min-width: 0;
+        }
+        .document-info h3 {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #000000;
+            margin-bottom: 6px;
+        }
+        .document-info p {
+            color: #808080;
+            font-size: 0.9em;
+            margin: 4px 0;
+            line-height: 1.5;
+        }
+        .document-meta {
+            font-size: 0.85em;
+            color: #999;
+            margin-top: 8px;
+        }
+        .document-actions {
+            display: flex;
+            gap: 12px;
+            align-items: stretch;
+            flex-shrink: 0;
+        }
+        .document-actions .btn,
+        .document-actions .badge {
+            min-height: 44px;
+            padding: 12px 20px;
+            border-radius: 0.5rem;
+            font-size: 0.9em;
+            font-weight: 600;
+            font-family: 'URW Form', Arial, sans-serif;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            transition: background 0.2s, box-shadow 0.2s;
+            box-sizing: border-box;
+        }
+        .document-actions .badge {
+            background: #28a745;
+            color: white;
+            text-decoration: none;
+            cursor: default;
+            border: none;
+        }
+        .document-actions .btn {
+            text-decoration: none;
+            border: none;
+            cursor: pointer;
+            background: #FE0100;
+            color: white;
+        }
+        .document-actions .btn:hover {
+            background: #cc0000;
+            color: white;
+            box-shadow: 0 2px 8px rgba(254,1,0,0.3);
+        }
+        .document-actions .btn-sign {
+            background: #28a745;
+            color: white;
+        }
+        .document-actions .btn-sign:hover {
+            background: #218838;
+            color: white;
+            box-shadow: 0 2px 8px rgba(40,167,69,0.3);
+        }
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #999;
+        }
+        .empty-state-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+        }
+        /* Mobile Menu */
+        .mobile-menu-toggle {
+            display: none;
+            background: none;
+            border: none;
+            color: #ffffff;
+            font-size: 1.5em;
+            cursor: pointer;
+            padding: 8px;
+        }
+        .mobile-nav {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #000000;
+            flex-direction: column;
+            padding: 20px;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .mobile-nav.show {
+            display: flex;
+        }
+        .mobile-nav a {
+            color: #ffffff;
+            text-decoration: none;
+            padding: 12px 0;
+            font-size: 1.1em;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .mobile-nav a:last-child {
+            border-bottom: none;
+        }
+        .mobile-nav a:hover {
+            color: #FE0100;
+        }
+        
+        @media (max-width: 768px) {
+            .documents-list {
+                padding: 1rem;
+            }
+            .document-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+                padding: 15px;
+            }
+            .document-info {
+                width: 100%;
+            }
+            .document-info h3 {
+                font-size: 1em;
+                word-break: break-word;
+            }
+            .document-actions {
+                width: 100%;
+                flex-direction: column;
+                gap: 10px;
+            }
+            .document-actions .btn,
+            .document-actions .badge {
+                width: 100%;
+                text-align: center;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .documents-list {
+                padding: 12px;
+            }
+            .document-item {
+                padding: 12px;
+            }
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body class="user-app-shell">
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+            <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
+        </div>
+        <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
+        <div class="nav-links">
+            <a href="{{ url_for('dashboard') }}">Home</a>
+            <a href="{{ url_for('user_tasks') }}">Tasks</a>
+            <a href="{{ url_for('view_documents') }}" class="nav-tab-active">Files</a>
+            <a href="{{ url_for('list_training_videos') }}">Videos</a>
+            <a href="{{ url_for('profile') }}">Profile</a>
+        </div>
+        <div class="mobile-nav" id="mobileNav">
+            <a href="{{ url_for('dashboard') }}">Home</a>
+            <a href="{{ url_for('user_tasks') }}">Tasks</a>
+            <a href="{{ url_for('view_documents') }}">Files</a>
+            <a href="{{ url_for('list_training_videos') }}">Videos</a>
+            <a href="{{ url_for('profile') }}">Profile</a>
+        </div>
+        <div class="user-section">
+            <div class="user-dropdown" onclick="toggleUserDropdown()">
+                <div class="user-icon">{{ user_first_name[0].upper() if user_first_name else 'U' }}</div>
+                <span class="user-dropdown-label">{{ user_full_name }}</span>
+                <span class="user-dropdown-caret" aria-hidden="true">▼</span>
+            </div>
+            <div class="dropdown-menu" id="userDropdown">
+                {{ staff_console_dropdown_links }}
+            </div>
+        </div>
+    </div>
+    
+    <div class="main-content">
+        <h1 class="page-title">Files</h1>
+        <p class="page-subtitle">Your assigned documents and downloads</p>
+        
+        <div class="documents-list">
+            <h2 class="section-title-dash">Available Documents</h2>
+            {% if documents %}
+            <div class="document-list">
+                {% for doc in documents %}
+                <div class="document-item {{ 'signed' if (doc.has_form_fields and doc.all_signed) else 'needs-signature' if doc.needs_signature else '' }}">
+                    <div class="document-info">
+                        <h3>
+                            {% if doc.needs_signature %}
+                            <a href="{{ user_sign_document_url(doc.id) }}" style="color: inherit; text-decoration: none;">{{ doc.name_for_users }}</a>
+                            {% else %}
+                            {{ doc.name_for_users }}
+                            {% endif %}
+                        </h3>
+                        {% if doc.description %}
+                        <p>{{ doc.description }}</p>
+                        {% endif %}
+                        {% if doc.is_assigned and doc.assignment and doc.needs_signature %}
+                        <p style="color: #FE0100; font-weight: 600;">
+                            Needs to be completed
+                            {% if doc.assignment.due_date %}
+                            • Due: {{ doc.assignment.due_date.strftime('%B %d, %Y') }}
+                            {% endif %}
+                        </p>
+                        {% endif %}
+                        <p class="document-meta">
+                            {% if doc.file_size %}
+                                {% if doc.file_size < 1024 %}{{ doc.file_size }} B
+                                {% elif doc.file_size < 1048576 %}{{ "%.1f"|format(doc.file_size / 1024) }} KB
+                                {% else %}{{ "%.1f"|format(doc.file_size / 1048576) }} MB{% endif %}
+                            {% endif %}
+                            {% if doc.file_size and doc.uploaded_by %} • {% endif %}
+                            Uploaded by {{ doc.uploaded_by or '-' }} on {{ doc.created_at.strftime('%Y-%m-%d') if doc.created_at else '-' }}
+                        </p>
+                    </div>
+                    <div class="document-actions">
+                        {% if doc.has_form_fields %}
+                            {% if doc.all_signed %}
+                                <span class="badge">✓ Completed</span>
+                            {% elif doc.needs_signature %}
+                                <a href="{{ user_sign_document_url(doc.id) }}" class="btn btn-sign" title="Open document to fill and sign">✍️ Fill &amp; Sign</a>
+                            {% endif %}
+                        {% endif %}
+                        <a href="{{ url_for('download_document', doc_id=doc.id) }}" class="btn">⬇️ Download</a>
+                        {% if doc.has_form_fields %}
+                        <a href="{{ user_document_completed_print_url(doc.id) }}" class="btn" target="_blank" title="Print completed form">🖨️ Print</a>
+                        {% else %}
+                        <a href="{{ url_for('view_document_embed', doc_id=doc.id) }}" class="btn" target="_blank" title="Open in new tab to print">🖨️ Print</a>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <div class="empty-state-icon">📄</div>
+                <h3>No documents available</h3>
+                <p>You don't have any documents assigned yet.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <script>
+        function toggleUserDropdown() {
+            var dropdown = document.getElementById('userDropdown');
+            dropdown.classList.toggle('show');
+        }
+        
+        function toggleMobileMenu() {
+            var mobileNav = document.getElementById('mobileNav');
+            if (mobileNav) {
+                mobileNav.classList.toggle('show');
+            }
+        }
+        
+        window.onclick = function(event) {
+            if (!event.target.closest('.user-dropdown')) {
+                var dropdown = document.getElementById('userDropdown');
+                if (dropdown.classList.contains('show')) {
+                    dropdown.classList.remove('show');
+                }
+            }
+            if (!event.target.closest('.mobile-menu-toggle') && !event.target.closest('.mobile-nav')) {
+                var mobileNav = document.getElementById('mobileNav');
+                if (mobileNav && mobileNav.classList.contains('show')) {
+                    mobileNav.classList.remove('show');
+                }
+            }
+        }
+    </script>
+    {{ user_mobile_bottom_nav }}
+</body>
+</html>
+

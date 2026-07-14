@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>User Checklists - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #FFFFFF;
+            color: #000000;
+        }
+        p, span, div, td, th, label, input, textarea, select, button, a {
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+            position: relative;
+            z-index: 101;
+            height: 100%;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .btn:hover {
+            background: #FE0100;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+        .section {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 2rem;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .section-title {
+            font-size: 1.6em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            margin-bottom: 20px;
+            color: #000000;
+        }
+        .user-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+        }
+        .user-card {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 0.5rem;
+            border: 2px solid transparent;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+            color: inherit;
+            display: block;
+        }
+        .user-card:hover {
+            border-color: #dc3545;
+            background: #fff;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .user-card h3 {
+            margin-bottom: 8px;
+            color: #000000;
+        }
+        .user-card p {
+            color: #808080;
+            font-size: 0.9em;
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text">Ziebart Onboarding</span>
+        </div>
+        <div class="header-actions"><a href="{{ staff_console_home_url() }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+            <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+        <div class="section">
+            <h2 class="section-title">Select User to View/Update Checklist</h2>
+            {% if current_user.is_admin() %}
+            <form method="POST" action="{{ url_for('sync_new_hires_from_users') }}" style="margin-bottom: 20px;">
+                <button type="submit" class="btn" style="background: #6c757d; color: white; font-size: 0.9em;">Fix missing: create New Hire records for users who don&apos;t have one</button>
+            </form>
+            {% endif %}
+            {% if all_new_hires %}
+                <div class="user-list">
+                    {% for new_hire in all_new_hires %}
+                    <a href="{{ url_for('view_user_checklist', username=new_hire.username) }}" class="user-card">
+                        <h3>{{ new_hire.first_name }} {{ new_hire.last_name }}</h3>
+                        <p>{{ new_hire.username }}</p>
+                        {% if new_hire.department %}
+                        <p class="user-card-dept" style="margin-top: 5px;">{{ new_hire.department }}</p>
+                        {% endif %}
+                    </a>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <p style="color: #666;">No new hires found.</p>
+                {% if current_user.is_admin() %}
+                <p style="color: #555; font-size: 0.95em; margin-top: 10px;">If you have users who can log in but don&apos;t appear here (e.g. Marcus Johnson), they may only exist in Users and not in New Hires. Click the gray button above to create missing New Hire records so they appear in this list and have a checklist.</p>
+                {% endif %}
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+

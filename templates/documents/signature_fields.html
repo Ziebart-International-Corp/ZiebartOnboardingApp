@@ -1,0 +1,2273 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Set Signature Fields - {{ document.name_for_users }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('serve_ziebart_logo') }}">
+    <link rel="shortcut icon" href="{{ url_for('serve_favicon') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        .header {
+            background: #000000;
+            color: white;
+            padding: 12px 30px;
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 60px;
+        }
+        .header-content {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex: 1;
+        }
+        .header-content h1 {
+            font-family: 'URW Form', Arial, sans-serif;
+            font-weight: 800;
+            margin: 0;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+            white-space: nowrap;
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #FE0100;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-primary {
+            background: #007bff;
+        }
+        .btn-danger {
+            background: #FE0100;
+        }
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+        }
+        .document-viewer-container {
+            background: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 20px;
+            position: relative;
+        }
+        .document-viewer-layout {
+            display: flex;
+            gap: 12px;
+            align-items: stretch;
+        }
+        .document-viewer-wrap {
+            flex: 1;
+            min-width: 0;
+        }
+        .pdf-page-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 6px;
+            font-size: 0.9em;
+            color: #f2f5fb;
+        }
+        .pdf-page-toolbar button {
+            padding: 4px 12px;
+            background: rgba(255, 255, 255, 0.12);
+            color: #f2f5fb;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+        .pdf-page-toolbar button:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .pdf-page-toolbar button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .pdf-page-scroller {
+            display: none;
+            flex-direction: column;
+            width: 56px;
+            flex-shrink: 0;
+            background: rgba(0, 0, 0, 0.35);
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 8px 6px;
+            max-height: min(860px, calc(100vh - 180px));
+        }
+        .pdf-page-scroller-title {
+            font-size: 0.65em;
+            font-weight: 700;
+            text-align: center;
+            color: #b7c1d3;
+            margin-bottom: 8px;
+            line-height: 1.2;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .pdf-page-scroller-list {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            align-items: center;
+            padding-right: 2px;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(254, 1, 0, 0.6) rgba(255, 255, 255, 0.1);
+        }
+        .pdf-page-scroller-list::-webkit-scrollbar {
+            width: 8px;
+        }
+        .pdf-page-scroller-list::-webkit-scrollbar-thumb {
+            background: rgba(254, 1, 0, 0.55);
+            border-radius: 4px;
+        }
+        .pdf-page-scroller-list::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 4px;
+        }
+        .pdf-page-scroller-item {
+            width: 38px;
+            min-height: 38px;
+            padding: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #f2f5fb;
+            font-size: 0.85em;
+            font-weight: 600;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .pdf-page-scroller-item:hover {
+            background: rgba(255, 255, 255, 0.16);
+        }
+        .pdf-page-scroller-item.active {
+            background: #fe0100;
+            border-color: rgba(255, 255, 255, 0.4);
+            color: #fff;
+        }
+        .pdf-page-scroller-item.has-fields {
+            box-shadow: inset 0 0 0 2px rgba(110, 168, 254, 0.7);
+        }
+        .document-viewer {
+            position: relative;
+            background: #525252;
+            min-height: 800px;
+            overflow: auto;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+        }
+        #pdfCanvas {
+            max-width: 100%;
+            height: auto;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            background: white;
+            display: block;
+            cursor: crosshair;
+        }
+        .signature-field-indicator {
+            position: absolute;
+            border: 2px dashed #28a745;
+            background: rgba(40, 167, 69, 0.1);
+            pointer-events: all;
+            z-index: 100;
+            cursor: move;
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+        }
+        .signature-field-indicator.resizing {
+            border: 2px solid #28a745;
+            background: rgba(40, 167, 69, 0.2);
+        }
+        .resize-handle {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: #28a745;
+            border: 2px solid white;
+            border-radius: 50%;
+            cursor: nwse-resize;
+            z-index: 101;
+            pointer-events: all;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .resize-handle.bottom-right {
+            bottom: -6px;
+            right: -6px;
+            cursor: nwse-resize;
+        }
+        .resize-handle.bottom-left {
+            bottom: -6px;
+            left: -6px;
+            cursor: nesw-resize;
+        }
+        .resize-handle.top-right {
+            top: -6px;
+            right: -6px;
+            cursor: nesw-resize;
+        }
+        .resize-handle.top-left {
+            top: -6px;
+            left: -6px;
+            cursor: nwse-resize;
+        }
+        .existing-field-marker {
+            position: absolute;
+            border: 2px solid #007bff;
+            background: rgba(0, 123, 255, 0.1);
+            pointer-events: none;
+            z-index: 5;
+        }
+        .existing-field-marker::before {
+            content: attr(data-label);
+            position: absolute;
+            top: -20px;
+            left: 0;
+            background: #007bff;
+            color: white;
+            padding: 2px 6px;
+            font-size: 11px;
+            border-radius: 3px;
+            white-space: nowrap;
+        }
+        .existing-typed-field-marker {
+            position: absolute;
+            border: 2px solid #ffc107;
+            background: rgba(255, 193, 7, 0.1);
+            pointer-events: none;
+            z-index: 5;
+        }
+        body.signature-fields-page.select-field-mode .existing-field-marker,
+        body.signature-fields-page.select-field-mode .existing-typed-field-marker {
+            pointer-events: auto;
+            cursor: move;
+        }
+        body.signature-fields-page.select-field-mode .existing-field-marker:hover,
+        body.signature-fields-page.select-field-mode .existing-typed-field-marker:hover,
+        body.signature-fields-page .existing-field-marker.selected-field-marker,
+        body.signature-fields-page .existing-typed-field-marker.selected-field-marker {
+            border-color: #fe0100;
+            background: rgba(254, 1, 0, 0.18);
+            box-shadow: 0 0 0 3px rgba(254, 1, 0, 0.25);
+        }
+        body.signature-fields-page.select-field-mode .existing-field-marker.dragging-existing-field,
+        body.signature-fields-page.select-field-mode .existing-typed-field-marker.dragging-existing-field {
+            cursor: grabbing;
+            opacity: 0.92;
+            z-index: 40;
+        }
+        body.signature-fields-page.select-field-mode .existing-field-marker .resize-handle,
+        body.signature-fields-page.select-field-mode .existing-typed-field-marker .resize-handle {
+            pointer-events: auto;
+            display: block;
+        }
+        body.signature-fields-page.hide-field-boxes .existing-field-marker,
+        body.signature-fields-page.hide-field-boxes .existing-typed-field-marker {
+            display: none !important;
+        }
+        .existing-typed-field-marker::before {
+            content: attr(data-label);
+            position: absolute;
+            top: -20px;
+            left: 0;
+            background: #ffc107;
+            color: #000;
+            padding: 2px 6px;
+            font-size: 11px;
+            border-radius: 3px;
+            white-space: nowrap;
+            font-weight: bold;
+        }
+        .sidebar-panel {
+            background: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            font-size: 16px; /* Prevents zoom on iOS */
+            min-height: 44px; /* Touch-friendly */
+        }
+        .signature-field-item {
+            background: #f8f9fa;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 0.5rem;
+            border-left: 3px solid #007bff;
+        }
+        .signature-field-item h4 {
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+        .signature-field-item p {
+            font-size: 0.8em;
+            color: #808080;
+            margin: 3px 0;
+        }
+        .instructions {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 0.5rem;
+            margin-bottom: 20px;
+            border-left: 4px solid #007bff;
+        }
+        .instructions h3 {
+            margin-bottom: 10px;
+            font-size: 1em;
+        }
+        .instructions ol {
+            margin-left: 20px;
+        }
+        .instructions li {
+            margin-bottom: 5px;
+            font-size: 0.9em;
+        }
+    {{ global_theme_css|safe }}
+        /* Signature fields page dark overrides (scoped) */
+        body.signature-fields-page .document-viewer-container,
+        body.signature-fields-page .sidebar-panel {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+            border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            color: #f2f5fb !important;
+        }
+        body.signature-fields-page .document-viewer {
+            background: #343a46 !important;
+        }
+        body.signature-fields-page .sidebar-panel h3,
+        body.signature-fields-page .sidebar-panel label,
+        body.signature-fields-page .sidebar-panel p,
+        body.signature-fields-page .document-viewer-container h3,
+        body.signature-fields-page .signature-field-item h4,
+        body.signature-fields-page .signature-field-item p,
+        body.signature-fields-page .instructions h3,
+        body.signature-fields-page .instructions li {
+            color: #f2f5fb !important;
+        }
+        body.signature-fields-page .sidebar-panel input,
+        body.signature-fields-page .sidebar-panel select {
+            background: rgba(255, 255, 255, 0.08) !important;
+            border: 1px solid rgba(255, 255, 255, 0.24) !important;
+            color: #f2f5fb !important;
+        }
+        body.signature-fields-page .sidebar-panel input::placeholder {
+            color: #b7c1d3 !important;
+        }
+        body.signature-fields-page .sidebar-panel select option {
+            background: #1a202c !important;
+            color: #f2f5fb !important;
+        }
+        body.signature-fields-page .instructions,
+        body.signature-fields-page .signature-field-item {
+            background: rgba(255, 255, 255, 0.06) !important;
+            border-left-color: rgba(110, 168, 254, 0.9) !important;
+        }
+        body.signature-fields-page .instructions p {
+            color: #d6deec !important;
+        }
+        body.signature-fields-page .instructions table {
+            background: rgba(10, 15, 24, 0.92) !important;
+            color: #f2f5fb !important;
+        }
+        body.signature-fields-page .instructions table thead tr,
+        body.signature-fields-page .instructions table th {
+            background: #111827 !important;
+            color: #f8fafc !important;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.22) !important;
+        }
+        body.signature-fields-page .instructions table tr {
+            border-top-color: rgba(255, 255, 255, 0.14) !important;
+        }
+        body.signature-fields-page .instructions table td {
+            color: #edf2f7 !important;
+        }
+        body.signature-fields-page .instructions table td[style*="monospace"] {
+            color: #cbd5e1 !important;
+        }
+        body.signature-fields-page .inventory-field-type,
+        body.signature-fields-page .inventory-choice-wrap input,
+        body.signature-fields-page .inventory-label-input,
+        body.signature-fields-page .configured-fields-search {
+            background: #0f172a !important;
+            border: 1px solid rgba(255, 255, 255, 0.28) !important;
+            color: #f8fafc !important;
+            border-radius: 6px !important;
+        }
+        body.signature-fields-page .inventory-field-type option,
+        body.signature-fields-page .sidebar-field-type option,
+        body.signature-fields-page .form-group select option {
+            background: #0f172a !important;
+            color: #f8fafc !important;
+        }
+        body.signature-fields-page .inventory-field-type:focus,
+        body.signature-fields-page .inventory-choice-wrap input:focus,
+        body.signature-fields-page .inventory-label-input:focus,
+        body.signature-fields-page .configured-fields-search:focus {
+            border-color: rgba(254, 1, 0, 0.8) !important;
+            box-shadow: 0 0 0 3px rgba(254, 1, 0, 0.18) !important;
+            outline: none !important;
+        }
+        body.signature-fields-page .inventory-label-input {
+            width: min(260px, 100%);
+            padding: 4px 7px;
+            font-size: 0.9em;
+        }
+        body.signature-fields-page .configured-fields-toolbar {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        body.signature-fields-page .configured-fields-search {
+            width: min(360px, 100%);
+            padding: 8px 10px;
+            font-size: 0.95em;
+        }
+        body.signature-fields-page .configured-fields-empty {
+            color: #cbd5e1;
+            font-size: 0.9em;
+            display: none;
+            margin: 8px 0 0;
+        }
+        body.signature-fields-page .clear-configured-selection {
+            display: none;
+            padding: 7px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            border-radius: 6px;
+            background: #2f3a4f;
+            color: #f2f5fb;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+        body.signature-fields-page .clear-configured-selection:hover {
+            background: #3b4860;
+        }
+        body.signature-fields-page .configured-field-row.selected-configured-field {
+            background: rgba(254, 1, 0, 0.18) !important;
+            outline: 2px solid rgba(254, 1, 0, 0.8);
+            outline-offset: -2px;
+        }
+        body.signature-fields-page .configured-field-row.selected-configured-field td {
+            color: #fff !important;
+        }
+    </style>
+</head>
+<body class="signature-fields-page">
+    <div class="header">
+        <div class="header-content">
+            <h1>✍️ Set Signature Fields - {{ document.name_for_users }}</h1>
+        </div>
+        <div class="header-actions"><a href="{{ url_for('manage_documents') }}" class="back-btn">← Back to Documents</a></div>
+    </div>
+    
+    <div class="container">
+        {% if is_pdf and acro_widget_count > 0 %}
+        <div class="instructions" style="margin-bottom: 16px;">
+            <h3>Fillable PDF (Adobe AcroForm)</h3>
+            <p style="font-size: 0.9em; margin-bottom: 10px;">
+                This PDF has <strong>{{ acro_widget_count }}</strong> built-in form field(s).
+                {% if configured_field_count == 0 %}
+                Users cannot sign until fields are imported or placed manually.
+                {% elif acro_widget_count != configured_field_count %}
+                <strong style="color: #856404;">{{ configured_field_count }}</strong> configured in the app — counts differ; use <strong>Re-import from PDF</strong> if fields are missing (common after upgrading field detection).
+                {% else %}
+                {{ configured_field_count }} field(s) are configured in the app (matches PDF).
+                {% endif %}
+            </p>
+            <p style="font-size: 0.85em; margin-bottom: 10px; color: #555;">
+                Forms uploaded before the AcroForm text-field fix may only show checkboxes. Re-import replaces all field positions and clears saved user values for this document.
+            </p>
+            <form method="POST" action="{{ url_for('import_acroform_fields_route', doc_id=document.id) }}" style="display: inline-block; margin-right: 8px;"
+                  onsubmit="return confirm('{% if configured_field_count > 0 %}Replace existing fields with positions from the PDF? Saved user field values for this document will be cleared.{% else %}Import field positions from the PDF?{% endif %}');">
+                {% if configured_field_count > 0 %}
+                <input type="hidden" name="replace" value="1">
+                {% endif %}
+                <button type="submit" class="btn btn-success">
+                    {% if configured_field_count > 0 %}Re-import from PDF{% else %}Import fields from PDF{% endif %}
+                </button>
+            </form>
+        </div>
+        {% endif %}
+        {% if field_inventory %}
+        <div class="instructions" style="margin-bottom: 16px;">
+            <h3>Configured fields ({{ field_inventory|length }})</h3>
+            <p style="font-size: 0.9em; color: #555; margin-bottom: 8px;">Change <strong>Input type</strong> for imported fields (e.g. Text -> Phone Number or Last 4 SSN), then click <strong>Save</strong>. Checkbox fields need a group name.</p>
+            <div class="configured-fields-toolbar">
+                <input type="search" id="configuredFieldsSearch" class="configured-fields-search" placeholder="Search fields by PDF name, label, type, or page...">
+                <button type="button" id="clearConfiguredSelection" class="clear-configured-selection">Show All Fields</button>
+                <span style="font-size: 0.85em; color: #cbd5e1;">Tip: In Select/Edit mode, click a field in the list/PDF to highlight it, or drag a box on the PDF to move it.</span>
+            </div>
+            <div id="configuredFieldsScroller" style="max-height: 220px; overflow: auto; border: 1px solid #ddd; border-radius: 4px;">
+                <table style="width: 100%; font-size: 0.85em; border-collapse: collapse;">
+                    <thead>
+                        <tr style="background: #f0f0f0; position: sticky; top: 0;">
+                            <th style="text-align: left; padding: 6px 8px;">PDF field name</th>
+                            <th style="text-align: left; padding: 6px 8px;">Label</th>
+                            <th style="text-align: left; padding: 6px 8px;">Type</th>
+                            <th style="text-align: left; padding: 6px 8px;">Required</th>
+                            <th style="text-align: left; padding: 6px 8px;">Pg</th>
+                            <th style="text-align: left; padding: 6px 8px;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in field_inventory %}
+                        <tr id="configured-field-{{ row.kind }}-{{ row.id }}" class="configured-field-row" data-field-kind="{{ row.kind }}" data-field-id="{{ row.id }}" data-search="{{ (row.pdf_name or '')|lower }} {{ row.label|lower }} {{ row.field_type|lower }} page {{ row.page }}" style="border-top: 1px solid #eee;">
+                            <td style="padding: 5px 8px; font-family: monospace; color: #333;">{{ row.pdf_name or '—' }}</td>
+                            <td style="padding: 5px 8px;">
+                                {% if row.kind == 'typed' %}
+                                <form id="typed-field-update-{{ row.id }}" method="POST" action="{{ url_for('update_typed_field', field_id=row.id) }}"></form>
+                                <input form="typed-field-update-{{ row.id }}" type="hidden" name="return_page" value="{{ initial_page }}" class="return-page-input">
+                                <input form="typed-field-update-{{ row.id }}" type="text" name="field_label" value="{{ row.label }}" class="inventory-label-input">
+                                {% else %}
+                                {{ row.label }}
+                                {% endif %}
+                            </td>
+                            <td style="padding: 5px 8px;">
+                                {% if row.kind == 'typed' %}
+                                <div class="inventory-type-form" style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+                                    <select form="typed-field-update-{{ row.id }}" name="field_type" class="inventory-field-type" style="font-size: 0.9em; padding: 3px 6px; max-width: 180px;">
+                                        {% for value, label in field_editor_type_choices %}
+                                        <option value="{{ value }}" {% if row.field_type == value %}selected{% endif %}>{{ label }}</option>
+                                        {% endfor %}
+                                    </select>
+                                    <span class="inventory-choice-wrap" style="{% if row.field_type != 'checkbox_choice' %}display:none;{% endif %}">
+                                        <input form="typed-field-update-{{ row.id }}" type="text" name="choice_group" value="{{ row.choice_group or '' }}" placeholder="Group name" style="font-size: 0.85em; padding: 3px 6px; width: 110px;">
+                                    </span>
+                                </div>
+                                {% else %}
+                                {{ row.field_type|replace('_', ' ') }}
+                                {% endif %}
+                            </td>
+                            <td style="padding: 5px 8px;">
+                                {% if row.kind == 'typed' and row.field_type == 'checkbox_choice' %}
+                                One per group
+                                {% else %}
+                                Required
+                                {% endif %}
+                            </td>
+                            <td style="padding: 5px 8px;">{{ row.page }}</td>
+                            <td style="padding: 5px 8px; white-space: nowrap;">
+                                {% if row.kind == 'typed' %}
+                                <button form="typed-field-update-{{ row.id }}" type="submit" class="btn btn-success" style="padding: 3px 10px; font-size: 0.8em;">Save</button>
+                                <form method="POST" action="{{ url_for('delete_typed_field', field_id=row.id) }}" style="display: inline;">
+                                    <input type="hidden" name="return_page" value="{{ initial_page }}" class="return-page-input">
+                                    <button type="submit" class="btn btn-danger" style="padding: 3px 10px; font-size: 0.8em;" onclick="return confirm('Delete this typed field?')">Delete</button>
+                                </form>
+                                {% else %}
+                                <form method="POST" action="{{ url_for('delete_signature_field', field_id=row.id) }}" style="display: inline;">
+                                    <input type="hidden" name="return_page" value="{{ initial_page }}" class="return-page-input">
+                                    <button type="submit" class="btn btn-danger" style="padding: 3px 10px; font-size: 0.8em;" onclick="return confirm('Delete this signature field?')">Delete</button>
+                                </form>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <p id="configuredFieldsEmpty" class="configured-fields-empty">No configured fields match your search.</p>
+        </div>
+        {% endif %}
+        
+        <div class="main-content">
+            <div class="document-viewer-container">
+                <h3 style="margin-bottom: 15px;">Document Preview</h3>
+                <div class="document-viewer-layout">
+                    <div class="document-viewer-wrap">
+                        <div class="pdf-page-toolbar" id="pdfPageToolbar" style="display: none;">
+                            <span id="pdfPageStatus">Page 1</span>
+                            <button type="button" id="pdfPrevPage" title="Previous page">Prev</button>
+                            <button type="button" id="pdfNextPage" title="Next page">Next</button>
+                        </div>
+                        <div class="document-viewer" id="documentViewer">
+                            {% if is_pdf %}
+                            <canvas id="pdfCanvas"></canvas>
+                            {% else %}
+                            <p style="padding: 20px; color: white;">Signature fields can only be set on PDF documents. Please convert this document to PDF first.</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% if is_pdf %}
+                    <aside class="pdf-page-scroller" id="pdfPageScroller" aria-label="Document pages"></aside>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="sidebar-panel">
+                <h3 style="margin-bottom: 15px;">Add Field</h3>
+                <form id="fieldForm" method="POST" onsubmit="return submitFieldForm(event)">
+                    <div class="form-group">
+                        <label for="field_type_selector">Field Type:</label>
+                        <select name="field_type_selector" id="field_type_selector" required onchange="toggleFieldTypeOptions()">
+                            <option value="signature">Signature Field</option>
+                            <option value="typed">Typed Field</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="field_label">Field Label:</label>
+                        <input type="text" name="field_label" id="field_label" placeholder="e.g., Employee Signature, Name, Date" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="page_number">Page Number:</label>
+                        <input type="number" name="page_number" id="page_number" value="{{ initial_page }}" min="1" required>
+                        <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Use the page list beside the document or Prev/Next to switch pages</p>
+                    </div>
+                    
+                    <!-- Signature Field Options -->
+                    <div id="signatureFieldOptions" class="field-type-options">
+                        <input type="hidden" name="signature_type" id="signature_type" value="image">
+                        <p style="font-size: 0.85em; color: #666; margin-top: 0;">Users draw or apply a saved signature image on this field.</p>
+                    </div>
+                    
+                    <!-- Typed Field Options -->
+                    <div id="typedFieldOptions" class="field-type-options" style="display: none;">
+                        <div class="form-group">
+                            <label for="typed_field_type">Input Type:</label>
+                            <select name="typed_field_type" id="typed_field_type">
+                                <option value="text">Text</option>
+                                <option value="name">Name</option>
+                                <option value="typed_name">Typed Name (auto-fills user's name, click to sign)</option>
+                                <option value="typed_initials">Typed Initials (auto-fills initials, click to sign)</option>
+                                <option value="date">Date</option>
+                                <option value="number">Number</option>
+                                <option value="phone">Phone Number</option>
+                                <option value="last4">Last 4 (SSN — masked XXX-XX-####)</option>
+                                <option value="checkbox_choice">Checkbox (pick one in a group)</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="typedChoiceGroupWrap" style="display: none;">
+                            <label for="choice_group">Choice group name:</label>
+                            <input type="text" name="choice_group" id="choice_group" placeholder="e.g. marital_status" maxlength="100">
+                            <p style="font-size: 0.85em; color: #666; margin-top: 5px;">Use the <strong>same</strong> group name on every box in the set (Single, Married, etc.). The user can mark only one with an X.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="typed_placeholder">Placeholder (optional):</label>
+                            <input type="text" name="placeholder" id="typed_placeholder" placeholder="e.g., Enter your name">
+                        </div>
+                        <div class="form-group">
+                            <p style="font-size: 0.85em; color: #cbd5e1; margin-top: 5px;">All typed fields are required. Checkbox fields require one selection per group.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Position (drag on document to create field):</label>
+                        <input type="hidden" name="x_position" id="x_position" required>
+                        <input type="hidden" name="y_position" id="y_position" required>
+                        <input type="hidden" name="width" id="width" value="200">
+                        <input type="hidden" name="height" id="height" value="80">
+                        <div id="positionDisplay" style="font-size: 0.85em; color: #666; margin-top: 5px; padding: 8px; background: #f8f9fa; border-radius: 4px;">
+                            <strong>How to add a field:</strong><br>
+                            1. Select field type above (Signature or Typed Field)<br>
+                            2. Switch to the corresponding mode using the button above the document<br>
+                            3. Click and hold at the top-left corner where you want the field<br>
+                            4. Drag to the bottom-right corner to set the size<br>
+                            5. Release to create the field<br>
+                            6. You can then drag the new field to move it, or drag the corner handles to resize it<br>
+                            7. To move an existing field: switch to <strong>Select/Edit</strong>, then drag the blue/yellow box on the PDF
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-success" style="width: 100%;" id="submitButton">Add Field</button>
+                </form>
+                
+                <h3 style="margin-top: 30px; margin-bottom: 15px;">Existing Signature Fields</h3>
+                <div id="existingFields">
+                    {% if existing_fields %}
+                        {% for field in existing_fields %}
+                        <div class="signature-field-item">
+                            <h4>{{ field.field_label or 'Signature Field' }}</h4>
+                            <p>Page: {{ field.page_number }}</p>
+                            <p>Position: ({{ "%.0f"|format(field.x_position) }}, {{ "%.0f"|format(field.y_position) }})</p>
+                            <form method="POST" action="{{ url_for('delete_signature_field', field_id=field.id) }}" style="display: inline;">
+                                <input type="hidden" name="return_page" value="{{ initial_page }}" class="return-page-input">
+                                <button type="submit" class="btn btn-danger" style="padding: 5px 10px; font-size: 0.8em;" onclick="return confirm('Delete this signature field?')">Delete</button>
+                            </form>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <p style="color: #666; font-size: 0.9em;">No signature fields yet.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        var pdfDoc = null;
+        var currentPage = {{ initial_page }};
+        var pdfScale = 1.0;
+        var canvasOffsetX = 0;
+        var canvasOffsetY = 0;
+        var currentIndicator = null;
+        var isResizing = false;
+        var resizeStartX = 0;
+        var resizeStartY = 0;
+        var resizeStartWidth = 0;
+        var resizeStartHeight = 0;
+        var resizeHandle = null;
+        var SIG_FIELDS_PAGE_KEY = 'sigFieldsPage_{{ document.id }}';
+        var SIG_FIELDS_STATE_KEY = 'sigFieldsState_{{ document.id }}';
+        var pagesWithFields = {};
+        var selectedConfiguredKey = null;
+        var restoredSignatureFieldsState = null;
+
+        function getInitialPage() {
+            var params = new URLSearchParams(window.location.search);
+            var fromUrl = parseInt(params.get('page'), 10);
+            if (!isNaN(fromUrl) && fromUrl >= 1) return fromUrl;
+            try {
+                var stored = parseInt(sessionStorage.getItem(SIG_FIELDS_PAGE_KEY), 10);
+                if (!isNaN(stored) && stored >= 1) return stored;
+            } catch (e) {}
+            return currentPage || 1;
+        }
+
+        function syncReturnPageInputs() {
+            document.querySelectorAll('.return-page-input').forEach(function(inp) {
+                inp.value = currentPage;
+            });
+        }
+
+        function persistPage(pageNum) {
+            currentPage = pageNum;
+            try { sessionStorage.setItem(SIG_FIELDS_PAGE_KEY, String(pageNum)); } catch (e) {}
+            var params = new URLSearchParams(window.location.search);
+            if (params.get('page') !== String(pageNum)) {
+                params.set('page', String(pageNum));
+                window.history.replaceState({}, '', window.location.pathname + '?' + params.toString());
+            }
+            var pageInput = document.getElementById('page_number');
+            if (pageInput) pageInput.value = pageNum;
+            syncReturnPageInputs();
+            updatePageScrollerUI();
+        }
+
+        function readSignatureFieldsState() {
+            try {
+                var raw = sessionStorage.getItem(SIG_FIELDS_STATE_KEY);
+                return raw ? JSON.parse(raw) : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function saveSignatureFieldsState() {
+            var scroller = document.getElementById('configuredFieldsScroller');
+            var search = document.getElementById('configuredFieldsSearch');
+            var state = {
+                mode: fieldMode || 'signature',
+                selectedKey: selectedConfiguredKey || '',
+                tableScrollTop: scroller ? scroller.scrollTop : 0,
+                windowScrollY: window.pageYOffset || document.documentElement.scrollTop || 0,
+                search: search ? (search.value || '') : '',
+                boxesHidden: document.body.classList.contains('hide-field-boxes')
+            };
+            try {
+                sessionStorage.setItem(SIG_FIELDS_STATE_KEY, JSON.stringify(state));
+            } catch (e) {}
+        }
+
+        function bindConfiguredFieldFormState() {
+            document.querySelectorAll('#configuredFieldsScroller form').forEach(function(form) {
+                form.addEventListener('submit', saveSignatureFieldsState);
+            });
+        }
+
+        function updatePageScrollerUI() {
+            if (!pdfDoc) return;
+            var status = document.getElementById('pdfPageStatus');
+            if (status) status.textContent = 'Page ' + currentPage + ' of ' + pdfDoc.numPages;
+            var prevBtn = document.getElementById('pdfPrevPage');
+            var nextBtn = document.getElementById('pdfNextPage');
+            if (prevBtn) prevBtn.disabled = currentPage <= 1;
+            if (nextBtn) nextBtn.disabled = currentPage >= pdfDoc.numPages;
+            document.querySelectorAll('.pdf-page-scroller-item').forEach(function(btn) {
+                var p = parseInt(btn.getAttribute('data-page'), 10);
+                btn.classList.toggle('active', p === currentPage);
+                btn.classList.toggle('has-fields', !!pagesWithFields[p]);
+            });
+            var active = document.querySelector('.pdf-page-scroller-item.active');
+            if (active && active.scrollIntoView) {
+                active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }
+        }
+
+        function buildPageScroller(totalPages) {
+            var scroller = document.getElementById('pdfPageScroller');
+            var toolbar = document.getElementById('pdfPageToolbar');
+            if (!scroller) return;
+            if (totalPages <= 1) {
+                scroller.style.display = 'none';
+                if (toolbar) toolbar.style.display = 'none';
+                return;
+            }
+            scroller.style.display = 'flex';
+            if (toolbar) toolbar.style.display = 'flex';
+            scroller.innerHTML = '';
+            var title = document.createElement('div');
+            title.className = 'pdf-page-scroller-title';
+            title.textContent = totalPages + ' pg';
+            scroller.appendChild(title);
+            var list = document.createElement('div');
+            list.className = 'pdf-page-scroller-list';
+            list.id = 'pdfPageScrollerList';
+            for (var i = 1; i <= totalPages; i++) {
+                (function(pageNum) {
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'pdf-page-scroller-item';
+                    btn.setAttribute('data-page', pageNum);
+                    btn.textContent = pageNum;
+                    btn.title = 'Page ' + pageNum;
+                    btn.addEventListener('click', function() { goToPage(pageNum); });
+                    list.appendChild(btn);
+                })(i);
+            }
+            scroller.appendChild(list);
+            updatePageScrollerUI();
+        }
+
+        function computePagesWithFields() {
+            pagesWithFields = {};
+            {% for field in existing_fields %}
+            pagesWithFields[{{ field.page_number }}] = true;
+            {% endfor %}
+            {% if existing_typed_fields %}
+            {% for field in existing_typed_fields %}
+            pagesWithFields[{{ field.page_number }}] = true;
+            {% endfor %}
+            {% endif %}
+        }
+
+        function goToPage(pageNum) {
+            if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
+            persistPage(pageNum);
+            renderPage(pageNum);
+        }
+
+        function reloadWithCurrentPage() {
+            var params = new URLSearchParams(window.location.search);
+            params.set('page', String(currentPage));
+            window.location.href = window.location.pathname + '?' + params.toString();
+        }
+
+        // Load PDF using PDF.js
+        function loadPDF() {
+            var canvas = document.getElementById('pdfCanvas');
+            if (!canvas) return;
+            computePagesWithFields();
+            currentPage = getInitialPage();
+            syncReturnPageInputs();
+            
+            // Set up PDF.js worker
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            
+            // Get PDF URL
+            var pdfUrl = '{{ url_for("view_document_embed", doc_id=document.id) }}';
+            
+                // Load the PDF
+                pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+                    pdfDoc = pdf;
+                    buildPageScroller(pdf.numPages);
+                    var startPage = Math.min(Math.max(1, currentPage), pdf.numPages);
+                    goToPage(startPage);
+                    var prevBtn = document.getElementById('pdfPrevPage');
+                    var nextBtn = document.getElementById('pdfNextPage');
+                    if (prevBtn) prevBtn.addEventListener('click', function() { goToPage(currentPage - 1); });
+                    if (nextBtn) nextBtn.addEventListener('click', function() { goToPage(currentPage + 1); });
+                }).catch(function(error) {
+                    console.error('Error loading PDF:', error);
+                    document.getElementById('documentViewer').innerHTML = '<p style="padding: 20px; color: white;">Error loading PDF. Please try again.</p>';
+                });
+        }
+        
+        // Render a PDF page
+        function renderPage(pageNum) {
+            if (!pdfDoc) return;
+            
+            var canvas = document.getElementById('pdfCanvas');
+            var ctx = canvas.getContext('2d');
+            
+            pdfDoc.getPage(pageNum).then(function(page) {
+                // Calculate scale to fit 800px height (matching user view and embedding)
+                var viewerHeight = 800;
+                var viewport = page.getViewport({ scale: 1.0 });
+                var scale = viewerHeight / viewport.height;
+                pdfScale = scale;
+                
+                // Set canvas size
+                var scaledViewport = page.getViewport({ scale: scale });
+                canvas.width = scaledViewport.width;
+                canvas.height = scaledViewport.height;
+                
+                // Render PDF page
+                var renderContext = {
+                    canvasContext: ctx,
+                    viewport: scaledViewport
+                };
+                
+                page.render(renderContext).promise.then(function() {
+                    // Calculate canvas offset within viewer
+                    var viewer = document.getElementById('documentViewer');
+                    var viewerRect = viewer.getBoundingClientRect();
+                    var canvasRect = canvas.getBoundingClientRect();
+                    canvasOffsetX = canvasRect.left - viewerRect.left;
+                    canvasOffsetY = canvasRect.top - viewerRect.top;
+                    
+                    currentPage = pageNum;
+                    // Wait a bit for canvas to be fully rendered before displaying fields
+                    setTimeout(function() {
+                        displayExistingFields();
+                    }, 50);
+                });
+            });
+        }
+        
+        var isDraggingExistingField = false;
+        var existingFieldDragMoved = false;
+
+        // Mutable field geometry for the current editor session (survives drag/redraw without page reload)
+        var signatureFieldsState = [
+                {% for field in existing_fields %}
+                {
+                    id: {{ field.id }},
+                    label: '{{ field.field_label or "Signature" }}',
+                    x: {{ field.x_position }},
+                    y: {{ field.y_position }},
+                    width: {{ field.width or 200 }},
+                    height: {{ field.height or 80 }},
+                    page: {{ field.page_number }}
+                }{% if not loop.last %},{% endif %}
+                {% endfor %}
+        ];
+        var typedFieldsState = [
+                {% if existing_typed_fields %}
+                {% for field in existing_typed_fields %}
+                {
+                    id: {{ field.id }},
+                    label: '{{ field.field_label or "Typed Field" }}',
+                    type: '{{ field.field_type }}',
+                    group: '{{ field.choice_group or "" }}',
+                    x: {{ field.x_position }},
+                    y: {{ field.y_position }},
+                    width: {{ field.width or 200 }},
+                    height: {{ field.height or 30 }},
+                    page: {{ field.page_number }}
+                }{% if not loop.last %},{% endif %}
+                {% endfor %}
+                {% endif %}
+        ];
+
+        // Display existing signature fields on the canvas
+        function displayExistingFields() {
+            // Remove ONLY the saved field markers, NOT the temporary indicators being created/edited
+            var existing = document.querySelectorAll('.existing-field-marker, .existing-typed-field-marker');
+            existing.forEach(function(el) { el.remove(); });
+            
+            var viewer = document.getElementById('documentViewer');
+            var canvas = document.getElementById('pdfCanvas');
+            if (!viewer || !canvas) return;
+            
+            // Signature fields for current page (from live session state)
+            var fields = signatureFieldsState;
+            
+            fields.forEach(function(field) {
+                if (field.page !== currentPage) return;
+                
+                var marker = document.createElement('div');
+                marker.className = 'existing-field-marker';
+                marker.setAttribute('data-label', field.label);
+                marker.setAttribute('data-field-kind', 'signature');
+                marker.setAttribute('data-field-id', field.id);
+                if (selectedConfiguredKey === 'signature-' + field.id) {
+                    marker.classList.add('selected-field-marker');
+                }
+                marker.addEventListener('click', function(e) {
+                    if (fieldMode !== 'select') return;
+                    if (existingFieldDragMoved) {
+                        existingFieldDragMoved = false;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return;
+                    }
+                    e.preventDefault();
+                    e.stopPropagation();
+                    selectConfiguredField('signature', field.id);
+                });
+                // Position markers relative to canvas (convert PDF coordinates to screen coordinates)
+                var canvas = document.getElementById('pdfCanvas');
+                if (canvas && canvas.width > 0 && canvas.height > 0) {
+                    var canvasRect = canvas.getBoundingClientRect();
+                    var viewerRect = viewer.getBoundingClientRect();
+                    // Convert PDF coordinates to screen coordinates using scale
+                    var scaleX = canvas.width / canvasRect.width;
+                    var scaleY = canvas.height / canvasRect.height;
+                    if (scaleX > 0 && scaleY > 0) {
+                        marker.style.left = (canvasRect.left - viewerRect.left + (field.x / scaleX)) + 'px';
+                        marker.style.top = (canvasRect.top - viewerRect.top + (field.y / scaleY)) + 'px';
+                        marker.style.width = (field.width / scaleX) + 'px';
+                        marker.style.height = (field.height / scaleY) + 'px';
+                    } else {
+                        // Fallback if scale calculation fails
+                        marker.style.left = (canvasOffsetX + (field.x / pdfScale)) + 'px';
+                        marker.style.top = (canvasOffsetY + (field.y / pdfScale)) + 'px';
+                        marker.style.width = (field.width / pdfScale) + 'px';
+                        marker.style.height = (field.height / pdfScale) + 'px';
+                    }
+                } else {
+                    // Fallback if canvas not ready
+                    marker.style.left = (canvasOffsetX + (field.x / pdfScale)) + 'px';
+                    marker.style.top = (canvasOffsetY + (field.y / pdfScale)) + 'px';
+                    marker.style.width = (field.width / pdfScale) + 'px';
+                    marker.style.height = (field.height / pdfScale) + 'px';
+                }
+                viewer.appendChild(marker);
+                enableExistingFieldDrag(marker, 'signature', field);
+            });
+            
+            // Typed fields for current page (from live session state)
+            var typedFields = typedFieldsState;
+            
+            typedFields.forEach(function(field) {
+                if (field.page !== currentPage) return;
+                
+                var marker = document.createElement('div');
+                marker.className = 'existing-typed-field-marker';
+                var markerLabel = field.label + ' (' + field.type + ')';
+                if (field.group) markerLabel += ' [' + field.group + ']';
+                marker.setAttribute('data-label', markerLabel);
+                marker.setAttribute('data-field-kind', 'typed');
+                marker.setAttribute('data-field-id', field.id);
+                if (selectedConfiguredKey === 'typed-' + field.id) {
+                    marker.classList.add('selected-field-marker');
+                }
+                marker.addEventListener('click', function(e) {
+                    if (fieldMode !== 'select') return;
+                    if (existingFieldDragMoved) {
+                        existingFieldDragMoved = false;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return;
+                    }
+                    e.preventDefault();
+                    e.stopPropagation();
+                    selectConfiguredField('typed', field.id);
+                });
+                // Position markers relative to canvas (convert PDF coordinates to screen coordinates)
+                var canvas = document.getElementById('pdfCanvas');
+                if (canvas && canvas.width > 0 && canvas.height > 0) {
+                    var canvasRect = canvas.getBoundingClientRect();
+                    var viewerRect = viewer.getBoundingClientRect();
+                    // Convert PDF coordinates to screen coordinates using scale
+                    var scaleX = canvas.width / canvasRect.width;
+                    var scaleY = canvas.height / canvasRect.height;
+                    if (scaleX > 0 && scaleY > 0) {
+                        marker.style.left = (canvasRect.left - viewerRect.left + (field.x / scaleX)) + 'px';
+                        marker.style.top = (canvasRect.top - viewerRect.top + (field.y / scaleY)) + 'px';
+                        marker.style.width = (field.width / scaleX) + 'px';
+                        marker.style.height = (field.height / scaleY) + 'px';
+                    } else {
+                        // Fallback if scale calculation fails
+                        marker.style.left = (canvasOffsetX + (field.x / pdfScale)) + 'px';
+                        marker.style.top = (canvasOffsetY + (field.y / pdfScale)) + 'px';
+                        marker.style.width = (field.width / pdfScale) + 'px';
+                        marker.style.height = (field.height / pdfScale) + 'px';
+                    }
+                } else {
+                    // Fallback if canvas not ready
+                    marker.style.left = (canvasOffsetX + (field.x / pdfScale)) + 'px';
+                    marker.style.top = (canvasOffsetY + (field.y / pdfScale)) + 'px';
+                    marker.style.width = (field.width / pdfScale) + 'px';
+                    marker.style.height = (field.height / pdfScale) + 'px';
+                }
+                viewer.appendChild(marker);
+                enableExistingFieldDrag(marker, 'typed', field);
+            });
+        }
+
+        function syncExistingFieldSidebarPosition(kind, fieldId, x, y) {
+            var sidebarItems = document.querySelectorAll('.signature-field-item');
+            // Best-effort: refresh configured list row later via data attributes if present
+            var row = document.getElementById('configured-field-' + kind + '-' + fieldId);
+            if (row) {
+                row.setAttribute('data-x', String(Math.round(x)));
+                row.setAttribute('data-y', String(Math.round(y)));
+            }
+            if (kind === 'signature') {
+                sidebarItems.forEach(function(item) {
+                    // Keep visual sidebar simple; page reload not required for drag
+                });
+            }
+        }
+
+        function saveExistingFieldGeometry(kind, fieldId, x, y, width, height) {
+            var url = kind === 'typed'
+                ? '/admin/documents/typed-fields/' + fieldId + '/geometry'
+                : '/admin/documents/signature-fields/' + fieldId + '/geometry';
+            return fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({
+                    x_position: x,
+                    y_position: y,
+                    width: width,
+                    height: height,
+                    page_number: currentPage
+                })
+            }).then(function(resp) {
+                return resp.json().then(function(data) {
+                    if (!resp.ok || !data.success) {
+                        throw new Error((data && data.message) || 'Could not save field position');
+                    }
+                    return data;
+                });
+            });
+        }
+
+        function enableExistingFieldDrag(marker, kind, field) {
+            marker.dataset.x = field.x;
+            marker.dataset.y = field.y;
+            marker.dataset.width = field.width;
+            marker.dataset.height = field.height;
+            marker.dataset.fieldKind = kind;
+            marker.dataset.fieldId = field.id;
+
+            // Add resize handles for Select/Edit adjustments
+            ['bottom-right', 'bottom-left', 'top-right', 'top-left'].forEach(function(handleClass) {
+                if (marker.querySelector('.resize-handle.' + handleClass)) return;
+                var handle = document.createElement('div');
+                handle.className = 'resize-handle ' + handleClass;
+                handle.style.display = (fieldMode === 'select') ? 'block' : 'none';
+                marker.appendChild(handle);
+            });
+
+            marker.addEventListener('mousedown', function(e) {
+                if (fieldMode !== 'select') return;
+                if (e.target.classList.contains('resize-handle') || e.target.closest('.resize-handle')) {
+                    return;
+                }
+                if (isCreatingField || isDraggingIndicator || isResizing) return;
+
+                isDraggingExistingField = true;
+                existingFieldDragMoved = false;
+                marker.classList.add('dragging-existing-field');
+                selectConfiguredField(kind, field.id);
+
+                var startX = e.clientX;
+                var startY = e.clientY;
+                var startLeft = parseFloat(marker.dataset.x) || field.x || 0;
+                var startTop = parseFloat(marker.dataset.y) || field.y || 0;
+                var startWidth = parseFloat(marker.dataset.width) || field.width || 200;
+                var startHeight = parseFloat(marker.dataset.height) || field.height || 80;
+
+                function onMove(ev) {
+                    if (!isDraggingExistingField) return;
+                    var canvasEl = document.getElementById('pdfCanvas');
+                    var viewerEl = document.getElementById('documentViewer');
+                    if (!canvasEl || !viewerEl) return;
+                    var canvasRect = canvasEl.getBoundingClientRect();
+                    var viewerRect = viewerEl.getBoundingClientRect();
+                    var scaleX = canvasEl.width / canvasRect.width;
+                    var scaleY = canvasEl.height / canvasRect.height;
+                    var deltaX = (ev.clientX - startX) * scaleX;
+                    var deltaY = (ev.clientY - startY) * scaleY;
+                    if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+                        existingFieldDragMoved = true;
+                    }
+                    var newLeft = Math.max(0, Math.min(startLeft + deltaX, canvasEl.width - startWidth));
+                    var newTop = Math.max(0, Math.min(startTop + deltaY, canvasEl.height - startHeight));
+                    marker.style.left = (canvasRect.left - viewerRect.left + (newLeft / scaleX)) + 'px';
+                    marker.style.top = (canvasRect.top - viewerRect.top + (newTop / scaleY)) + 'px';
+                    marker.dataset.x = newLeft;
+                    marker.dataset.y = newTop;
+                    updatePositionDisplay(newLeft, newTop, startWidth, startHeight);
+                    ev.preventDefault();
+                }
+
+                function onUp(ev) {
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                    marker.classList.remove('dragging-existing-field');
+                    isDraggingExistingField = false;
+                    if (!existingFieldDragMoved) {
+                        return;
+                    }
+                    var x = parseFloat(marker.dataset.x);
+                    var y = parseFloat(marker.dataset.y);
+                    var w = parseFloat(marker.dataset.width);
+                    var h = parseFloat(marker.dataset.height);
+                    field.x = x;
+                    field.y = y;
+                    saveExistingFieldGeometry(kind, field.id, x, y, w, h).then(function() {
+                        syncExistingFieldSidebarPosition(kind, field.id, x, y);
+                    }).catch(function(err) {
+                        alert(err.message || 'Could not save field position');
+                        displayExistingFields();
+                    });
+                }
+
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+                e.preventDefault();
+                e.stopPropagation();
+            });
+
+            // Resize existing fields in Select/Edit
+            marker.querySelectorAll('.resize-handle').forEach(function(handle) {
+                handle.addEventListener('mousedown', function(e) {
+                    if (fieldMode !== 'select') return;
+                    e.stopPropagation();
+                    e.preventDefault();
+                    isResizing = true;
+                    var resizeHandleName = handle.className.split(' ')[1];
+                    var resizeStartClientX = e.clientX;
+                    var resizeStartClientY = e.clientY;
+                    var resizeStartW = parseFloat(marker.dataset.width) || field.width || 200;
+                    var resizeStartH = parseFloat(marker.dataset.height) || field.height || 80;
+                    var resizeStartLeft = parseFloat(marker.dataset.x) || field.x || 0;
+                    var resizeStartTop = parseFloat(marker.dataset.y) || field.y || 0;
+                    marker.classList.add('dragging-existing-field');
+
+                    function onResizeMove(ev) {
+                        if (!isResizing) return;
+                        var canvasEl = document.getElementById('pdfCanvas');
+                        var viewerEl = document.getElementById('documentViewer');
+                        if (!canvasEl || !viewerEl) return;
+                        var canvasRect = canvasEl.getBoundingClientRect();
+                        var viewerRect = viewerEl.getBoundingClientRect();
+                        var scaleX = canvasEl.width / canvasRect.width;
+                        var scaleY = canvasEl.height / canvasRect.height;
+                        var dx = (ev.clientX - resizeStartClientX) * scaleX;
+                        var dy = (ev.clientY - resizeStartClientY) * scaleY;
+                        var minW = kind === 'typed' ? 40 : 50;
+                        var minH = kind === 'typed' ? 18 : 30;
+                        var newW = resizeStartW;
+                        var newH = resizeStartH;
+                        var newL = resizeStartLeft;
+                        var newT = resizeStartTop;
+                        if (resizeHandleName === 'bottom-right') {
+                            newW = Math.max(minW, resizeStartW + dx);
+                            newH = Math.max(minH, resizeStartH + dy);
+                        } else if (resizeHandleName === 'bottom-left') {
+                            newW = Math.max(minW, resizeStartW - dx);
+                            newH = Math.max(minH, resizeStartH + dy);
+                            newL = resizeStartLeft + (resizeStartW - newW);
+                        } else if (resizeHandleName === 'top-right') {
+                            newW = Math.max(minW, resizeStartW + dx);
+                            newH = Math.max(minH, resizeStartH - dy);
+                            newT = resizeStartTop + (resizeStartH - newH);
+                        } else if (resizeHandleName === 'top-left') {
+                            newW = Math.max(minW, resizeStartW - dx);
+                            newH = Math.max(minH, resizeStartH - dy);
+                            newL = resizeStartLeft + (resizeStartW - newW);
+                            newT = resizeStartTop + (resizeStartH - newH);
+                        }
+                        newL = Math.max(0, Math.min(newL, canvasEl.width - newW));
+                        newT = Math.max(0, Math.min(newT, canvasEl.height - newH));
+                        newW = Math.min(newW, canvasEl.width - newL);
+                        newH = Math.min(newH, canvasEl.height - newT);
+                        marker.style.left = (canvasRect.left - viewerRect.left + (newL / scaleX)) + 'px';
+                        marker.style.top = (canvasRect.top - viewerRect.top + (newT / scaleY)) + 'px';
+                        marker.style.width = (newW / scaleX) + 'px';
+                        marker.style.height = (newH / scaleY) + 'px';
+                        marker.dataset.x = newL;
+                        marker.dataset.y = newT;
+                        marker.dataset.width = newW;
+                        marker.dataset.height = newH;
+                        updatePositionDisplay(newL, newT, newW, newH);
+                    }
+
+                    function onResizeUp() {
+                        document.removeEventListener('mousemove', onResizeMove);
+                        document.removeEventListener('mouseup', onResizeUp);
+                        isResizing = false;
+                        marker.classList.remove('dragging-existing-field');
+                        var x = parseFloat(marker.dataset.x);
+                        var y = parseFloat(marker.dataset.y);
+                        var w = parseFloat(marker.dataset.width);
+                        var h = parseFloat(marker.dataset.height);
+                        field.x = x; field.y = y; field.width = w; field.height = h;
+                        saveExistingFieldGeometry(kind, field.id, x, y, w, h).catch(function(err) {
+                            alert(err.message || 'Could not save field size');
+                            displayExistingFields();
+                        });
+                    }
+
+                    document.addEventListener('mousemove', onResizeMove);
+                    document.addEventListener('mouseup', onResizeUp);
+                });
+            });
+        }
+        
+        // Handle canvas drag-to-create signature field
+        var canvas = document.getElementById('pdfCanvas');
+        var isDraggingIndicator = false;
+        var isCreatingField = false;
+        var createStartX = 0;
+        var createStartY = 0;
+        var previewIndicator = null;
+        var fieldMode = 'signature'; // 'signature' or 'typed'
+        
+        if (canvas) {
+            canvas.addEventListener('mousedown', function(e) {
+                if (fieldMode === 'select') {
+                    return;
+                }
+                // Don't start creating if clicking on existing indicator or resize handle
+                if (e.target.closest('.signature-field-indicator') || e.target.closest('.typed-field-indicator') || e.target.classList.contains('resize-handle')) {
+                    return;
+                }
+                // Don't start creating if already dragging/resizing an existing indicator
+                if (isDraggingIndicator || isResizing) {
+                    return;
+                }
+                // Don't start creating if there's already a current indicator being interacted with
+                if (currentIndicator && (e.target.closest('.signature-field-indicator') || e.target.closest('.typed-field-indicator'))) {
+                    return;
+                }
+                
+                // Start creating a new field (signature or typed based on mode)
+                isCreatingField = true;
+                var canvasRect = canvas.getBoundingClientRect();
+                
+                // Get click position in canvas coordinates
+                var clickX = e.clientX - canvasRect.left;
+                var clickY = e.clientY - canvasRect.top;
+                
+                // Convert to canvas pixel coordinates (accounting for scale)
+                var scaleX = canvas.width / canvasRect.width;
+                var scaleY = canvas.height / canvasRect.height;
+                createStartX = clickX * scaleX;
+                createStartY = clickY * scaleY;
+                
+                // Create preview indicator (style based on mode)
+                if (previewIndicator) {
+                    previewIndicator.remove();
+                }
+                previewIndicator = document.createElement('div');
+                if (fieldMode === 'typed') {
+                    previewIndicator.className = 'typed-field-indicator';
+                    previewIndicator.style.cssText = 'position: absolute; border: 2px dashed #ffc107; background: rgba(255, 193, 7, 0.1); pointer-events: none; z-index: 100; opacity: 0.7;';
+                } else {
+                    previewIndicator.className = 'signature-field-indicator';
+                    previewIndicator.style.pointerEvents = 'none';
+                    previewIndicator.style.opacity = '0.7';
+                }
+                var viewerRect = document.getElementById('documentViewer').getBoundingClientRect();
+                previewIndicator.style.left = (canvasRect.left - viewerRect.left + clickX) + 'px';
+                previewIndicator.style.top = (canvasRect.top - viewerRect.top + clickY) + 'px';
+                previewIndicator.style.width = '0px';
+                previewIndicator.style.height = '0px';
+                document.getElementById('documentViewer').appendChild(previewIndicator);
+                
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            
+            // Track mouse movement while creating field
+            document.addEventListener('mousemove', function(e) {
+                if (!isCreatingField || !previewIndicator) return;
+                
+                var canvasRect = canvas.getBoundingClientRect();
+                var viewerRect = document.getElementById('documentViewer').getBoundingClientRect();
+                
+                // Get current mouse position in canvas coordinates
+                var currentX = e.clientX - canvasRect.left;
+                var currentY = e.clientY - canvasRect.top;
+                
+                // Convert to canvas pixel coordinates
+                var scaleX = canvas.width / canvasRect.width;
+                var scaleY = canvas.height / canvasRect.height;
+                var currentXCanvas = currentX * scaleX;
+                var currentYCanvas = currentY * scaleY;
+                
+                // Calculate field dimensions (from start to current position)
+                var fieldWidth = Math.abs(currentXCanvas - createStartX);
+                var fieldHeight = Math.abs(currentYCanvas - createStartY);
+                
+                // Ensure minimum size (different for typed vs signature)
+                if (fieldMode === 'typed') {
+                    if (fieldWidth < 50) fieldWidth = 50;
+                    if (fieldHeight < 20) fieldHeight = 20;
+                } else {
+                    if (fieldWidth < 50) fieldWidth = 50;
+                    if (fieldHeight < 30) fieldHeight = 30;
+                }
+                
+                // Calculate top-left corner (always use the smaller coordinates)
+                var xPos = Math.min(createStartX, currentXCanvas);
+                var yPos = Math.min(createStartY, currentYCanvas);
+                
+                // Keep within canvas bounds
+                xPos = Math.max(0, Math.min(xPos, canvas.width - fieldWidth));
+                yPos = Math.max(0, Math.min(yPos, canvas.height - fieldHeight));
+                fieldWidth = Math.min(fieldWidth, canvas.width - xPos);
+                fieldHeight = Math.min(fieldHeight, canvas.height - yPos);
+                
+                // Update preview indicator position and size
+                previewIndicator.style.left = (canvasRect.left - viewerRect.left + (xPos / scaleX)) + 'px';
+                previewIndicator.style.top = (canvasRect.top - viewerRect.top + (yPos / scaleY)) + 'px';
+                previewIndicator.style.width = (fieldWidth / scaleX) + 'px';
+                previewIndicator.style.height = (fieldHeight / scaleY) + 'px';
+                
+                // Update position display
+                updatePositionDisplay(xPos, yPos, fieldWidth, fieldHeight);
+            });
+            
+            // Finalize field creation on mouseup
+            document.addEventListener('mouseup', function(e) {
+                if (!isCreatingField) return;
+                
+                var canvasRect = canvas.getBoundingClientRect();
+                
+                // Get final mouse position
+                var currentX = e.clientX - canvasRect.left;
+                var currentY = e.clientY - canvasRect.top;
+                
+                // Convert to canvas pixel coordinates
+                var scaleX = canvas.width / canvasRect.width;
+                var scaleY = canvas.height / canvasRect.height;
+                var currentXCanvas = currentX * scaleX;
+                var currentYCanvas = currentY * scaleY;
+                
+                // Calculate final field dimensions
+                var fieldWidth = Math.abs(currentXCanvas - createStartX);
+                var fieldHeight = Math.abs(currentYCanvas - createStartY);
+                
+                // Ensure minimum size (different for typed vs signature)
+                var minWidth = 50;
+                var minHeight = fieldMode === 'typed' ? 20 : 30;
+                if (fieldWidth < minWidth) fieldWidth = minWidth;
+                if (fieldHeight < minHeight) fieldHeight = minHeight;
+                
+                // Calculate top-left corner
+                var xPos = Math.min(createStartX, currentXCanvas);
+                var yPos = Math.min(createStartY, currentYCanvas);
+                
+                // Keep within canvas bounds
+                xPos = Math.max(0, Math.min(xPos, canvas.width - fieldWidth));
+                yPos = Math.max(0, Math.min(yPos, canvas.height - fieldHeight));
+                fieldWidth = Math.min(fieldWidth, canvas.width - xPos);
+                fieldHeight = Math.min(fieldHeight, canvas.height - yPos);
+                
+                // Set the position inputs
+                document.getElementById('x_position').value = xPos;
+                document.getElementById('y_position').value = yPos;
+                document.getElementById('width').value = fieldWidth;
+                document.getElementById('height').value = fieldHeight;
+                
+                // Update page number to match current page
+                document.getElementById('page_number').value = currentPage;
+                
+                // Update position display
+                updatePositionDisplay(xPos, yPos, fieldWidth, fieldHeight);
+                
+                // Remove preview indicator
+                if (previewIndicator) {
+                    previewIndicator.remove();
+                    previewIndicator = null;
+                }
+                
+                // Remove previous final indicator if exists
+                if (currentIndicator) {
+                    currentIndicator.remove();
+                }
+                
+                // Create final indicator (style based on mode) - always create if we have valid dimensions
+                if (fieldWidth >= minWidth && fieldHeight >= minHeight) {
+                    var indicator = document.createElement('div');
+                    if (fieldMode === 'typed') {
+                        indicator.className = 'typed-field-indicator';
+                        indicator.style.cssText = 'position: absolute; border: 2px solid #ffc107; background: rgba(255, 193, 7, 0.1); pointer-events: all; z-index: 100; cursor: move;';
+                    } else {
+                        indicator.className = 'signature-field-indicator';
+                    }
+                    var viewerRect = document.getElementById('documentViewer').getBoundingClientRect();
+                    indicator.style.left = (canvasRect.left - viewerRect.left + (xPos / scaleX)) + 'px';
+                    indicator.style.top = (canvasRect.top - viewerRect.top + (yPos / scaleY)) + 'px';
+                    indicator.style.width = (fieldWidth / scaleX) + 'px';
+                    indicator.style.height = (fieldHeight / scaleY) + 'px';
+                    indicator.dataset.x = xPos;
+                    indicator.dataset.y = yPos;
+                    indicator.dataset.width = fieldWidth;
+                    indicator.dataset.height = fieldHeight;
+                    
+                    // Add resize handles
+                    var handles = ['bottom-right', 'bottom-left', 'top-right', 'top-left'];
+                    handles.forEach(function(handleClass) {
+                        var handle = document.createElement('div');
+                        handle.className = 'resize-handle ' + handleClass;
+                        indicator.appendChild(handle);
+                    });
+                    
+                    // Make indicator draggable
+                    makeIndicatorDraggable(indicator);
+                    
+                    // Make handles resizable
+                    makeIndicatorResizable(indicator);
+                    
+                    document.getElementById('documentViewer').appendChild(indicator);
+                    currentIndicator = indicator;
+                    
+                    // Focus on label input
+                    document.getElementById('field_label').focus();
+                }
+                
+                isCreatingField = false;
+            });
+        }
+        
+        // Make the indicator draggable
+        function makeIndicatorDraggable(indicator) {
+            var isDragging = false;
+            var startX = 0;
+            var startY = 0;
+            var startLeft = 0;
+            var startTop = 0;
+            
+            indicator.addEventListener('mousedown', function(e) {
+                // Don't drag if clicking on a resize handle
+                if (e.target.classList.contains('resize-handle') || e.target.closest('.resize-handle')) {
+                    return;
+                }
+                isDragging = true;
+                isDraggingIndicator = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                startLeft = parseFloat(indicator.dataset.x) || 0;
+                startTop = parseFloat(indicator.dataset.y) || 0;
+                indicator.style.cursor = 'grabbing';
+                e.preventDefault();
+                e.stopPropagation();
+                e.cancelBubble = true;
+                return false;
+            });
+            
+            var mouseMoveHandler = function(e) {
+                if (!isDragging) return;
+                
+                // Get fresh references to canvas and viewer
+                var canvas = document.getElementById('pdfCanvas');
+                var viewer = document.getElementById('documentViewer');
+                if (!canvas || !viewer) return;
+                
+                var canvasRectCurrent = canvas.getBoundingClientRect();
+                var viewerRectCurrent = viewer.getBoundingClientRect();
+                
+                // Convert mouse delta to canvas coordinates
+                var scaleX = canvas.width / canvasRectCurrent.width;
+                var scaleY = canvas.height / canvasRectCurrent.height;
+                
+                var deltaX = (e.clientX - startX) * scaleX;
+                var deltaY = (e.clientY - startY) * scaleY;
+                
+                var newLeft = startLeft + deltaX;
+                var newTop = startTop + deltaY;
+                
+                // Keep within canvas bounds
+                var currentWidth = parseFloat(indicator.dataset.width) || 200;
+                var currentHeight = parseFloat(indicator.dataset.height) || 80;
+                newLeft = Math.max(0, Math.min(newLeft, canvas.width - currentWidth));
+                newTop = Math.max(0, Math.min(newTop, canvas.height - currentHeight));
+                
+                // Update indicator position
+                indicator.style.left = (canvasRectCurrent.left - viewerRectCurrent.left + newLeft) + 'px';
+                indicator.style.top = (canvasRectCurrent.top - viewerRectCurrent.top + newTop) + 'px';
+                indicator.dataset.x = newLeft;
+                indicator.dataset.y = newTop;
+                
+                // Update hidden inputs
+                var xInput = document.getElementById('x_position');
+                var yInput = document.getElementById('y_position');
+                if (xInput) xInput.value = newLeft;
+                if (yInput) yInput.value = newTop;
+                
+                updatePositionDisplay(newLeft, newTop, currentWidth, currentHeight);
+                
+                e.preventDefault();
+                e.stopPropagation();
+            };
+            
+            var mouseUpHandler = function(e) {
+                if (isDragging) {
+                    isDragging = false;
+                    isDraggingIndicator = false;
+                    indicator.style.cursor = 'move';
+                    // Small delay to prevent click event from firing
+                    setTimeout(function() {
+                        isDraggingIndicator = false;
+                    }, 100);
+                }
+            };
+            
+            document.addEventListener('mousemove', mouseMoveHandler);
+            document.addEventListener('mouseup', mouseUpHandler);
+            
+            // Store handlers for cleanup if needed
+            indicator._dragHandlers = { move: mouseMoveHandler, up: mouseUpHandler };
+        }
+        
+        // Make the indicator resizable via corner handles
+        function makeIndicatorResizable(indicator) {
+            var handles = indicator.querySelectorAll('.resize-handle');
+            
+            handles.forEach(function(handle) {
+                handle.addEventListener('mousedown', function(e) {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    isResizing = true;
+                    resizeHandle = handle.className.split(' ')[1]; // Get handle position
+                    resizeStartX = e.clientX;
+                    resizeStartY = e.clientY;
+                    
+                    resizeStartWidth = parseFloat(indicator.dataset.width) || 200;
+                    resizeStartHeight = parseFloat(indicator.dataset.height) || 80;
+                    
+                    indicator.classList.add('resizing');
+                    return false;
+                });
+            });
+            
+            var resizeMoveHandler = function(e) {
+                if (!isResizing || !resizeHandle) return;
+                
+                // Get fresh references
+                var canvas = document.getElementById('pdfCanvas');
+                var viewer = document.getElementById('documentViewer');
+                if (!canvas || !viewer) return;
+                
+                var canvasRectCurrent = canvas.getBoundingClientRect();
+                var viewerRectCurrent = viewer.getBoundingClientRect();
+                var scaleX = canvas.width / canvasRectCurrent.width;
+                var scaleY = canvas.height / canvasRectCurrent.height;
+                
+                var deltaXCanvas = (e.clientX - resizeStartX) * scaleX;
+                var deltaYCanvas = (e.clientY - resizeStartY) * scaleY;
+                
+                var newWidth = resizeStartWidth;
+                var newHeight = resizeStartHeight;
+                var newLeft = parseFloat(indicator.dataset.x) || 0;
+                var newTop = parseFloat(indicator.dataset.y) || 0;
+                
+                // Adjust based on which handle is being dragged
+                if (resizeHandle === 'bottom-right') {
+                    newWidth = Math.max(50, resizeStartWidth + deltaXCanvas);
+                    newHeight = Math.max(30, resizeStartHeight + deltaYCanvas);
+                } else if (resizeHandle === 'bottom-left') {
+                    newWidth = Math.max(50, resizeStartWidth - deltaXCanvas);
+                    newHeight = Math.max(30, resizeStartHeight + deltaYCanvas);
+                    newLeft = parseFloat(indicator.dataset.x) + (resizeStartWidth - newWidth);
+                } else if (resizeHandle === 'top-right') {
+                    newWidth = Math.max(50, resizeStartWidth + deltaXCanvas);
+                    newHeight = Math.max(30, resizeStartHeight - deltaYCanvas);
+                    newTop = parseFloat(indicator.dataset.y) + (resizeStartHeight - newHeight);
+                } else if (resizeHandle === 'top-left') {
+                    newWidth = Math.max(50, resizeStartWidth - deltaXCanvas);
+                    newHeight = Math.max(30, resizeStartHeight - deltaYCanvas);
+                    newLeft = parseFloat(indicator.dataset.x) + (resizeStartWidth - newWidth);
+                    newTop = parseFloat(indicator.dataset.y) + (resizeStartHeight - newHeight);
+                }
+                
+                // Keep within canvas bounds
+                var canvasWidth = canvas.width;
+                var canvasHeight = canvas.height;
+                newLeft = Math.max(0, Math.min(newLeft, canvasWidth - newWidth));
+                newTop = Math.max(0, Math.min(newTop, canvasHeight - newHeight));
+                newWidth = Math.min(newWidth, canvasWidth - newLeft);
+                newHeight = Math.min(newHeight, canvasHeight - newTop);
+                
+                // Update indicator
+                indicator.style.width = newWidth + 'px';
+                indicator.style.height = newHeight + 'px';
+                indicator.style.left = (canvasRectCurrent.left - viewerRectCurrent.left + newLeft) + 'px';
+                indicator.style.top = (canvasRectCurrent.top - viewerRectCurrent.top + newTop) + 'px';
+                indicator.dataset.x = newLeft;
+                indicator.dataset.y = newTop;
+                indicator.dataset.width = newWidth;
+                indicator.dataset.height = newHeight;
+                
+                // Update hidden inputs
+                var xInput = document.getElementById('x_position');
+                var yInput = document.getElementById('y_position');
+                if (xInput) xInput.value = newLeft;
+                if (yInput) yInput.value = newTop;
+                document.getElementById('width').value = newWidth;
+                document.getElementById('height').value = newHeight;
+                
+                updatePositionDisplay(newLeft, newTop, newWidth, newHeight);
+                
+                e.preventDefault();
+            };
+            
+            var resizeUpHandler = function(e) {
+                if (isResizing) {
+                    isResizing = false;
+                    resizeHandle = null;
+                    if (indicator) {
+                        indicator.classList.remove('resizing');
+                    }
+                }
+            };
+            
+            document.addEventListener('mousemove', resizeMoveHandler);
+            document.addEventListener('mouseup', resizeUpHandler);
+            
+            // Store handlers for cleanup if needed
+            indicator._resizeHandlers = { move: resizeMoveHandler, up: resizeUpHandler };
+        }
+        
+        // Helper function to update position display
+        function updatePositionDisplay(x, y, width, height) {
+            var posDisplay = document.getElementById('positionDisplay');
+            if (posDisplay) {
+                var text = 'Position: (' + Math.round(x) + ', ' + Math.round(y) + ') px<br>Page: ' + currentPage;
+                if (width && height) {
+                    text += '<br>Size: ' + Math.round(width) + ' x ' + Math.round(height) + ' px';
+                }
+                posDisplay.innerHTML = text;
+                // Color based on current mode
+                var fieldType = document.getElementById('field_type_selector');
+                if (fieldType && fieldType.value === 'typed') {
+                    posDisplay.style.color = '#ffc107';
+                } else {
+                    posDisplay.style.color = '#28a745';
+                }
+                posDisplay.style.fontWeight = 'bold';
+            }
+        }
+        
+        // Handle page number change
+        var pageInput = document.getElementById('page_number');
+        if (pageInput) {
+            pageInput.addEventListener('change', function() {
+                var pageNum = parseInt(this.value, 10) || 1;
+                if (pdfDoc && pageNum >= 1 && pageNum <= pdfDoc.numPages) {
+                    goToPage(pageNum);
+                }
+            });
+        }
+        
+        // Toggle field type options based on selection
+        function onTypedInputTypeChange() {
+            var typedType = document.getElementById('typed_field_type').value;
+            var groupWrap = document.getElementById('typedChoiceGroupWrap');
+            var groupInput = document.getElementById('choice_group');
+            if (groupWrap) {
+                var show = typedType === 'checkbox_choice';
+                groupWrap.style.display = show ? 'block' : 'none';
+                if (groupInput) groupInput.required = show;
+            }
+            if (typedType === 'checkbox_choice') {
+                document.getElementById('width').value = 36;
+                document.getElementById('height').value = 36;
+            }
+        }
+
+        function toggleSidebarChoiceGroup(selectEl) {
+            var form = selectEl.closest('form');
+            if (!form) return;
+            var isCheckbox = selectEl.value === 'checkbox_choice';
+            var choiceWrap = form.querySelector('.sidebar-choice-wrap');
+            var requiredWrap = form.querySelector('.sidebar-required-wrap');
+            if (choiceWrap) choiceWrap.style.display = isCheckbox ? 'block' : 'none';
+            if (requiredWrap) requiredWrap.style.display = isCheckbox ? 'none' : 'block';
+        }
+
+        function bindInventoryTypeSelects() {
+            document.querySelectorAll('.inventory-field-type').forEach(function(sel) {
+                sel.addEventListener('change', function() {
+                    var wrap = sel.closest('.inventory-type-form').querySelector('.inventory-choice-wrap');
+                    if (wrap) wrap.style.display = sel.value === 'checkbox_choice' ? 'inline' : 'none';
+                });
+            });
+        }
+
+        function filterConfiguredFields() {
+            var search = document.getElementById('configuredFieldsSearch');
+            var empty = document.getElementById('configuredFieldsEmpty');
+            var query = search ? (search.value || '').trim().toLowerCase() : '';
+            var visibleCount = 0;
+            document.querySelectorAll('.configured-field-row').forEach(function(row) {
+                var haystack = row.getAttribute('data-search') || '';
+                var rowKey = row.getAttribute('data-field-kind') + '-' + row.getAttribute('data-field-id');
+                var visible = selectedConfiguredKey
+                    ? rowKey === selectedConfiguredKey
+                    : (!query || haystack.indexOf(query) !== -1);
+                row.style.display = visible ? '' : 'none';
+                if (visible) visibleCount += 1;
+            });
+            if (empty) empty.style.display = visibleCount ? 'none' : 'block';
+        }
+
+        function bindConfiguredFieldsSearch() {
+            var search = document.getElementById('configuredFieldsSearch');
+            if (search) search.addEventListener('input', filterConfiguredFields);
+            var clearBtn = document.getElementById('clearConfiguredSelection');
+            if (clearBtn) clearBtn.addEventListener('click', clearConfiguredFieldSelection);
+        }
+
+        function restoreSignatureFieldsState() {
+            var state = readSignatureFieldsState();
+            if (!state) return;
+            restoredSignatureFieldsState = state;
+
+            if (state.boxesHidden && !document.body.classList.contains('hide-field-boxes')) {
+                toggleFieldBoxes();
+            }
+
+            var mode = state.mode || 'signature';
+            if (mode === 'signature' || mode === 'typed' || mode === 'select') {
+                setFieldMode(mode);
+                var selector = document.getElementById('field_type_selector');
+                if (selector && mode !== 'select') {
+                    selector.value = mode === 'typed' ? 'typed' : 'signature';
+                }
+            }
+
+            var search = document.getElementById('configuredFieldsSearch');
+            if (search) search.value = state.search || '';
+
+            var restoredRow = state.selectedKey ? document.getElementById('configured-field-' + state.selectedKey) : null;
+            if (state.selectedKey && restoredRow) {
+                selectedConfiguredKey = state.selectedKey;
+                var clearBtn = document.getElementById('clearConfiguredSelection');
+                if (clearBtn) clearBtn.style.display = 'inline-block';
+                if (search) {
+                    search.value = '';
+                    search.disabled = true;
+                }
+            }
+            filterConfiguredFields();
+
+            var selectedRow = selectedConfiguredKey ? restoredRow : null;
+            if (selectedRow) {
+                selectedRow.classList.add('selected-configured-field');
+            }
+
+            setTimeout(function() {
+                var scroller = document.getElementById('configuredFieldsScroller');
+                if (scroller && !selectedConfiguredKey) {
+                    scroller.scrollTop = parseInt(state.tableScrollTop, 10) || 0;
+                }
+                window.scrollTo(0, parseInt(state.windowScrollY, 10) || 0);
+            }, 100);
+        }
+
+        function clearConfiguredFieldSelection() {
+            selectedConfiguredKey = null;
+            document.querySelectorAll('.configured-field-row.selected-configured-field').forEach(function(row) {
+                row.classList.remove('selected-configured-field');
+            });
+            document.querySelectorAll('.existing-field-marker.selected-field-marker, .existing-typed-field-marker.selected-field-marker').forEach(function(marker) {
+                marker.classList.remove('selected-field-marker');
+            });
+            var clearBtn = document.getElementById('clearConfiguredSelection');
+            if (clearBtn) clearBtn.style.display = 'none';
+            var search = document.getElementById('configuredFieldsSearch');
+            if (search) search.disabled = false;
+            filterConfiguredFields();
+        }
+
+        function selectConfiguredField(kind, fieldId) {
+            var key = kind + '-' + fieldId;
+            if (selectedConfiguredKey === key) {
+                clearConfiguredFieldSelection();
+                return;
+            }
+            selectedConfiguredKey = key;
+            document.querySelectorAll('.configured-field-row.selected-configured-field').forEach(function(row) {
+                row.classList.remove('selected-configured-field');
+            });
+            document.querySelectorAll('.existing-field-marker.selected-field-marker, .existing-typed-field-marker.selected-field-marker').forEach(function(marker) {
+                marker.classList.remove('selected-field-marker');
+            });
+
+            var row = document.getElementById('configured-field-' + key);
+            var marker = document.querySelector('[data-field-kind="' + kind + '"][data-field-id="' + fieldId + '"]');
+            if (row) {
+                var search = document.getElementById('configuredFieldsSearch');
+                if (search) {
+                    search.value = '';
+                    search.disabled = true;
+                }
+                var clearBtn = document.getElementById('clearConfiguredSelection');
+                if (clearBtn) clearBtn.style.display = 'inline-block';
+                filterConfiguredFields();
+                row.classList.add('selected-configured-field');
+                var scroller = document.getElementById('configuredFieldsScroller');
+                if (scroller) {
+                    scroller.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                    scroller.scrollTop = Math.max(0, row.offsetTop - scroller.offsetTop - 36);
+                }
+                var editable = row.querySelector('select, .inventory-label-input, input');
+                if (editable) {
+                    editable.focus();
+                }
+            }
+            if (marker) {
+                marker.classList.add('selected-field-marker');
+            }
+        }
+
+        function setFieldMode(mode) {
+            fieldMode = mode;
+            document.body.classList.toggle('select-field-mode', mode === 'select');
+            document.querySelectorAll('.existing-field-marker .resize-handle, .existing-typed-field-marker .resize-handle').forEach(function(h) {
+                h.style.display = mode === 'select' ? 'block' : 'none';
+            });
+
+            var sigBtn = document.getElementById('modeSignature');
+            var typedBtn = document.getElementById('modeTyped');
+            var selectBtn = document.getElementById('modeSelect');
+            [sigBtn, typedBtn, selectBtn].forEach(function(btn) {
+                if (!btn) return;
+                btn.style.background = '#2f3a4f';
+                btn.style.color = '#f2f5fb';
+            });
+            if (mode === 'signature' && sigBtn) {
+                sigBtn.style.background = '#fe0100';
+                sigBtn.style.color = '#fff';
+            } else if (mode === 'typed' && typedBtn) {
+                typedBtn.style.background = '#fe0100';
+                typedBtn.style.color = '#fff';
+            } else if (mode === 'select' && selectBtn) {
+                selectBtn.style.background = '#6ea8fe';
+                selectBtn.style.color = '#07111f';
+            }
+        }
+
+        function toggleFieldBoxes() {
+            var hidden = document.body.classList.toggle('hide-field-boxes');
+            var btn = document.getElementById('toggleFieldBoxes');
+            if (btn) {
+                btn.textContent = hidden ? 'Show Boxes' : 'Hide Boxes';
+                btn.style.background = hidden ? '#6ea8fe' : '#2f3a4f';
+                btn.style.color = hidden ? '#07111f' : '#f2f5fb';
+            }
+        }
+
+        function toggleFieldTypeOptions() {
+            var fieldType = document.getElementById('field_type_selector').value;
+            var signatureOptions = document.getElementById('signatureFieldOptions');
+            var typedOptions = document.getElementById('typedFieldOptions');
+            var submitButton = document.getElementById('submitButton');
+            
+            if (fieldType === 'signature') {
+                signatureOptions.style.display = 'block';
+                typedOptions.style.display = 'none';
+                submitButton.textContent = 'Add Signature Field';
+                submitButton.className = 'btn btn-success';
+                // Set default size for signature fields
+                document.getElementById('width').value = 200;
+                document.getElementById('height').value = 80;
+                // Update mode to signature
+                if (typeof fieldMode !== 'undefined') {
+                    setFieldMode('signature');
+                }
+            } else {
+                signatureOptions.style.display = 'none';
+                typedOptions.style.display = 'block';
+                submitButton.textContent = 'Add Typed Field';
+                submitButton.className = 'btn btn-primary';
+                onTypedInputTypeChange();
+                // Update mode to typed
+                if (typeof fieldMode !== 'undefined') {
+                    setFieldMode('typed');
+                }
+            }
+        }
+        
+        // Handle form submission - use AJAX for typed fields to avoid page reload
+        function submitFieldForm(e) {
+            e.preventDefault();
+            var fieldType = document.getElementById('field_type_selector').value;
+            var xPos = document.getElementById('x_position').value;
+            var yPos = document.getElementById('y_position').value;
+            var width = document.getElementById('width').value;
+            var height = document.getElementById('height').value;
+            
+            if (!xPos || !yPos || xPos == '0' || yPos == '0') {
+                alert('Please place the field on the document first by clicking and dragging.');
+                return false;
+            }
+            
+            if (!width || !height || width == '0' || height == '0') {
+                alert('Please place the field on the document first by clicking and dragging.');
+                return false;
+            }
+            
+            var form = document.getElementById('fieldForm');
+            var formData = new FormData(form);
+            
+            // Validate required fields
+            var fieldLabel = formData.get('field_label');
+            if (!fieldLabel || fieldLabel.trim() === '') {
+                alert('Please enter a field label.');
+                document.getElementById('field_label').focus();
+                return false;
+            }
+            
+            if (fieldType === 'signature') {
+                saveSignatureFieldsState();
+                // Submit as signature field (traditional form submit)
+                var signatureData = {
+                    field_label: fieldLabel,
+                    page_number: formData.get('page_number'),
+                    signature_type: formData.get('signature_type'),
+                    x_position: xPos,
+                    y_position: yPos,
+                    width: width,
+                    height: height
+                };
+                
+                // Create a temporary form and submit it
+                var tempForm = document.createElement('form');
+                tempForm.method = 'POST';
+                tempForm.action = '{{ url_for("add_signature_field", doc_id=document.id) }}';
+                for (var key in signatureData) {
+                    var input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = key;
+                    input.value = signatureData[key];
+                    tempForm.appendChild(input);
+                }
+                var pageHidden = document.createElement('input');
+                pageHidden.type = 'hidden';
+                pageHidden.name = 'return_page';
+                pageHidden.value = String(currentPage);
+                tempForm.appendChild(pageHidden);
+                document.body.appendChild(tempForm);
+                tempForm.submit();
+            } else {
+                // Submit as typed field using AJAX (no page reload)
+                var submitButton = document.getElementById('submitButton');
+                var originalText = submitButton.textContent;
+                submitButton.disabled = true;
+                submitButton.textContent = 'Saving...';
+                
+                var typedData = {
+                    field_label: fieldLabel,
+                    page_number: formData.get('page_number'),
+                    field_type: formData.get('typed_field_type') || 'text',
+                    choice_group: formData.get('choice_group') || '',
+                    placeholder: formData.get('placeholder') || '',
+                    is_required: formData.get('is_required') ? 'on' : '',
+                    x_position: xPos,
+                    y_position: yPos,
+                    width: width,
+                    height: height
+                };
+                
+                // Create FormData for AJAX
+                var ajaxFormData = new FormData();
+                for (var key in typedData) {
+                    if (typedData[key] !== null && typedData[key] !== undefined) {
+                        ajaxFormData.append(key, typedData[key]);
+                    }
+                }
+                
+                // Submit via AJAX
+                fetch('{{ url_for("add_typed_field", doc_id=document.id) }}', {
+                    method: 'POST',
+                    body: ajaxFormData,
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(function(response) {
+                    // Check if response is OK
+                    if (!response.ok) {
+                        // Try to get error message from response
+                        return response.json().catch(function() {
+                            return response.text().then(function(text) {
+                                throw new Error(text || 'Server error: ' + response.status);
+                            });
+                        }).then(function(data) {
+                            throw new Error(data.message || 'Server error: ' + response.status);
+                        });
+                    }
+                    
+                    // Try to parse as JSON
+                    var contentType = response.headers.get('content-type');
+                    if (contentType && contentType.includes('application/json')) {
+                        return response.json();
+                    } else {
+                        // If not JSON, assume success if status is OK
+                        return {success: true, message: 'Field saved successfully'};
+                    }
+                })
+                .then(function(data) {
+                    if (data && data.success) {
+                        pagesWithFields[currentPage] = true;
+                        saveSignatureFieldsState();
+                        alert('Typed field saved successfully!');
+                        reloadWithCurrentPage();
+                    } else {
+                        var errorMsg = (data && data.message) ? data.message : 'Unknown error occurred';
+                        alert('Error: ' + errorMsg);
+                        submitButton.disabled = false;
+                        submitButton.textContent = originalText;
+                    }
+                })
+                .catch(function(error) {
+                    console.error('Error:', error);
+                    var errorMsg = error.message || 'Unknown error occurred';
+                    alert('Error saving typed field: ' + errorMsg);
+                    submitButton.disabled = false;
+                    submitButton.textContent = originalText;
+                });
+            }
+            
+            return false;
+        }
+        
+        
+        // Initialize field type options on page load
+        if (document.getElementById('field_type_selector')) {
+            toggleFieldTypeOptions();
+        }
+        var typedFieldTypeSelect = document.getElementById('typed_field_type');
+        if (typedFieldTypeSelect) {
+            typedFieldTypeSelect.addEventListener('change', onTypedInputTypeChange);
+        }
+        
+        // Add mode toggle buttons for signature vs typed field (only once, after page loads)
+        // Also sync with the field type selector
+        setTimeout(function() {
+            var viewerContainer = document.querySelector('.document-viewer-container');
+            if (viewerContainer && !document.getElementById('modeContainer')) {
+                var modeContainer = document.createElement('div');
+                modeContainer.id = 'modeContainer';
+                modeContainer.style.cssText = 'position: absolute; top: 10px; right: 10px; z-index: 200; background: #141b28; color: #f2f5fb; padding: 10px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 2px 10px rgba(0,0,0,0.35);';
+                modeContainer.innerHTML = '<label style="font-size: 0.9em; font-weight: bold; margin-right: 10px; color: #f2f5fb;">Mode:</label>' +
+                    '<button type="button" id="modeSignature" style="padding: 5px 15px; margin-right: 5px; background: #fe0100; color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 3px; cursor: pointer;">Signature</button>' +
+                    '<button type="button" id="modeTyped" style="padding: 5px 15px; margin-right: 5px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Typed Field</button>' +
+                    '<button type="button" id="modeSelect" title="Drag existing fields to move them, or click a field to edit it in the list" style="padding: 5px 15px; margin-right: 5px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Select/Edit</button>' +
+                    '<button type="button" id="toggleFieldBoxes" title="Hide or show saved field boxes on the PDF preview" style="padding: 5px 15px; background: #2f3a4f; color: #f2f5fb; border: 1px solid rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer;">Hide Boxes</button>';
+                viewerContainer.appendChild(modeContainer);
+                
+                document.getElementById('modeSignature').addEventListener('click', function() {
+                    setFieldMode('signature');
+                    // Sync with form selector
+                    var selector = document.getElementById('field_type_selector');
+                    if (selector) selector.value = 'signature';
+                    toggleFieldTypeOptions();
+                });
+                
+                document.getElementById('modeTyped').addEventListener('click', function() {
+                    setFieldMode('typed');
+                    // Sync with form selector
+                    var selector = document.getElementById('field_type_selector');
+                    if (selector) selector.value = 'typed';
+                    toggleFieldTypeOptions();
+                });
+
+                document.getElementById('modeSelect').addEventListener('click', function() {
+                    setFieldMode('select');
+                });
+
+                document.getElementById('toggleFieldBoxes').addEventListener('click', toggleFieldBoxes);
+                
+                // Sync mode buttons when form selector changes
+                var selector = document.getElementById('field_type_selector');
+                if (selector) {
+                    selector.addEventListener('change', function() {
+                        if (this.value === 'signature') {
+                            document.getElementById('modeSignature').click();
+                        } else {
+                            document.getElementById('modeTyped').click();
+                        }
+                    });
+                }
+                restoreSignatureFieldsState();
+            }
+        }, 500);
+        
+        
+        // Initialize when page loads
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', function() {
+                bindInventoryTypeSelects();
+                bindConfiguredFieldsSearch();
+                bindConfiguredFieldFormState();
+                loadPDF();
+            });
+        } else {
+            bindInventoryTypeSelects();
+            bindConfiguredFieldsSearch();
+            bindConfiguredFieldFormState();
+            loadPDF();
+        }
+    </script>
+</body>
+</html>
+

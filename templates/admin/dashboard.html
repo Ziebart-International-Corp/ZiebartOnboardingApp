@@ -1,0 +1,1323 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Dashboard - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #FFFFFF;
+            color: #000000;
+        }
+        p, span, div, td, th, label, input, textarea, select, button, a {
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+            position: relative;
+            z-index: 101;
+            height: 100%;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .admin-header-page-label {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .admin-header-page-label .admin-header-title {
+            color: #ffffff;
+            font-size: 1.15em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            letter-spacing: 0.02em;
+            padding: 0;
+            display: block;
+            margin: 0;
+            line-height: 1.2;
+            border: none;
+            background: none;
+            box-shadow: none;
+        }
+        .user-section {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            position: relative;
+        }
+        .notification-icon {
+            font-size: 1.3em;
+            cursor: pointer;
+            position: relative;
+            color: #ffffff;
+        }
+        .notification-icon .notification-bell-svg {
+            display: block;
+            width: 22px;
+            height: 22px;
+            color: #f2f5fb;
+        }
+        .notification-dropdown {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: white;
+            min-width: 350px;
+            max-width: 400px;
+            max-height: 500px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: 0.5rem;
+            margin-top: 10px;
+            z-index: 1000;
+            overflow: hidden;
+        }
+        .notification-dropdown.show {
+            display: block;
+        }
+        .notification-header {
+            padding: 15px 20px;
+            border-bottom: 1px solid #eee;
+            background: #f8f9fa;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .notification-header h3 {
+            font-size: 1em;
+            font-weight: 600;
+            color: #000000;
+            margin: 0;
+        }
+        .notification-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .notification-item {
+            padding: 15px 20px;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .notification-item:hover {
+            background: #f8f9fa;
+        }
+        .notification-item:last-child {
+            border-bottom: none;
+        }
+        .notification-item.unread {
+            background: #e7f3ff;
+        }
+        .notification-item.unread:hover {
+            background: #d0e7ff;
+        }
+        .notification-title {
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #000000;
+            margin-bottom: 5px;
+            font-size: 0.95em;
+        }
+        .notification-message {
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #808080;
+            font-size: 0.85em;
+            line-height: 1.4;
+        }
+        .notification-empty {
+            padding: 40px 20px;
+            text-align: center;
+            color: #999;
+        }
+        .notification-badge {
+            position: absolute;
+            top: -5px;
+            right: -8px;
+            background: #FE0100;
+            color: white;
+            border-radius: 50%;
+            width: 18px;
+            height: 18px;
+            font-size: 0.7em;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .user-dropdown {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 20px;
+            transition: background 0.2s;
+            color: #ffffff;
+        }
+        .user-dropdown:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        .user-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #FE0100;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: white;
+            min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: 0.5rem;
+            margin-top: 10px;
+            z-index: 1000;
+            overflow: hidden;
+        }
+        .dropdown-menu.show {
+            display: block;
+        }
+        .dropdown-item {
+            padding: 12px 20px;
+            color: #000000;
+            text-decoration: none;
+            display: block;
+            transition: background 0.2s;
+        }
+        .dropdown-item:hover {
+            background: #f5f5f5;
+        }
+        .main-container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+        }
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .welcome-banner {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .welcome-banner h1 {
+            font-size: 2.5em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #000000;
+        }
+        .admin-dash-intro {
+            align-items: flex-start;
+            gap: 24px;
+            flex-wrap: wrap;
+        }
+        .admin-dash-intro > div {
+            flex: 1;
+            min-width: 220px;
+            position: relative;
+            z-index: 1;
+        }
+        .admin-dash-sub {
+            margin-top: 10px;
+            font-size: 0.95em;
+            color: #505050;
+            line-height: 1.45;
+            max-width: 52rem;
+        }
+        .stores-section .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+        .stores-total {
+            font-size: 0.88rem;
+            color: #808080;
+        }
+        .stores-table-wrap {
+            position: relative;
+            z-index: 1;
+            overflow-x: auto;
+        }
+        .stores-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .store-row-click {
+            cursor: pointer;
+            transition: background 0.15s ease;
+        }
+        .store-row-click:hover {
+            background: rgba(0, 0, 0, 0.04);
+        }
+        .store-hire-search-wrap {
+            margin-bottom: 4px;
+        }
+        .store-hire-search-wrap label {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+        .store-hire-search-results {
+            margin-top: 10px;
+            border-radius: 10px;
+            border: 1px solid rgba(0, 0, 0, 0.12);
+            background: rgba(255, 255, 255, 0.95);
+            max-height: 300px;
+            overflow-y: auto;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+        }
+        .store-hire-result-item {
+            display: block;
+            padding: 10px 14px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+            text-decoration: none;
+            color: #111;
+        }
+        .store-hire-result-item:last-child {
+            border-bottom: none;
+        }
+        .store-hire-result-item:hover {
+            background: rgba(254, 1, 0, 0.06);
+        }
+        .store-hire-result-store {
+            font-weight: 700;
+            color: #fe0100;
+            margin-top: 4px;
+            font-size: 0.92em;
+        }
+        .store-hire-result-sub {
+            font-size: 0.82em;
+            color: #555;
+            margin-top: 2px;
+        }
+        .store-hire-search-inner {
+            position: relative;
+            z-index: 2;
+            width: 100%;
+            max-width: 28rem;
+            margin-bottom: 6px;
+        }
+        .store-hire-search-input {
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .filter-dropdown {
+            padding: 8px 15px;
+            border: 1px solid #ddd;
+            border-radius: 0.5rem;
+            background: white;
+            font-size: 0.9em;
+        }
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+        .summary-card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        .summary-icon {
+            width: 60px;
+            height: 60px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2em;
+        }
+        .summary-icon.blue { background: #e3f2fd; }
+        .summary-icon.green { background: #e8f5e9; }
+        .summary-content h3 {
+            font-size: 0.9em;
+            color: #808080;
+            margin-bottom: 5px;
+        }
+        .summary-content .number {
+            font-size: 2em;
+            font-weight: bold;
+            color: #000000;
+        }
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .section-title {
+            font-size: 1.6em;
+            font-weight: 800;
+            color: #000000;
+        }
+        .progress-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 15px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .progress-item:last-child {
+            border-bottom: none;
+        }
+        .progress-list {
+            max-height: 420px;
+            overflow-y: auto;
+        }
+        .progress-overview-search {
+            flex: 1;
+            min-width: 160px;
+            max-width: 280px;
+            padding: 8px 12px;
+            font-size: 0.85em;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-family: inherit;
+        }
+        .progress-overview-search:focus {
+            outline: none;
+            border-color: #FE0100;
+            box-shadow: 0 0 0 2px rgba(254, 1, 0, 0.15);
+        }
+        .progress-overview-empty {
+            display: none;
+            padding: 20px;
+            text-align: center;
+            color: #808080;
+            font-size: 0.9em;
+        }
+        .filter-dropdown:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+            background: #f0f0f0;
+            color: #666;
+        }
+        .search-all-toggle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85em;
+            color: #333;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        .search-all-toggle input {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+            accent-color: #FE0100;
+        }
+        .progress-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #FE0100;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .progress-info {
+            flex: 1;
+        }
+        .progress-name {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+        .progress-bar {
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            position: relative;
+        }
+        .progress-fill {
+            height: 100%;
+            border-radius: 0.5rem;
+            transition: width 0.3s;
+        }
+        .progress-fill.completed { background: #4caf50; }
+        .progress-fill.in-progress { background: #ff9800; }
+        .progress-fill.not-started { background: #2196f3; }
+        .progress-percentage {
+            font-weight: 600;
+            color: #000000;
+            min-width: 50px;
+            text-align: right;
+        }
+        .legend {
+            display: flex;
+            gap: 20px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #f0f0f0;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85em;
+            color: #808080;
+        }
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        th {
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #000000;
+            font-size: 0.9em;
+        }
+        td {
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .table-progress {
+            width: 100px;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        .table-progress-fill {
+            height: 100%;
+            background: #4caf50;
+            border-radius: 3px;
+            min-width: 0;
+        }
+        .table-progress-fill[style*="width: 0%"] {
+            display: none;
+        }
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .sidebar-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .sidebar-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .sidebar-title {
+            font-size: 1.2em;
+            font-weight: 800;
+            color: #000000;
+        }
+        .form-status-item {
+            padding: 12px 0;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.2s;
+            gap: 10px;
+        }
+        .form-status-item:hover {
+            background: #f8f9fa;
+        }
+        .form-status-item:last-child {
+            border-bottom: none;
+        }
+        .form-status-name {
+            font-size: 0.9em;
+            color: #000000;
+            flex: 1;
+            min-width: 0;
+            word-break: break-word;
+            overflow-wrap: break-word;
+        }
+        .form-status-progress {
+            width: 120px;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+        .form-status-fill {
+            height: 100%;
+            background: #4caf50;
+            border-radius: 3px;
+            min-width: 0;
+        }
+        .form-status-fill[style*="width: 0%"] {
+            display: none;
+        }
+        .form-status-count {
+            font-size: 0.85em;
+            color: #808080;
+            min-width: 50px;
+            text-align: right;
+            flex-shrink: 0;
+        }
+        .quick-link-item {
+            padding: 12px 0;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .quick-link-item:last-child {
+            border-bottom: none;
+        }
+        .quick-link-icon {
+            font-size: 1.2em;
+        }
+        .quick-link-text {
+            flex: 1;
+            font-size: 0.9em;
+            color: #000000;
+        }
+        .quick-link-count {
+            font-size: 0.85em;
+            color: #808080;
+        }
+        .new-hires-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .new-hire-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .new-hire-item:last-child {
+            border-bottom: none;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-container {
+                grid-template-columns: 1fr;
+            }
+            .summary-cards {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .top-header {
+                padding: 12px 15px;
+                flex-wrap: wrap;
+                min-height: 50px;
+            }
+            .logo-section {
+                font-size: 1.1em;
+                flex: 1;
+                min-width: 0;
+            }
+            .logo-section .logo-text {
+                display: none;
+            }
+            .logo-section img {
+                height: 50px;
+                margin-bottom: -25px;
+            }
+            .admin-header-page-label .admin-header-title {
+                font-size: 1em;
+            }
+            .user-section {
+                gap: 8px;
+            }
+            .user-dropdown span:not(.user-icon) {
+                display: none;
+            }
+            .notification-icon {
+                font-size: 1.1em;
+            }
+            .notification-dropdown {
+                min-width: 280px;
+                max-width: 90vw;
+                right: -10px;
+            }
+            .main-container {
+                padding: 15px;
+                gap: 15px;
+            }
+            .welcome-banner {
+                padding: 15px;
+            }
+            .summary-cards {
+                gap: 12px;
+            }
+            .summary-card {
+                padding: 15px;
+            }
+            .summary-icon {
+                width: 50px;
+                height: 50px;
+                font-size: 1.5em;
+            }
+            .summary-content .number {
+                font-size: 1.5em;
+            }
+            .welcome-banner {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+                padding: 20px;
+            }
+            .welcome-banner h1 {
+                font-size: 1.8em;
+            }
+            .filter-dropdown {
+                width: 100%;
+                font-size: 16px; /* Prevents zoom on iOS */
+                min-height: 44px; /* Touch-friendly */
+            }
+            .summary-cards {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+            .section {
+                padding: 20px;
+            }
+            .section-title {
+                font-size: 1.3em;
+            }
+            .progress-item {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            table {
+                display: block;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            th, td {
+                padding: 10px 8px;
+                font-size: 0.85em;
+                white-space: nowrap;
+            }
+            .sidebar {
+                margin-top: 20px;
+            }
+            .form-status-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 8px;
+            }
+            .form-status-name {
+                width: 100%;
+                max-width: none;
+            }
+            .form-status-progress {
+                width: 100%;
+            }
+            .form-status-count {
+                min-width: auto;
+                width: 100%;
+                text-align: left;
+                font-size: 0.8em;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .top-header {
+                padding: 10px 12px;
+                min-height: 45px;
+            }
+            .logo-section {
+                font-size: 0.9em;
+            }
+            .logo-section .logo-text {
+                display: none;
+            }
+            .logo-section img {
+                height: 40px;
+                margin-bottom: -20px;
+            }
+            .back-btn {
+                font-size: 0.75em;
+                padding: 6px 10px;
+            }
+            .welcome-banner {
+                padding: 12px;
+            }
+            .welcome-banner h1 {
+                font-size: 1.3em;
+            }
+            .summary-card {
+                padding: 12px;
+            }
+            .summary-icon {
+                width: 40px;
+                height: 40px;
+                font-size: 1.2em;
+            }
+            .summary-content .number {
+                font-size: 1.3em;
+            }
+            .section {
+                padding: 12px;
+            }
+            .section-title {
+                font-size: 1.1em;
+            }
+            .btn {
+                min-height: 44px;
+                padding: 12px 16px;
+                font-size: 0.95em;
+            }
+            .section-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+            .section-header .filter-dropdown {
+                width: 100%;
+                font-size: 16px;
+                min-height: 44px;
+            }
+            .section-header .progress-overview-search {
+                width: 100%;
+                max-width: none;
+                font-size: 16px;
+                min-height: 44px;
+            }
+            .progress-item {
+                padding: 10px 0;
+            }
+            .progress-avatar {
+                width: 35px;
+                height: 35px;
+                font-size: 0.9em;
+            }
+        }
+        :root {
+            --bg-base: #0c1017;
+            --bg-panel: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%);
+            --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.03) 40%, rgba(255,255,255,0.1) 74%, rgba(255,255,255,0.02) 100%);
+            --accent-red: #fe0100;
+            --text-primary: #f2f5fb;
+            --text-muted: #9ea8b8;
+            --border-soft: rgba(255,255,255,0.17);
+            --shadow-elev: 0 18px 42px rgba(0,0,0,0.36);
+        }
+        body {
+            background:
+                radial-gradient(circle at 20% 0%, rgba(255,255,255,0.07), transparent 46%),
+                linear-gradient(136deg, #090d14 0%, #111824 56%, #0c121d 100%);
+            color: var(--text-primary);
+        }
+        .top-header {
+            background: linear-gradient(160deg, #121821 0%, #090d14 100%);
+            border-bottom: 1px solid var(--border-soft);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        .nav-links a, .user-dropdown { color: #dbe2f0; }
+        .nav-links a:hover { color: #ff6a6a; }
+        .admin-header-page-label .admin-header-title {
+            color: var(--text-primary) !important;
+        }
+        .user-dropdown:hover, .back-btn:hover { background: rgba(255,255,255,0.14); }
+        .user-icon {
+            background: linear-gradient(180deg, #ff2726 0%, #cf0000 100%);
+            box-shadow: 0 6px 16px rgba(254,1,0,0.35);
+        }
+        .notification-dropdown, .dropdown-menu {
+            background: #151b28;
+            border: 1px solid var(--border-soft);
+            box-shadow: var(--shadow-elev);
+        }
+        .notification-header {
+            background: linear-gradient(145deg, #1b2230, #121826);
+            border-bottom-color: rgba(255,255,255,0.1);
+        }
+        .notification-header h3, .dropdown-item { color: var(--text-primary); }
+        .notification-item, .dropdown-item {
+            border-bottom-color: rgba(255,255,255,0.08);
+        }
+        .notification-item:hover, .dropdown-item:hover {
+            background: rgba(255,255,255,0.06);
+        }
+        .welcome-banner, .summary-card, .section, .sidebar-section, table {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-soft);
+            box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.12);
+            color: var(--text-primary);
+            position: relative;
+            overflow: hidden;
+        }
+        .welcome-banner::before, .summary-card::before, .section::before, .sidebar-section::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: var(--metal-sheen);
+            pointer-events: none;
+        }
+        .welcome-banner h1, .section-title, .sidebar-title, th, td {
+            color: var(--text-primary);
+        }
+        .admin-dash-sub,
+        .stores-total {
+            color: var(--text-muted);
+        }
+        .store-row-click:hover {
+            background: rgba(255, 255, 255, 0.06);
+        }
+        .store-hire-search-results {
+            border-color: rgba(255, 255, 255, 0.14);
+            background: rgba(18, 24, 38, 0.98);
+            box-shadow: var(--shadow-elev);
+        }
+        .store-hire-result-item {
+            color: var(--text-primary);
+            border-bottom-color: rgba(255, 255, 255, 0.08);
+        }
+        .store-hire-result-item:hover {
+            background: rgba(255, 255, 255, 0.06);
+        }
+        .store-hire-result-sub {
+            color: var(--text-muted);
+        }
+        .summary-content h3, .quick-link-text, .form-status-count, .form-status-name, .progress-store {
+            color: var(--text-muted);
+        }
+        .summary-content .number, .progress-percentage { color: var(--text-primary); }
+        .filter-dropdown, .progress-overview-search {
+            background: linear-gradient(150deg, rgba(255,255,255,0.09), rgba(255,255,255,0.04));
+            border: 1px solid rgba(255,255,255,0.24);
+            color: var(--text-primary);
+        }
+        .filter-dropdown:focus, .progress-overview-search:focus {
+            border-color: rgba(254,1,0,0.7);
+            box-shadow: 0 0 0 3px rgba(254,1,0,0.18);
+        }
+        .filter-dropdown:disabled {
+            background: rgba(255,255,255,0.08);
+            color: #9aa4b6;
+            border-color: rgba(255,255,255,0.15);
+        }
+        .progress-bar, .table-progress, .form-status-progress {
+            background: rgba(255,255,255,0.14);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .progress-fill.completed, .table-progress-fill, .form-status-fill {
+            background: linear-gradient(90deg, #ff2f2e 0%, #fe0100 100%);
+        }
+        .progress-fill.in-progress { background: linear-gradient(90deg, #ffc83d 0%, #d39a00 100%); }
+        .progress-fill.not-started { background: linear-gradient(90deg, #9fa8b7 0%, #7b8392 100%); }
+        .legend { border-top-color: rgba(255,255,255,0.15); }
+        .legend-item span, .progress-name a { color: var(--text-primary) !important; }
+        table th, table td { border-bottom-color: rgba(255,255,255,0.1); }
+        table tr:hover { background: rgba(255,255,255,0.04); }
+    {{ global_theme_css|safe }}
+        /* Manage Documents page-specific override: keep upload section dark and readable */
+        .collapsible-upload-panel .upload-form {
+            background: linear-gradient(160deg, #1a202c 0%, #101622 62%, #0a0f18 100%) !important;
+            border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            color: #f2f5fb !important;
+        }
+        .collapsible-upload-panel .upload-form label,
+        .collapsible-upload-panel .upload-form small,
+        .collapsible-upload-panel .upload-form .checkbox-group label {
+            color: #b7c1d3 !important;
+        }
+        .collapsible-upload-panel .upload-form input[type="text"],
+        .collapsible-upload-panel .upload-form input[type="file"],
+        .collapsible-upload-panel .upload-form textarea,
+        .collapsible-upload-panel .upload-form select {
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: #f2f5fb !important;
+            border: 1px solid rgba(255, 255, 255, 0.24) !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text">Ziebart Onboarding</span>
+        </div>
+        <div class="admin-header-page-label">
+            <h1 class="admin-header-title">Admin Dashboard</h1>
+        </div>
+        <div class="user-section">
+            {{ feedback_header_button|safe }}
+            <div class="notification-icon" style="position: relative;" onclick="toggleNotificationDropdown(event)">
+                🔔
+                {% if pending_count > 0 %}
+                <span class="notification-badge" id="notificationBadge" style="position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;">{{ pending_count }}</span>
+                {% endif %}
+                <div class="notification-dropdown" id="notificationDropdown">
+                    <div class="notification-header">
+                        <h3>Notifications</h3>
+                        <button onclick="markAllAsRead()" style="background: none; border: none; color: #FE0100; cursor: pointer; font-size: 0.85em; padding: 0;">Mark all read</button>
+                    </div>
+                    <div class="notification-list">
+                        {% if notifications %}
+                            {% for notification in notifications %}
+                            <div class="notification-item {% if not notification.is_read %}unread{% endif %}" onclick="handleNotificationClick({{ notification.id }}, '{{ notification.type }}', '{{ notification.url }}', event)">
+                                <div class="notification-title">{{ notification.title }}</div>
+                                <div class="notification-message">{{ notification.message }}</div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="notification-empty">
+                                <p>No new notifications</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="user-dropdown" onclick="toggleUserDropdown()">
+                <div class="user-icon">{{ admin_name[0].upper() if admin_name else 'A' }}</div>
+                <span>{{ admin_name }}</span>
+                <span>▼</span>
+            </div>
+            <div class="dropdown-menu" id="userDropdown">
+                {{ staff_console_dropdown_links }}
+            </div>
+        </div>
+    </div>
+    
+    <div class="main-container">
+        <div class="main-content">
+            <div class="section stores-section">
+                <div class="section-header">
+                    <h2 class="section-title">Stores</h2>
+                    <span class="stores-total">{{ total_active_new_hires }} active new hire{% if total_active_new_hires != 1 %}s{% endif %} total</span>
+                </div>
+                <div class="store-hire-search-inner">
+                    <div class="store-hire-search-wrap">
+                        <label for="storeHireSearch">Find new hire by name, username, or email</label>
+                        <input type="search" id="storeHireSearch" class="store-hire-search-input filter-dropdown" autocomplete="off" placeholder="Search new hires by name…">
+                    </div>
+                    <div id="storeHireSearchResults" class="store-hire-search-results" role="region" aria-label="New hire search results" hidden></div>
+                </div>
+                {% if store_dashboard_rows %}
+                <div class="stores-table-wrap">
+                <table class="stores-table">
+                    <thead>
+                        <tr>
+                            <th>Store</th>
+                            <th>Code</th>
+                            <th style="text-align: right;">New hires</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in store_dashboard_rows %}
+                        <tr class="store-row-click" role="link" tabindex="0" onclick="window.location.href='{{ row.list_url }}'" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.location.href='{{ row.list_url }}';}">
+                            <td><strong>{{ row.store_name }}</strong></td>
+                            <td>{{ row.store_code }}</td>
+                            <td style="text-align: right;">{{ row.new_hire_count }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                </div>
+                {% else %}
+                <p style="padding: 16px 0; color: #808080;">No stores configured yet. Open the <strong>admin menu</strong> (☰) and choose <strong>Manage Stores</strong> to add one.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function toggleUserDropdown() {
+            var dropdown = document.getElementById('userDropdown');
+            dropdown.classList.toggle('show');
+        }
+        
+        function toggleNotificationDropdown(event) {
+            event.stopPropagation();
+            var dropdown = document.getElementById('notificationDropdown');
+            dropdown.classList.toggle('show');
+        }
+        
+        function handleNotificationClick(notificationId, notificationType, url, event) {
+            if (event) {
+                event.stopPropagation();
+            }
+            // Mark notification as read
+            fetch('/api/notifications/mark-read', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    notification_type: notificationType,
+                    notification_id: String(notificationId)
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Update badge count immediately
+                    updateNotificationBadge();
+                    // Also remove the notification item from the dropdown
+                    var clickedElement = event ? event.currentTarget : null;
+                    if (clickedElement) {
+                        clickedElement.classList.remove('unread');
+                        // Remove after a short delay to show visual feedback
+                        setTimeout(function() {
+                            clickedElement.remove();
+                            // Check if there are any notifications left
+                            var notificationList = document.querySelector('.notification-list');
+                            if (notificationList && notificationList.querySelectorAll('.notification-item').length === 0) {
+                                notificationList.innerHTML = '<div class="notification-empty"><p>No new notifications</p></div>';
+                            }
+                        }, 100);
+                    }
+                }
+                // Navigate to the notification URL (only if it's not the same page)
+                if (url && url !== window.location.pathname) {
+                    window.location.href = url;
+                } else {
+                    // If same page, just reload to refresh the notification count
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 200);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                // Still navigate even if marking as read fails
+                if (url && url !== window.location.pathname) {
+                    window.location.href = url;
+                } else {
+                    window.location.reload();
+                }
+            });
+        }
+        
+        function markAllAsRead() {
+            fetch('/api/notifications/mark-all-read', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Update badge count immediately
+                    updateNotificationBadge();
+                    // Update the notification list
+                    var notificationList = document.querySelector('.notification-list');
+                    if (notificationList) {
+                        notificationList.innerHTML = '<div class="notification-empty"><p>No new notifications</p></div>';
+                    }
+                    // Remove unread styling from any remaining items
+                    var unreadItems = document.querySelectorAll('.notification-item.unread');
+                    unreadItems.forEach(function(item) {
+                        item.classList.remove('unread');
+                    });
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+        
+        function updateNotificationBadge() {
+            fetch('/api/notifications/count')
+            .then(response => response.json())
+            .then(data => {
+                var badge = document.getElementById('notificationBadge');
+                if (data.count > 0) {
+                    if (badge) {
+                        badge.textContent = data.count;
+                        badge.style.display = 'flex';
+                    } else {
+                        // Create badge if it doesn't exist
+                        var icon = document.querySelector('.notification-icon');
+                        if (icon) {
+                            var newBadge = document.createElement('span');
+                            newBadge.id = 'notificationBadge';
+                            newBadge.className = 'notification-badge notification-badge-dot';
+                            newBadge.textContent = data.count;
+                            newBadge.style.cssText = 'position: absolute; top: -5px; right: -5px; background: #FE0100; color: white; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold;';
+                            icon.appendChild(newBadge);
+                        }
+                    }
+                } else {
+                    if (badge) {
+                        badge.style.display = 'none';
+                        badge.textContent = '0';
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+        
+        window.onclick = function(event) {
+            if (!event.target.closest('.user-dropdown')) {
+                var dropdown = document.getElementById('userDropdown');
+                if (dropdown.classList.contains('show')) {
+                    dropdown.classList.remove('show');
+                }
+            }
+            if (!event.target.closest('.notification-icon')) {
+                var notifDropdown = document.getElementById('notificationDropdown');
+                if (notifDropdown && notifDropdown.classList.contains('show')) {
+                    notifDropdown.classList.remove('show');
+                }
+            }
+        }
+    </script>
+    <script type="application/json" id="hireSearchData">{{ hire_search_rows | tojson }}</script>
+    <script>
+    (function() {
+        var raw = document.getElementById('hireSearchData');
+        var rows = [];
+        if (raw && raw.textContent) {
+            try { rows = JSON.parse(raw.textContent); } catch (e) { rows = []; }
+        }
+        var input = document.getElementById('storeHireSearch');
+        var out = document.getElementById('storeHireSearchResults');
+        if (!input || !out) return;
+        var MAX = 50;
+        function render() {
+            var q = (input.value || '').trim().toLowerCase();
+            if (!q) {
+                out.innerHTML = '';
+                out.hidden = true;
+                return;
+            }
+            var matches = [];
+            for (var i = 0; i < rows.length; i++) {
+                if (String(rows[i].search_text || '').indexOf(q) !== -1) {
+                    matches.push(rows[i]);
+                    if (matches.length >= MAX) break;
+                }
+            }
+            out.innerHTML = '';
+            out.hidden = false;
+            if (!matches.length) {
+                var empty = document.createElement('div');
+                empty.className = 'store-hire-result-item';
+                empty.style.cursor = 'default';
+                empty.textContent = 'No matches.';
+                out.appendChild(empty);
+                return;
+            }
+            for (var j = 0; j < matches.length; j++) {
+                var m = matches[j];
+                var a = document.createElement('a');
+                a.href = m.list_url || '#';
+                a.className = 'store-hire-result-item';
+                var nameEl = document.createElement('div');
+                nameEl.textContent = m.display_name || m.username || 'Unknown';
+                var storeEl = document.createElement('div');
+                storeEl.className = 'store-hire-result-store';
+                storeEl.textContent = m.store_name || '';
+                var subEl = document.createElement('div');
+                subEl.className = 'store-hire-result-sub';
+                var bits = [];
+                if (m.username) bits.push('@' + m.username);
+                if (m.email) bits.push(m.email);
+                subEl.textContent = bits.join(' · ');
+                a.appendChild(nameEl);
+                a.appendChild(storeEl);
+                if (bits.length) a.appendChild(subEl);
+                out.appendChild(a);
+            }
+        }
+        input.addEventListener('input', render);
+        input.addEventListener('search', render);
+    })();
+    </script>
+</body>
+</html>
+

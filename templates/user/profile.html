@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Profile - Onboarding App</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            background: #f5f5f5;
+            color: #000000;
+        }
+        p, span, div, td, th, label, input, textarea, select, button, a {
+            font-family: 'URW Form', Arial, sans-serif;
+        }
+        .top-header {
+            background: #000000;
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: visible;
+            position: relative;
+            z-index: 100;
+            min-height: 60px;
+        }
+        .back-btn {
+            background: rgba(255,255,255,0.2);
+            color: #FFFFFF;
+            padding: 8px 16px;
+            border-radius: 0.5rem;
+            text-decoration: none;
+            font-family: 'URW Form', Arial, sans-serif;
+            font-size: 0.95em;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .back-btn:hover {
+            background: rgba(255,255,255,0.3);
+            color: #FFFFFF;
+        }
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.4em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #ffffff;
+            position: relative;
+            z-index: 101;
+            height: 100%;
+        }
+        .logo-section img {
+            height: 80px;
+            width: auto;
+            align-self: flex-end;
+            margin-bottom: -40px;
+        }
+        .nav-links {
+            display: flex;
+            gap: 30px;
+            align-items: center;
+        }
+        .nav-links a {
+            color: #ffffff;
+            text-decoration: none;
+            font-size: 1em;
+            font-weight: 500;
+            font-family: 'URW Form', Arial, sans-serif;
+            transition: color 0.2s;
+        }
+        .nav-links a:hover {
+            color: #FE0100;
+        }
+        .user-section {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            position: relative;
+        }
+        .user-dropdown {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 5px 10px;
+            border-radius: 20px;
+            transition: background 0.2s;
+            color: #ffffff;
+        }
+        .user-dropdown:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        .user-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #FE0100;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: white;
+            min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: 0.5rem;
+            margin-top: 10px;
+            z-index: 1000;
+            overflow: hidden;
+        }
+        .dropdown-menu.show {
+            display: block;
+        }
+        .dropdown-item {
+            padding: 12px 20px;
+            color: #000000;
+            text-decoration: none;
+            display: block;
+            transition: background 0.2s;
+        }
+        .dropdown-item:hover {
+            background: #f5f5f5;
+        }
+        .dropdown-divider {
+            height: 1px;
+            background: #eee;
+        }
+        .main-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px 20px;
+        }
+        .profile-header {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 40px;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            text-align: center;
+        }
+        .profile-avatar {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: #FE0100;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3em;
+            font-weight: bold;
+            margin: 0 auto 20px;
+        }
+        .profile-name {
+            font-size: 2.5em;
+            font-weight: 800;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #000000;
+            margin-bottom: 10px;
+        }
+        .profile-position {
+            color: #808080;
+            font-size: 1.1em;
+        }
+        .info-section {
+            background: #FFFFFF;
+            border-radius: 1rem;
+            border: 1px solid #E0E0E0;
+            padding: 1.5rem;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .section-title-dash {
+            font-size: 0.95em;
+            font-weight: 700;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #333;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin: 0 0 16px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #E0E0E0;
+        }
+        .section-title {
+            font-size: 0.95em;
+            font-weight: 700;
+            font-family: 'URW Form', Arial, sans-serif;
+            color: #333;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin: 0 0 16px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #E0E0E0;
+            display: block;
+        }
+        .info-item {
+            padding: 15px 0;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .info-item:last-child {
+            border-bottom: none;
+        }
+        .info-label {
+            font-weight: 600;
+            color: #808080;
+            font-size: 0.95em;
+        }
+        .info-value {
+            color: #000000;
+            font-size: 0.95em;
+        }
+        /* Mobile Menu */
+        .mobile-menu-toggle {
+            display: none;
+            background: none;
+            border: none;
+            color: #ffffff;
+            font-size: 1.5em;
+            cursor: pointer;
+            padding: 8px;
+        }
+        .mobile-nav {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #000000;
+            flex-direction: column;
+            padding: 20px;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .mobile-nav.show {
+            display: flex;
+        }
+        .mobile-nav a {
+            color: #ffffff;
+            text-decoration: none;
+            padding: 12px 0;
+            font-size: 1.1em;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .mobile-nav a:last-child {
+            border-bottom: none;
+        }
+        .mobile-nav a:hover {
+            color: #FE0100;
+        }
+        
+        @media (max-width: 768px) {
+            .profile-header {
+                padding: 30px 20px;
+            }
+            .profile-name {
+                font-size: 1.5em;
+            }
+            .info-section {
+                padding: 20px;
+            }
+            .profile-header .btn,
+            .info-section .btn {
+                width: 100%;
+                text-align: center;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .profile-header {
+                padding: 20px 15px;
+            }
+            .profile-name {
+                font-size: 1.3em;
+            }
+            .info-section {
+                padding: 15px;
+            }
+        }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body class="user-app-shell">
+    <div class="top-header">
+        <div class="logo-section">
+            <img src="{{ url_for('serve_ziebart_logo') }}" alt="Ziebart Logo">
+            <span class="logo-text logo-text-desktop">Ziebart Onboarding</span>
+            <span class="logo-text-stack"><span class="logo-title">Ziebart</span><span class="logo-subtitle">Onboarding</span></span>
+        </div>
+        <button class="mobile-menu-toggle" onclick="toggleMobileMenu()">☰</button>
+        <div class="nav-links">
+            <a href="{{ url_for('dashboard') }}">Home</a>
+            <a href="{{ url_for('user_tasks') }}">Tasks</a>
+            <a href="{{ url_for('view_documents') }}">Files</a>
+            <a href="{{ url_for('list_training_videos') }}">Videos</a>
+            <a href="{{ url_for('profile') }}" class="nav-tab-active">Profile</a>
+        </div>
+        <div class="mobile-nav" id="mobileNav">
+            <a href="{{ url_for('dashboard') }}">Home</a>
+            <a href="{{ url_for('user_tasks') }}">Tasks</a>
+            <a href="{{ url_for('view_documents') }}">Files</a>
+            <a href="{{ url_for('list_training_videos') }}">Videos</a>
+            <a href="{{ url_for('profile') }}">Profile</a>
+        </div>
+        <div class="user-section">
+            <div class="user-dropdown" onclick="toggleUserDropdown()">
+                <div class="user-icon">{{ user_name[0].upper() if user_name else 'U' }}</div>
+                <span class="user-dropdown-label">{{ user_name }}</span>
+                <span class="user-dropdown-caret" aria-hidden="true">▼</span>
+            </div>
+            <div class="dropdown-menu" id="userDropdown">
+                {{ staff_console_dropdown_links }}
+            </div>
+        </div>
+    </div>
+    
+    <div class="main-content">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+            <div class="flash flash-{{ category }}" style="padding: 12px 20px; margin-bottom: 20px; border-radius: 0.5rem; background: {% if category == 'error' %}#f8d7da; color: #721c24{% else %}#d4edda; color: #155724{% endif %};">{{ msg }}</div>
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+        <div class="profile-header">
+            <div class="profile-avatar">{{ user_name[0].upper() if user_name else 'U' }}</div>
+            <div class="profile-name">{{ user_name }}</div>
+            {% if user_position %}
+            <div class="profile-position">{{ user_position }}</div>
+            {% endif %}
+        </div>
+        
+        <div class="info-section">
+            <h2 class="section-title-dash">Profile</h2>
+            <div class="info-item">
+                <span class="info-label">Name</span>
+                <span class="info-value">{{ user_name }}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Position</span>
+                <span class="info-value">{{ user_position or 'Not set' }}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Email</span>
+                <span class="info-value">{{ user_email }}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Start Date</span>
+                <span class="info-value">{{ user_start_date.strftime('%B %d, %Y') if user_start_date else 'Not set' }}</span>
+            </div>
+        </div>
+        <div class="info-section">
+            <h2 class="section-title-dash">Signature</h2>
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+                <p style="margin: 0;">Create and save a default signature to apply intentionally while signing documents.</p>
+                <a href="{{ url_for('manage_signature') }}" class="btn btn-secondary" style="text-decoration: none; white-space: nowrap;">Manage Signature</a>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function toggleUserDropdown() {
+            var dropdown = document.getElementById('userDropdown');
+            dropdown.classList.toggle('show');
+        }
+        
+        window.onclick = function(event) {
+            if (!event.target.closest('.user-dropdown')) {
+                var dropdown = document.getElementById('userDropdown');
+                if (dropdown.classList.contains('show')) {
+                    dropdown.classList.remove('show');
+                }
+            }
+        }
+    </script>
+    {{ user_mobile_bottom_nav }}
+</body>
+</html>
+

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Onboarding Messages - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {{ global_theme_css|safe }}
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        .header { background: linear-gradient(160deg, #121821 0%, #090d14 100%); color: var(--text-primary); padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; border-bottom: 1px solid var(--border-soft); box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+        .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; color: var(--text-primary) !important; }
+        .back-btn { background: rgba(255,255,255,0.1); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.22); }
+        .back-btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
+        .header-right { display: flex; align-items: center; gap: 16px; }
+        .user-dropdown { cursor: pointer; position: relative; }
+        .user-icon { width: 40px; height: 40px; border-radius: 50%; background: #FE0100; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1.1em; }
+        .dropdown-menu { display: none; position: absolute; top: 100%; right: 0; margin-top: 8px; min-width: 180px; border-radius: 8px; z-index: 1000; padding: 8px 0; }
+        .dropdown-menu.show { display: block; }
+        .dropdown-item { display: block; padding: 10px 16px; text-decoration: none; font-size: 0.95em; }
+        .container { max-width: 1120px; margin: 24px auto; padding: 0 20px; }
+        .messages-layout { display: flex; gap: 24px; align-items: flex-start; }
+        .messages-main { flex: 1; min-width: 0; }
+        .card { border-radius: 0.5rem; padding: 24px; margin-bottom: 24px; }
+        .card h2 { font-size: 1.2em; margin-bottom: 8px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.18) !important; color: var(--text-primary) !important; }
+        .card p.hint { color: var(--text-muted) !important; font-size: 0.9em; margin-bottom: 16px; line-height: 1.5; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-size: 0.9em; font-weight: 600; margin-bottom: 6px; color: var(--text-primary) !important; }
+        .form-group input[type="text"], .form-group textarea, .form-group select { width: 100%; padding: 10px 12px; border-radius: 0.35rem; font-size: 1em; font-family: inherit; }
+        .form-group textarea { min-height: 110px; resize: vertical; }
+        .form-group textarea.message-field { transition: border-color 0.15s, box-shadow 0.15s; }
+        .form-group textarea.message-field:focus, .form-group textarea.message-field.is-active { border-color: rgba(254,1,0,0.75) !important; box-shadow: 0 0 0 3px rgba(254,1,0,0.18) !important; outline: none; }
+        .form-group textarea.message-field.drag-over { border-color: rgba(120, 170, 255, 0.85) !important; box-shadow: 0 0 0 3px rgba(120, 170, 255, 0.2) !important; background: rgba(120, 170, 255, 0.08) !important; }
+        .form-group small { display: block; margin-top: 6px; color: var(--text-muted) !important; font-size: 0.85em; }
+        .checkbox-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+        .checkbox-row input { width: auto; margin: 0; accent-color: #fe0100; }
+        .checkbox-row label { margin: 0; font-weight: 500; cursor: pointer; color: var(--text-primary) !important; }
+        .btn-primary { background: linear-gradient(180deg, #ff2928 0%, var(--accent-red) 62%, #b30000 100%) !important; color: #fff !important; border: 1px solid rgba(255,255,255,0.22) !important; }
+        .btn-primary:hover { background: linear-gradient(180deg, #ff3a39 0%, #d20000 62%, #980000 100%) !important; }
+        .btn-secondary { background: rgba(255,255,255,0.1) !important; color: #fff !important; font-size: 0.9em; padding: 8px 14px; border: 1px solid rgba(255,255,255,0.22) !important; }
+        .btn-secondary:hover { background: rgba(255,255,255,0.18) !important; }
+        .link-panel { width: 280px; flex-shrink: 0; background: var(--bg-panel) !important; border: 1px solid var(--border-soft) !important; border-radius: 0.5rem; box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.12) !important; padding: 18px; position: sticky; top: 20px; color: var(--text-primary) !important; }
+        .link-panel h3 { font-size: 1em; margin-bottom: 6px; color: var(--text-primary) !important; }
+        .link-panel .panel-hint { color: var(--text-muted) !important; font-size: 0.85em; line-height: 1.45; margin-bottom: 14px; }
+        .link-section { margin-bottom: 16px; }
+        .link-section-title { font-size: 0.78em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted) !important; margin-bottom: 8px; }
+        .link-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+        .link-chip { display: inline-flex; align-items: center; gap: 6px; padding: 7px 11px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.08); color: var(--text-primary) !important; font-size: 0.85em; cursor: grab; user-select: none; }
+        .link-chip:hover { background: rgba(254,1,0,0.18); border-color: rgba(254,1,0,0.45); color: #fff !important; }
+        .link-chip:active { cursor: grabbing; }
+        .link-chip .chip-icon { opacity: 0.75; font-size: 0.9em; }
+        .custom-link-form { display: grid; gap: 8px; margin-top: 8px; }
+        .custom-link-form input { width: 100%; padding: 8px 10px; border-radius: 0.35rem; font-size: 0.9em; }
+        .empty-links { color: var(--text-muted) !important; font-size: 0.85em; line-height: 1.4; }
+        .empty-links a { color: #ff8a8a !important; }
+        .empty-links a:hover { color: #ffb3b3 !important; }
+        .message-preview { margin-top: 8px; padding: 10px 12px; background: rgba(255,255,255,0.05); border: 1px dashed rgba(255,255,255,0.2); border-radius: 0.35rem; font-size: 0.9em; line-height: 1.55; color: var(--text-primary) !important; min-height: 42px; }
+        .message-preview-label { font-size: 0.78em; font-weight: 600; color: var(--text-muted) !important; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.03em; }
+        .message-preview .preview-link { display: inline-block; padding: 1px 8px; border-radius: 999px; background: rgba(254,1,0,0.2); color: #ffb3b3 !important; text-decoration: underline; border: 1px solid rgba(254,1,0,0.35); }
+        .message-preview-empty { color: #8a94a8 !important; font-style: italic; }
+        .flash-success { padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: rgba(40, 167, 69, 0.18) !important; color: #b8f0c8 !important; border: 1px solid rgba(40, 167, 69, 0.35); }
+        .flash-error { padding: 12px 20px; margin-bottom: 10px; border-radius: 0.5rem; background: rgba(220, 53, 69, 0.18) !important; color: #ffb8bf !important; border: 1px solid rgba(220, 53, 69, 0.35); }
+        .section-save { margin-top: 4px; }
+        .message-section-form { margin-bottom: 0; }
+        @media (max-width: 960px) {
+            .messages-layout { flex-direction: column; }
+            .link-panel { width: 100%; position: static; }
+        }
+    </style>
+</head>
+<body class="onboarding-messages-page">
+    <div class="header">
+        <h1>💬 Onboarding Messages</h1>
+        <div class="header-right">
+            <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
+            <div class="user-dropdown" onclick="event.stopPropagation(); document.getElementById('messagesUserDropdown').classList.toggle('show');">
+                <div class="user-icon">{{ (current_user.username or 'A')[0].upper() }}</div>
+                <div class="dropdown-menu" id="messagesUserDropdown">
+                    {{ staff_console_dropdown_links }}
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>document.addEventListener('click', function(e) { if (!e.target.closest('.user-dropdown')) document.getElementById('messagesUserDropdown').classList.remove('show'); });</script>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div style="margin-bottom: 20px;">
+            {% for category, msg in messages %}
+            <div class="{% if category == 'error' %}flash-error{% else %}flash-success{% endif %}">{{ msg }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+        <div class="messages-layout">
+            <div class="messages-main">
+            <form method="POST" action="{{ url_for('manage_onboarding_messages') }}" class="message-section-form">
+                <input type="hidden" name="section" value="welcome">
+            <div class="card">
+                <h2>Welcome message</h2>
+                <p class="hint">Shown after a new hire logs in, before they reach the dashboard. Click a message box, then click or drag a link from the panel on the right.</p>
+                <div class="form-group">
+                    <label for="welcome_headline">Welcome headline</label>
+                    <input type="text" name="welcome_headline" id="welcome_headline" value="{{ settings.welcome_headline }}" required>
+                </div>
+                <div class="checkbox-row">
+                    <input type="checkbox" name="welcome_include_name" id="welcome_include_name" value="1" {% if settings.welcome_include_name %}checked{% endif %}>
+                    <label for="welcome_include_name">Include the employee&apos;s name in the welcome headline</label>
+                </div>
+                <div class="form-group">
+                    <label for="welcome_body">Welcome body</label>
+                    <textarea name="welcome_body" id="welcome_body" class="message-field" required>{{ settings.welcome_body }}</textarea>
+                    <div class="message-preview-label">Preview</div>
+                    <div class="message-preview" data-preview-for="welcome_body"></div>
+                    <small>Links appear as clickable text for new hires.</small>
+                </div>
+                <button type="submit" class="btn btn-primary section-save">Save welcome message</button>
+            </div>
+            </form>
+            <form method="POST" action="{{ url_for('manage_onboarding_messages') }}" class="message-section-form">
+                <input type="hidden" name="section" value="finale">
+            <div class="card">
+                <h2>All tasks completed — dashboard message</h2>
+                <p class="hint">Shown on the user dashboard when they finish every assigned task. Applied automatically; managers can still send a custom message from a user&apos;s checklist.</p>
+                <div class="form-group">
+                    <label for="default_finale_message">Dashboard message</label>
+                    <textarea name="default_finale_message" id="default_finale_message" class="message-field" required>{{ settings.default_finale_message }}</textarea>
+                    <div class="message-preview-label">Preview</div>
+                    <div class="message-preview" data-preview-for="default_finale_message"></div>
+                </div>
+                <div class="form-group">
+                    <label for="default_finale_document_id">Optional attached document</label>
+                    <select name="default_finale_document_id" id="default_finale_document_id">
+                        <option value="">— None —</option>
+                        {% for doc in documents %}
+                        <option value="{{ doc.id }}" {% if settings.default_finale_document_id and doc.id == settings.default_finale_document_id|int %}selected{% endif %}>{{ doc.name_for_users or doc.original_filename }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary section-save">Save dashboard message</button>
+            </div>
+            </form>
+            <form method="POST" action="{{ url_for('manage_onboarding_messages') }}" class="message-section-form">
+                <input type="hidden" name="section" value="email">
+            <div class="card">
+                <h2>All tasks completed — email</h2>
+                <p class="hint">Sent once when a user completes all onboarding tasks.</p>
+                <div class="form-group">
+                    <label for="all_tasks_completed_email_subject">Email subject</label>
+                    <input type="text" name="all_tasks_completed_email_subject" id="all_tasks_completed_email_subject" value="{{ settings.all_tasks_completed_email_subject }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="all_tasks_completed_email_body">Email body</label>
+                    <textarea name="all_tasks_completed_email_body" id="all_tasks_completed_email_body" class="message-field" required>{{ settings.all_tasks_completed_email_body }}</textarea>
+                    <div class="message-preview-label">Preview</div>
+                    <div class="message-preview" data-preview-for="all_tasks_completed_email_body"></div>
+                </div>
+                <button type="submit" class="btn btn-primary section-save">Save email</button>
+            </div>
+            </form>
+            </div>
+            <aside class="link-panel" aria-label="Insert links">
+                <h3>Insert a link</h3>
+                <p class="panel-hint">Click inside a message box first, then click or drag a link below into that message.</p>
+                <div class="link-section">
+                    <div class="link-section-title">Onboarding portal</div>
+                    <div class="link-chips">
+                        {% for item in portal_links %}
+                        <button type="button" class="link-chip" draggable="true" data-token="{{ item.token }}" title="Insert {{ item.label }}">
+                            <span class="chip-icon">🔗</span>{{ item.label }}
+                        </button>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="link-section">
+                    <div class="link-section-title">Other websites</div>
+                    {% if external_link_items %}
+                    <div class="link-chips">
+                        {% for item in external_link_items %}
+                        <button type="button" class="link-chip" draggable="true" data-token="{{ item.token }}" title="Insert {{ item.label }}">
+                            <span class="chip-icon">🌐</span>{{ item.label }}
+                        </button>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="empty-links">No website links yet. Add them under <a href="{{ url_for('manage_external_links') }}">External Links</a>.</p>
+                    {% endif %}
+                </div>
+                <div class="link-section">
+                    <div class="link-section-title">Custom website</div>
+                    <div class="custom-link-form">
+                        <input type="url" id="customLinkUrl" placeholder="https://example.com">
+                        <input type="text" id="customLinkLabel" placeholder="Link text (e.g. Employee handbook)">
+                        <button type="button" class="btn btn-secondary" id="insertCustomLinkBtn">Add link to message</button>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+    <script>
+    (function() {
+        var activeField = null;
+        var fields = document.querySelectorAll('.message-field');
+        fields.forEach(function(field) {
+            field.addEventListener('focus', function() {
+                fields.forEach(function(f) { f.classList.remove('is-active'); });
+                field.classList.add('is-active');
+                activeField = field;
+            });
+            field.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                field.classList.add('drag-over');
+            });
+            field.addEventListener('dragleave', function() {
+                field.classList.remove('drag-over');
+            });
+            field.addEventListener('drop', function(e) {
+                e.preventDefault();
+                field.classList.remove('drag-over');
+                var token = e.dataTransfer.getData('text/plain');
+                if (token) insertAtCursor(field, token);
+            });
+        });
+        if (fields.length) {
+            fields[0].classList.add('is-active');
+            activeField = fields[0];
+        }
+        function escapeHtml(str) {
+            return String(str || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+        function renderMessagePreview(text) {
+            if (!text || !String(text).trim()) {
+                return '<span class="message-preview-empty">Nothing to preview yet.</span>';
+            }
+            var html = escapeHtml(text);
+            html = html.replace(/\\[link:[^:\\]|]+:[^|\\]]+\\|([^\\]]+)\\]/g, '<span class="preview-link">$1</span>');
+            html = html.replace(/\\n/g, '<br>');
+            return html;
+        }
+        function updatePreviewForField(field) {
+            var preview = document.querySelector('.message-preview[data-preview-for="' + field.id + '"]');
+            if (preview) {
+                preview.innerHTML = renderMessagePreview(field.value);
+            }
+        }
+        function updateAllPreviews() {
+            fields.forEach(updatePreviewForField);
+        }
+        fields.forEach(function(field) {
+            field.addEventListener('input', function() { updatePreviewForField(field); });
+        });
+        updateAllPreviews();
+        function insertAtCursor(textarea, text) {
+            var start = textarea.selectionStart || 0;
+            var end = textarea.selectionEnd || 0;
+            var val = textarea.value || '';
+            textarea.value = val.substring(0, start) + text + val.substring(end);
+            var pos = start + text.length;
+            textarea.selectionStart = textarea.selectionEnd = pos;
+            textarea.focus();
+            activeField = textarea;
+            fields.forEach(function(f) { f.classList.remove('is-active'); });
+            textarea.classList.add('is-active');
+            updatePreviewForField(textarea);
+        }
+        document.querySelectorAll('.link-chip').forEach(function(chip) {
+            chip.addEventListener('click', function() {
+                if (!activeField) {
+                    alert('Click inside a message box first, then choose a link.');
+                    return;
+                }
+                insertAtCursor(activeField, chip.getAttribute('data-token'));
+            });
+            chip.addEventListener('dragstart', function(e) {
+                e.dataTransfer.setData('text/plain', chip.getAttribute('data-token'));
+            });
+        });
+        document.getElementById('insertCustomLinkBtn').addEventListener('click', function() {
+            if (!activeField) {
+                alert('Click inside a message box first, then add your link.');
+                return;
+            }
+            var urlInput = document.getElementById('customLinkUrl');
+            var labelInput = document.getElementById('customLinkLabel');
+            var url = (urlInput.value || '').trim();
+            var label = (labelInput.value || '').trim();
+            if (!url) {
+                alert('Please enter a website address.');
+                urlInput.focus();
+                return;
+            }
+            if (!/^https?:\\/\\//i.test(url)) {
+                url = 'https://' + url;
+            }
+            if (!label) {
+                label = url.replace(/^https?:\\/\\//i, '');
+            }
+            var token = '[link:custom:' + encodeURIComponent(url) + '|' + label + ']';
+            insertAtCursor(activeField, token);
+            urlInput.value = '';
+            labelInput.value = '';
+        });
+    })();
+    </script>
+</body>
+</html>
+

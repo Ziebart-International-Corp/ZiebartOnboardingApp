@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Form Wizard - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; }
+        .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+        .header h1 { font-weight: 800; margin: 0; font-size: 1.25em; }
+        .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+        .container { max-width: 720px; margin: 30px auto; padding: 0 20px; }
+        .panel { background: white; padding: 28px; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .panel h2 { margin-bottom: 12px; color: #000; font-size: 1.3em; }
+        .panel p { color: #555; line-height: 1.5; margin-bottom: 12px; }
+        .btn { display: inline-block; padding: 10px 20px; background: #FE0100; color: white; text-decoration: none; border-radius: 5px; border: none; cursor: pointer; font-size: 1em; }
+        .btn:hover { background: #c00; color: white; }
+        .btn-secondary { background: #444; }
+        .btn-secondary:hover { background: #333; color: white; }
+        .upload-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 40px 20px; text-align: center; margin: 20px 0; background: #fafafa; }
+        .upload-zone input[type=file] { margin-top: 12px; }
+        .status-note { background: #f0f4ff; border: 1px solid #c5d4f7; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 0.95em; }
+        .status-warn { background: #fff8e6; border-color: #f0d78c; }
+        #analyzeStatus { display: none; margin-top: 16px; }
+        .spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid #ddd; border-top-color: #FE0100; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    {{ global_theme_css|safe }}
+        /* Overrides: global theme forces light text on our light sub-boxes */
+        body.test-form-wizard-page .panel h2,
+        body.test-form-wizard-page .panel p,
+        body.test-form-wizard-page .panel strong,
+        body.test-form-wizard-page .panel label,
+        body.test-form-wizard-page #analyzeStatus {
+            color: #e8ecf4 !important;
+            -webkit-text-fill-color: #e8ecf4 !important;
+        }
+        body.test-form-wizard-page .status-note {
+            background: rgba(13, 110, 253, 0.18) !important;
+            border: 1px solid rgba(100, 149, 237, 0.45) !important;
+            color: #dce9ff !important;
+            -webkit-text-fill-color: #dce9ff !important;
+        }
+        body.test-form-wizard-page .status-note strong {
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+        }
+        body.test-form-wizard-page .status-note a {
+            color: #7eb8ff !important;
+        }
+        body.test-form-wizard-page .status-warn {
+            background: rgba(255, 193, 7, 0.14) !important;
+            border-color: rgba(255, 193, 7, 0.5) !important;
+            color: #ffe8a3 !important;
+            -webkit-text-fill-color: #ffe8a3 !important;
+        }
+        body.test-form-wizard-page .upload-zone {
+            background: rgba(255, 255, 255, 0.06) !important;
+            border: 2px dashed rgba(255, 255, 255, 0.28) !important;
+        }
+        body.test-form-wizard-page .upload-zone,
+        body.test-form-wizard-page .upload-zone strong {
+            color: #f2f5fb !important;
+            -webkit-text-fill-color: #f2f5fb !important;
+        }
+        body.test-form-wizard-page .upload-zone input[type=file] {
+            color: #f2f5fb !important;
+            background: rgba(0, 0, 0, 0.25) !important;
+        }
+        body.test-form-wizard-page .btn-secondary {
+            background: #444 !important;
+        }
+    </style>
+</head>
+<body class="test-form-wizard-page">
+    <div class="header">
+        <h1>Test Form Wizard</h1>
+        <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Back to Dashboard</a></div>
+    </div>
+    <div class="container">
+        <div class="panel">
+            <h2>Turn a PDF into an easy step-by-step form</h2>
+            <p>Upload a PDF form. The system reads fillable fields when present, or uses AI to detect blanks on scanned forms. You then fill each field one at a time and review a completed summary and PDF.</p>
+            {% if not pdf_wizard_available %}
+            <div class="status-note status-warn">PyMuPDF is required for this feature. Install with: pip install PyMuPDF</div>
+            {% elif not ai_configured %}
+            <div class="status-note status-warn">Tip: Set <strong>OPENAI_API_KEY</strong> in .env for best results on scanned (non-fillable) PDFs.</div>
+            {% else %}
+            <div class="status-note">AI field detection is enabled for scanned PDFs.</div>
+            {% endif %}
+            {% if resume_url %}
+            <div class="status-note">
+                You have a form in progress.
+                <a href="{{ resume_url }}">Continue</a>
+                ·
+                <form method="POST" action="{{ url_for('admin_test_form_reset') }}" style="display:inline;" onsubmit="return confirm('Start over? Current progress will be deleted.');">
+                    <button type="submit" class="btn btn-secondary" style="padding:4px 10px;font-size:0.85em;">Start over</button>
+                </form>
+            </div>
+            {% endif %}
+            <form id="uploadForm" method="POST" action="{{ url_for('admin_test_form_analyze') }}" enctype="multipart/form-data">
+                <div class="upload-zone">
+                    <strong>Choose a PDF form</strong>
+                    <br>
+                    <input type="file" name="pdf_file" accept="application/pdf,.pdf" required {% if not pdf_wizard_available %}disabled{% endif %}>
+                </div>
+                <button type="submit" class="btn" id="analyzeBtn" {% if not pdf_wizard_available %}disabled{% endif %}>Analyze form with AI</button>
+                <div id="analyzeStatus"><span class="spinner"></span> Reading the PDF and detecting fields… This may take a minute.</div>
+            </form>
+        </div>
+    </div>
+    <script>
+        document.getElementById('uploadForm').addEventListener('submit', function() {
+            document.getElementById('analyzeStatus').style.display = 'block';
+            document.getElementById('analyzeBtn').disabled = true;
+        });
+    </script>
+</body>
+</html>
+

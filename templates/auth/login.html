@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Log in - Ziebart Onboarding</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            --bg-base: #0a0d12;
+            --bg-accent: #121821;
+            --bg-panel: linear-gradient(155deg, #1a1f2b 0%, #0f141d 62%, #090d14 100%);
+            --metal-sheen: linear-gradient(110deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.03) 42%, rgba(255,255,255,0.11) 74%, rgba(255,255,255,0.02) 100%);
+            --accent-red: #fe0100;
+            --accent-red-hover: #d20000;
+            --text-primary: #f4f7fc;
+            --text-muted: #a7b0c0;
+            --border-soft: rgba(255,255,255,0.2);
+            --shadow-elev: 0 20px 55px rgba(0,0,0,0.5);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'URW Form', Arial, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background:
+                radial-gradient(circle at 22% 15%, rgba(255,255,255,0.08) 0%, transparent 48%),
+                linear-gradient(135deg, #0a0d12 0%, #111722 55%, #090d14 100%);
+            color: var(--text-primary);
+            position: relative;
+            overflow: hidden;
+            padding: 22px;
+        }
+        body::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background:
+                repeating-linear-gradient(-28deg, rgba(255,255,255,0.02) 0 10px, transparent 10px 34px),
+                linear-gradient(145deg, rgba(254,1,0,0.24) 0%, transparent 42%);
+            pointer-events: none;
+        }
+        .login-box {
+            position: relative;
+            z-index: 1;
+            width: 100%;
+            max-width: 430px;
+            padding: 40px 34px;
+            border-radius: 16px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border-soft);
+            box-shadow: var(--shadow-elev), inset 0 1px 0 rgba(255,255,255,0.18);
+            overflow: hidden;
+        }
+        .login-box::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: var(--metal-sheen);
+            pointer-events: none;
+        }
+        h1 {
+            color: var(--text-primary);
+            font-weight: 800;
+            margin-bottom: 8px;
+            font-size: 1.6rem;
+            letter-spacing: 0.02em;
+            position: relative;
+            z-index: 1;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            margin-bottom: 24px;
+            position: relative;
+            z-index: 1;
+        }
+        .form-group {
+            margin-bottom: 20px;
+            position: relative;
+            z-index: 1;
+        }
+        .form-group label {
+            display: block;
+            font-weight: 600;
+            color: #d4dbea;
+            margin-bottom: 6px;
+            font-size: 0.88rem;
+            letter-spacing: 0.02em;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            font-size: 1rem;
+            color: var(--text-primary);
+            background: linear-gradient(145deg, rgba(255,255,255,0.09), rgba(255,255,255,0.03));
+            transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+        }
+        .form-group input::placeholder { color: #8f99aa; }
+        .form-group input:focus {
+            outline: none;
+            border-color: rgba(254,1,0,0.75);
+            box-shadow: 0 0 0 3px rgba(254,1,0,0.2);
+            background: linear-gradient(145deg, rgba(255,255,255,0.14), rgba(255,255,255,0.05));
+        }
+        .btn-login {
+            width: 100%;
+            padding: 13px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.28);
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: inherit;
+            color: #ffffff;
+            background: linear-gradient(180deg, #ff2928 0%, var(--accent-red) 62%, #b30000 100%);
+            box-shadow: 0 8px 18px rgba(254,1,0,0.28), inset 0 1px 0 rgba(255,255,255,0.35);
+            transition: transform 0.15s, box-shadow 0.2s, background 0.2s;
+            position: relative;
+            z-index: 1;
+        }
+        .btn-login:hover {
+            background: linear-gradient(180deg, #ff2d2c 0%, var(--accent-red-hover) 66%, #980000 100%);
+            box-shadow: 0 10px 24px rgba(254,1,0,0.35), inset 0 1px 0 rgba(255,255,255,0.4);
+            transform: translateY(-1px);
+        }
+        .alert {
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 0.88rem;
+            position: relative;
+            z-index: 1;
+            border: 1px solid;
+        }
+        .alert-error {
+            background: rgba(255, 94, 94, 0.14);
+            color: #ffd5d5;
+            border-color: rgba(255, 117, 117, 0.4);
+        }
+        .construction-banner {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            background: linear-gradient(130deg, rgba(255, 220, 102, 0.22), rgba(255, 186, 0, 0.12));
+            color: #ffe7a6;
+            text-align: center;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 0.84rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 216, 107, 0.45);
+            position: relative;
+            z-index: 1;
+        }
+        .construction-banner-icon { flex-shrink: 0; line-height: 1; }
+        {{ global_theme_css|safe }}
+    </style>
+</head>
+<body class="manage-docs-page">
+    <div class="login-box">
+        <h1>Ziebart Onboarding</h1>
+        <p class="subtitle">Sign in with your email</p>
+        <div class="construction-banner" role="status">
+            <span class="construction-banner-icon" aria-hidden="true">🔧</span>
+            <span>This app is currently under construction. Some features may change.</span>
+        </div>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, msg in messages %}
+                <div class="alert alert-{{ category }}">{{ msg }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <form method="POST" action="{{ url_for('login') }}">
+            <input type="hidden" name="next" value="{{ next_url }}">
+            <div class="form-group">
+                <label for="email">Email</label>
+                <input type="email" id="email" name="email" required autocomplete="email" placeholder="you@company.com">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="••••••••">
+            </div>
+            <button type="submit" class="btn-login">Log in</button>
+        </form>
+    </div>
+</body>
+</html>

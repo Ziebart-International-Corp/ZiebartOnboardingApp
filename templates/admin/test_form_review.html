@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Review — Test Form Wizard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; }
+        .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; }
+        .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; }
+        .container { max-width: 900px; margin: 30px auto; padding: 0 20px; }
+        .panel { background: white; padding: 28px; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 20px; }
+        .panel h2 { margin-bottom: 16px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #f8f9fa; }
+        .btn { display: inline-block; padding: 10px 20px; background: #FE0100; color: white; text-decoration: none; border-radius: 5px; border: none; cursor: pointer; margin-right: 10px; margin-top: 8px; }
+        .btn-secondary { background: #444; }
+        .meta { margin-bottom: 20px; }
+        iframe { width: 100%; height: 520px; border: 1px solid #ddd; border-radius: 6px; margin-top: 16px; }
+    {{ global_theme_css|safe }}
+        body.test-form-wizard-page .panel h2,
+        body.test-form-wizard-page .panel p,
+        body.test-form-wizard-page .panel .meta,
+        body.test-form-wizard-page table th,
+        body.test-form-wizard-page table td,
+        body.test-form-wizard-page table td strong {
+            color: #e8ecf4 !important;
+            -webkit-text-fill-color: #e8ecf4 !important;
+        }
+        body.test-form-wizard-page table th {
+            background: rgba(255, 255, 255, 0.08) !important;
+        }
+        body.test-form-wizard-page table tr:hover {
+            background: rgba(255, 255, 255, 0.05) !important;
+        }
+        body.test-form-wizard-page iframe {
+            border-color: rgba(255, 255, 255, 0.2) !important;
+        }
+        body.test-form-wizard-page .btn-secondary {
+            background: #444 !important;
+        }
+    </style>
+</head>
+<body class="test-form-wizard-page">
+    <div class="header">
+        <h1>Completed form review</h1>
+        <div class="header-actions"><a href="{{ url_for('admin_dashboard') }}" class="back-btn">← Dashboard</a></div>
+    </div>
+    <div class="container">
+        <div class="panel">
+            <h2>{{ doc_name }}</h2>
+            <p class="meta">{{ detect_message }} · {{ rows|length }} field(s) filled</p>
+            <a href="{{ url_for('admin_test_form_download') }}" class="btn" target="_blank">Download filled PDF</a>
+            <a href="{{ url_for('admin_test_form_fill', edit=1) }}" class="btn btn-secondary">Edit answers</a>
+            <form method="POST" action="{{ url_for('admin_test_form_reset') }}" style="display:inline;" onsubmit="return confirm('Start a new form?');">
+                <button type="submit" class="btn btn-secondary">New form</button>
+            </form>
+        </div>
+        <div class="panel">
+            <h2>Your answers (easy read)</h2>
+            <table>
+                <thead><tr><th>Field</th><th>Page</th><th>Your answer</th></tr></thead>
+                <tbody>
+                    {% for row in rows %}
+                    <tr>
+                        <td><strong>{{ row.label }}</strong></td>
+                        <td>{{ row.page }}</td>
+                        <td>
+                            {% if row.sig_b64 %}
+                            <img src="data:image/png;base64,{{ row.sig_b64 }}" alt="Signature" style="max-height: 56px; max-width: 220px; background: #fff; border: 1px solid #ddd; padding: 4px;">
+                            {% else %}
+                            {{ row.value }}
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="panel">
+            <h2>Filled PDF preview</h2>
+            <p class="meta" style="margin-bottom: 12px;">Answers are written on the form where possible. The last page(s) include a full summary of every field you filled.</p>
+            <iframe src="{{ url_for('admin_test_form_download') }}#toolbar=1"></iframe>
+        </div>
+    </div>
+</body>
+</html>
+

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ store.name }} - Onboarding App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #f5f5f5; }
+        .header { background: #000; color: white; padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px; }
+        .header h1 { font-weight: 800; margin: 0; font-size: 1.4em; }
+        .back-btn { background: rgba(255,255,255,0.2); color: #fff; padding: 8px 16px; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); }
+        .back-btn:hover { background: rgba(255,255,255,0.3); color: #fff; }
+        .container { max-width: 900px; margin: 24px auto; padding: 0 20px; }
+        .card { background: white; border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); padding: 24px; margin-bottom: 24px; }
+        .card h2 { font-size: 1.2em; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #E0E0E0; }
+        .card p.sub { color: #666; font-size: 0.9em; margin-bottom: 16px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #f8f9fa; font-weight: 600; font-size: 0.85em; }
+        .btn { display: inline-block; padding: 6px 12px; border-radius: 0.35rem; font-size: 0.85em; text-decoration: none; border: none; cursor: pointer; }
+        .btn-primary { background: #FE0100; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .empty { color: #999; font-style: italic; padding: 12px 0; }
+    {{ global_theme_css|safe }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🏪 {{ store.name }}{% if store.code %} ({{ store.code }}){% endif %}</h1>
+        <div class="header-actions"><a href="{{ url_for('manage_stores') }}" class="back-btn">← All stores</a></div>
+    </div>
+    <div class="container">
+        <div class="card">
+            <h2>Managers</h2>
+            <p class="sub">Users with role Manager assigned to this store. Edit in Manage Users.</p>
+            {% if managers %}
+            <table>
+                <thead><tr><th>Username</th><th>Email</th><th>Full name</th><th></th></tr></thead>
+                <tbody>
+                    {% for u in managers %}
+                    <tr>
+                        <td>{{ u.username }}</td>
+                        <td>{{ u.email or '-' }}</td>
+                        <td>{{ u.full_name or '-' }}</td>
+                        <td><a href="{{ url_for('manage_users') }}" class="btn btn-secondary">Edit in Manage Users</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No managers assigned to this store.</p>
+            {% endif %}
+        </div>
+        <div class="card">
+            <h2>Users</h2>
+            <p class="sub">Users (new hires) assigned to this store.</p>
+            <p class="sub" style="margin-bottom: 12px;"><a href="{{ url_for('manage_users') }}" class="btn btn-secondary" style="text-decoration: none;">→ Assign users to this store (Manage Users)</a></p>
+            {% if users %}
+            <table>
+                <thead><tr><th>Username</th><th>Email</th><th>Full name</th><th></th></tr></thead>
+                <tbody>
+                    {% for u in users %}
+                    <tr>
+                        <td>{{ u.username }}</td>
+                        <td>{{ u.email or '-' }}</td>
+                        <td>{{ u.full_name or '-' }}</td>
+                        <td><a href="{{ url_for('manage_users') }}" class="btn btn-secondary">Edit in Manage Users</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No users assigned to this store.</p>
+            {% endif %}
+        </div>
+        <div class="card">
+            <h2>Forms visible only for this store</h2>
+            <p class="sub">Documents scoped to this store. Set a form to this store when uploading or editing in Manage Forms.</p>
+            <p class="sub" style="margin-bottom: 12px;"><a href="{{ url_for('manage_documents') }}" class="btn btn-secondary" style="text-decoration: none;">→ Change which forms this store can see (Manage Forms)</a></p>
+            {% if forms %}
+            <table>
+                <thead><tr><th>Document</th><th>Description</th><th></th></tr></thead>
+                <tbody>
+                    {% for doc in forms %}
+                    <tr>
+                        <td><strong>{{ doc.display_name or doc.original_filename }}</strong></td>
+                        <td>{{ doc.description or '-' }}</td>
+                        <td><a href="{{ url_for('rename_document', doc_id=doc.id) }}" class="btn btn-secondary">Edit in Manage Forms</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No forms scoped only to this store. Forms set to "All stores" are visible to everyone. Use the link above to add or edit forms.</p>
+            {% endif %}
+        </div>
+        <div class="card">
+            <h2>Training videos for this store</h2>
+            <p class="sub">Videos scoped to this store. Set store visibility when uploading or editing in Manage Training.</p>
+            <p class="sub" style="margin-bottom: 12px;"><a href="{{ url_for('manage_training', staff_console='admin') }}" class="btn btn-secondary" style="text-decoration: none;">→ Change which training videos this store can see (Manage Training)</a></p>
+            {% if store_training_videos %}
+            <table>
+                <thead><tr><th>Title</th><th>Description</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                    {% for video in store_training_videos %}
+                    <tr>
+                        <td><strong>{{ video.title }}</strong></td>
+                        <td>{{ video.description[:80] if video.description else '-' }}{% if video.description and video.description|length > 80 %}...{% endif %}</td>
+                        <td>{{ 'Active' if video.is_active else 'Hidden' }}</td>
+                        <td><a href="{{ url_for('manage_training', staff_console='admin') }}" class="btn btn-secondary">Edit in Manage Training</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No training videos scoped only to this store. Videos set to "All stores" are visible to everyone. Use the link above to assign videos.</p>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+

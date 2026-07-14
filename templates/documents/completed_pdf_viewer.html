@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>{{ document.name_for_users }} — Completed PDF</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #0a0e14; color: #f2f5fb; min-height: 100vh; display: flex; flex-direction: column; }
+        .header {
+            background: #000; padding: 12px 20px; display: flex; flex-wrap: wrap;
+            justify-content: space-between; align-items: center; gap: 12px;
+        }
+        .header-title { font-weight: 600; }
+        .header-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+        .header a { color: #fff; text-decoration: none; opacity: 0.9; }
+        .btn {
+            display: inline-block; padding: 10px 18px; background: #FE0100; color: #fff;
+            text-decoration: none; border-radius: 6px; border: none; font-size: 0.95em; cursor: pointer;
+        }
+        .btn-ghost {
+            background: transparent; border: 1px solid rgba(255,255,255,0.25); color: #f2f5fb;
+        }
+        .viewer-wrap {
+            flex: 1; overflow: auto; padding: 16px; background: #1a1f28;
+            display: flex; flex-direction: column; align-items: center; gap: 16px;
+        }
+        .pdf-page {
+            box-shadow: 0 4px 24px rgba(0,0,0,0.45);
+            background: #fff;
+            max-width: 100%;
+        }
+        .pdf-page canvas { display: block; max-width: 100%; height: auto; }
+        .viewer-status { color: #b7c1d3; padding: 24px; }
+        {{ global_theme_css|safe }}
+    </style>
+</head>
+<body class="user-app-shell">
+    <div class="header">
+        <span class="header-title">{{ document.name_for_users }}</span>
+        <div class="header-actions">
+            <a href="{{ download_url }}" class="btn">Download PDF</a>
+            {% if print_url %}
+            <a href="{{ print_url }}" class="btn btn-ghost" target="_blank" rel="noopener" title="Open print dialog for the completed PDF">Print</a>
+            {% endif %}
+            {{ header_actions_html|safe }}
+        </div>
+    </div>
+    <div class="viewer-wrap" id="pdfViewer"><!-- completed-view:v3 --></div>
+    <script>
+    (function() {
+        var pdfUrl = {{ pdf_url|tojson }} + '?t=' + Date.now();
+        var printPageUrl = {{ print_url|tojson }};
+        if (printPageUrl) {
+            window.addEventListener('keydown', function(e) {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+                    e.preventDefault();
+                    window.open(printPageUrl, '_blank', 'noopener');
+                }
+            });
+        }
+        var viewer = document.getElementById('pdfViewer');
+        var status = document.createElement('p');
+        status.className = 'viewer-status';
+        status.id = 'pdfStatus';
+        status.textContent = 'Loading completed PDF…';
+        viewer.appendChild(status);
+        if (typeof pdfjsLib === 'undefined') {
+            status.textContent = 'PDF viewer failed to load.';
+            return;
+        }
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+            'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+            status.remove();
+            var renderNext = function(pageNum) {
+                if (pageNum > pdf.numPages) return Promise.resolve();
+                return pdf.getPage(pageNum).then(function(page) {
+                    var baseVp = page.getViewport({ scale: 1 });
+                    var maxWidth = Math.min(viewer.clientWidth - 32, 920);
+                    var scale = maxWidth / baseVp.width;
+                    var viewport = page.getViewport({ scale: scale });
+                    var wrap = document.createElement('div');
+                    wrap.className = 'pdf-page';
+                    var canvas = document.createElement('canvas');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+                    wrap.appendChild(canvas);
+                    viewer.appendChild(wrap);
+                    return page.render({
+                        canvasContext: canvas.getContext('2d'),
+                        viewport: viewport,
+                        intent: 'display',
+                        renderInteractiveForms: false,
+                        annotationMode: pdfjsLib.AnnotationMode ? pdfjsLib.AnnotationMode.DISABLE : 0
+                    }).promise.then(function() { return renderNext(pageNum + 1); });
+                });
+            };
+            return renderNext(1);
+        }).catch(function(err) {
+            console.error(err);
+            status.textContent = 'Could not load completed PDF. Try Download PDF or refresh the page.';
+        });
+    })();
+    </script>
+</body>
+</html>
+
