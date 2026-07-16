@@ -221,7 +221,10 @@ def build_admin_nav_items(
                 'url': url_for('manage_departments'),
                 'endpoints': ('manage_departments',),
             },
-            {
+        ])
+        from flask import current_app
+        if current_app.config.get('ENABLE_TEST_FORM_WIZARD'):
+            items.append({
                 'label': 'Test Form Wizard',
                 'icon': '🧪',
                 'url': url_for('admin_test_form'),
@@ -229,8 +232,7 @@ def build_admin_nav_items(
                     'admin_test_form', 'admin_test_form_fill',
                     'admin_test_form_review', 'admin_test_form_analyze',
                 ),
-            },
-        ])
+            })
 
     admin_tail = [
         {

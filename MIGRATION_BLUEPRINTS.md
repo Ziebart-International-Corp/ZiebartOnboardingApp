@@ -13,7 +13,8 @@ Mail, documents/PDF, wizard, stores, staff console, jobs (async signed PDF), the
 - Unit tests: `pytest tests -q` (install `requirements-dev.txt`)
 - Smoke: `.\.venv\Scripts\python.exe tests\test_smoke.py`
 - Background jobs: hardened claim/stuck recovery; admin UI at `/admin/jobs`
-- Schema: `_run_users_migration_if_needed()` runs **once at app startup**. Prefer adding an explicit SQL script + one `_ensure_*` for new columns; full Alembic is a follow-up.
+- Schema: `_run_users_migration_if_needed()` runs **once at app startup** and **fails loud** if migrations error. Prefer adding an explicit SQL script + one `_ensure_*` for new columns; full Alembic is a follow-up.
+- PDF signatures: production uses visual overlay + `SignatureAuditLog`. Cryptographic PAdES (`sign_pdf_cryptographically`) needs HSM/KMS certs and is intentionally not enabled.
 
 ### Blueprints
 

@@ -469,5 +469,7 @@ def _run_users_migration_if_needed():
         _ensure_departments_table()
         _ensure_signature_audit_logs_table()
     except Exception:
-        pass
+        import logging
+        logging.getLogger(__name__).exception('Schema migration failed')
+        raise
 

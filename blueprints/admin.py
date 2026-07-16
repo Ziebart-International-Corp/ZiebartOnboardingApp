@@ -184,33 +184,9 @@ def register(app: Flask) -> None:
         try:
             admin_user = current_user
             notifications = []
-
-            # Add test notification for "aka" user
-            if admin_user.username.lower() == 'aka':
-                # Check if test notification has been read
-                test_notification = UserNotification.query.filter_by(
-                    username=admin_user.username,
-                    notification_type='test',
-                    notification_id='999'
-                ).first()
-
-                is_read = test_notification.is_read if test_notification else False
-
-                if not is_read:
-                    notifications.append({
-                        'type': 'test',
-                        'id': 999,
-                        'title': 'Test Notification',
-                        'message': 'This is a test notification to verify the notification system is working correctly.',
-                        'url': url_for('admin_dashboard'),
-                        'is_read': False
-                    })
-
             pending_count = len([n for n in notifications if not n['is_read']])
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            app.logger.error(f"Error in admin_dashboard (notifications): {e}")
+            app.logger.exception('Error in admin_dashboard (notifications)')
             db.session.rollback()
             if not notifications:
                 pending_count = 0
@@ -246,7 +222,7 @@ def register(app: Flask) -> None:
                 flash(f'Store "{name}" updated.', 'success')
             except Exception as e:
                 db.session.rollback()
-                flash(f'Error updating store: {str(e)}', 'error')
+                flash('Error updating store. Please try again.', 'error')
             return redirect(url_for('manage_stores'))
         return render_template('staff/store_edit.html', store=store)
 
@@ -447,7 +423,7 @@ def register(app: Flask) -> None:
             except Exception as e:
                 db.session.rollback()
                 app.logger.exception('admin_assign_task failed')
-                flash(f'Could not assign task: {str(e)}', 'error')
+                flash('Could not assign task. Please try again.', 'error')
 
             return _assign_task_redirect(sc)
 
@@ -518,7 +494,7 @@ def register(app: Flask) -> None:
             flash(f'Store "{name}" added.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error adding store: {str(e)}', 'error')
+            flash('Error adding store. Please try again.', 'error')
         return redirect(url_for('manage_stores'))
 
 
@@ -545,7 +521,7 @@ def register(app: Flask) -> None:
             flash('Store deleted. User and document store links were cleared.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error: {str(e)}', 'error')
+            flash('Error. Please try again.', 'error')
         return redirect(url_for('manage_stores'))
 
 
@@ -766,7 +742,7 @@ def register(app: Flask) -> None:
             import traceback
             print(f"Error in manage_external_links: {e}")
             print(traceback.format_exc())
-            flash(f'Error loading links: {str(e)}', 'error')
+            flash('Error loading links. Please try again.', 'error')
             links = []
 
         return render_template('admin/external_links.html', links=links)
@@ -829,7 +805,7 @@ def register(app: Flask) -> None:
                     flash('Could not save — unknown section.', 'error')
             except Exception as e:
                 db.session.rollback()
-                flash(f'Could not save messages: {str(e)}', 'error')
+                flash('Could not save messages. Please try again.', 'error')
             return redirect(url_for('manage_onboarding_messages'))
 
         welcome_headline_raw = main.get_admin_setting('welcome_headline', DEFAULT_WELCOME_HEADLINE)
@@ -1131,7 +1107,8 @@ def register(app: Flask) -> None:
             training_details = []
 
             # Return a basic reports page with error message
-            flash(f'Error loading reports: {str(e)}. Some data may be missing.', 'error')
+            app.logger.exception('Error loading reports')
+            flash('Error loading reports. Some data may be missing.', 'error')
 
             return render_template_string('''
             <!DOCTYPE html>
@@ -1511,7 +1488,7 @@ def register(app: Flask) -> None:
             import traceback
             app.logger.error(f'Error in view_new_hire_details for {username}: {str(e)}')
             app.logger.error(traceback.format_exc())
-            flash(f'Error loading new hire details: {str(e)}', 'error')
+            flash('Error loading new hire details. Please try again.', 'error')
             return redirect(main.manager_new_hires_list_url()) if main.uses_manager_new_hires_home() else redirect(main.staff_console_home_url())
 
     @app.route('/admin/new-hires')
@@ -1867,7 +1844,7 @@ def register(app: Flask) -> None:
             return redirect(url_for('admin_dashboard', staff_console='admin'))
         except Exception as e:
             db.session.rollback()
-            flash(f'Error starting onboarding: {str(e)}', 'error')
+            flash('Error starting onboarding. Please try again.', 'error')
             return redirect(url_for('add_new_hire'))
 
     @app.route('/admin/asana/connect')
@@ -1966,7 +1943,7 @@ def register(app: Flask) -> None:
             flash(f'User "{user.username}" updated.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating: {str(e)}', 'error')
+            flash('Error updating. Please try again.', 'error')
         return redirect(url_for('manage_users'))
 
     @app.route('/admin/users/<int:user_id>/reset-password', methods=['POST'])
@@ -1988,7 +1965,7 @@ def register(app: Flask) -> None:
             flash(f'Password updated for "{user.username}".', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating password: {str(e)}', 'error')
+            flash('Error updating password. Please try again.', 'error')
         return redirect(url_for('manage_users'))
 
     @app.route('/admin/users/<int:user_id>/send-password-reset-email', methods=['POST'])
@@ -2011,7 +1988,7 @@ def register(app: Flask) -> None:
             db.session.commit()
         except Exception as e:
             db.session.rollback()
-            flash(f'Could not update password: {str(e)}', 'error')
+            flash('Could not update password. Please try again.', 'error')
             return redirect(url_for('manage_users'))
         if send_password_reset_email(user, temporary_password):
             flash(f'Password reset email sent to {to_email}.', 'success')
@@ -2046,7 +2023,7 @@ def register(app: Flask) -> None:
         except Exception as e:
             db.session.rollback()
             app.logger.exception('users_revoke failed')
-            flash(f'Error removing user: {str(e)}', 'error')
+            flash('Error removing user. Please try again.', 'error')
         return redirect(url_for('manage_users'))
 
     @app.route('/admin/users/<int:user_id>/restore', methods=['POST'])
@@ -2073,9 +2050,9 @@ def register(app: Flask) -> None:
                     flash(f'Access restored for "{user.username}".', 'success')
                 except Exception:
                     db.session.rollback()
-                    flash(f'Error: {str(e)}', 'error')
+                    flash('Error. Please try again.', 'error')
             else:
-                flash(f'Error: {str(e)}', 'error')
+                flash('Error. Please try again.', 'error')
         return redirect(url_for('manage_users'))
 
     @app.route('/admin/roles/add', methods=['POST'])
@@ -2097,7 +2074,7 @@ def register(app: Flask) -> None:
             flash(f'Position/Title "{name}" added.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error adding Position/Title: {str(e)}', 'error')
+            flash('Error adding Position/Title. Please try again.', 'error')
         return redirect(url_for('manage_roles'))
 
     @app.route('/admin/roles/<int:role_id>/delete', methods=['POST'])
@@ -2116,7 +2093,7 @@ def register(app: Flask) -> None:
             flash(f'Position/Title "{role.name}" deleted.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error deleting Position/Title: {str(e)}', 'error')
+            flash('Error deleting Position/Title. Please try again.', 'error')
         return redirect(url_for('manage_roles'))
 
     @app.route('/admin/departments/add', methods=['POST'])
@@ -2149,8 +2126,8 @@ def register(app: Flask) -> None:
         except Exception as e:
             db.session.rollback()
             if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
-                return jsonify({'success': False, 'error': str(e)}), 500
-            flash(f'Error adding department: {str(e)}', 'error')
+                return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
+            flash('Error adding department. Please try again.', 'error')
         return redirect(url_for('manage_departments'))
 
     @app.route('/admin/departments/<int:department_id>/delete', methods=['POST'])
@@ -2171,7 +2148,7 @@ def register(app: Flask) -> None:
             flash(f'Department "{dept.name}" deleted.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error deleting department: {str(e)}', 'error')
+            flash('Error deleting department. Please try again.', 'error')
         return redirect(url_for('manage_departments'))
 
 
@@ -2266,7 +2243,7 @@ def register(app: Flask) -> None:
             flash(f'Admin "{username}" added successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error adding admin: {str(e)}', 'error')
+            flash('Error adding admin. Please try again.', 'error')
         return redirect(url_for('manage_admins'))
 
     @app.route('/admin/manage-admins/<int:user_id>/update', methods=['POST'])
@@ -2290,7 +2267,7 @@ def register(app: Flask) -> None:
             flash(f'Admin "{user.username}" updated.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating: {str(e)}', 'error')
+            flash('Error updating. Please try again.', 'error')
         return redirect(url_for('manage_admins'))
 
     @app.route('/admin/manage-admins/<int:user_id>/change-password', methods=['POST'])
@@ -2313,7 +2290,7 @@ def register(app: Flask) -> None:
             flash(f'Password updated for "{user.username}".', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating password: {str(e)}', 'error')
+            flash('Error updating password. Please try again.', 'error')
         return redirect(url_for('manage_admins'))
 
     @app.route('/admin/manage-admins/<int:user_id>/remove', methods=['POST'])
@@ -2334,7 +2311,7 @@ def register(app: Flask) -> None:
             flash(f'Admin role removed from "{user.username}".', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error: {str(e)}', 'error')
+            flash('Error. Please try again.', 'error')
         return redirect(url_for('manage_admins'))
 
     @app.route('/admin/tasks/<int:task_id>/remove', methods=['POST'])
@@ -2354,7 +2331,7 @@ def register(app: Flask) -> None:
         except Exception as e:
             db.session.rollback()
             app.logger.exception('remove_user_task failed')
-            flash(f'Could not remove task: {str(e)}', 'error')
+            flash('Could not remove task. Please try again.', 'error')
         return redirect(url_for('view_new_hire_details', username=username))
 
 
@@ -2506,7 +2483,7 @@ def register(app: Flask) -> None:
             flash('New hire details updated successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating new hire details: {str(e)}', 'error')
+            flash('Error updating new hire details. Please try again.', 'error')
 
         return main.redirect_new_hire_details(username)
 
@@ -2550,9 +2527,9 @@ def register(app: Flask) -> None:
                     flash(f'Access cancelled for {username}. They can no longer log in.', 'success')
                 except Exception:
                     db.session.rollback()
-                    flash(f'Error: {str(e)}', 'error')
+                    flash('Error. Please try again.', 'error')
             else:
-                flash(f'Error: {str(e)}', 'error')
+                flash('Error. Please try again.', 'error')
         return main.redirect_new_hire_details(username)
 
     @app.route('/admin/new-hire/<username>/restore-access', methods=['POST'])
@@ -2584,9 +2561,9 @@ def register(app: Flask) -> None:
                     flash(f'Access restored for {username}.', 'success')
                 except Exception:
                     db.session.rollback()
-                    flash(f'Error: {str(e)}', 'error')
+                    flash('Error. Please try again.', 'error')
             else:
-                flash(f'Error: {str(e)}', 'error')
+                flash('Error. Please try again.', 'error')
         return main.redirect_new_hire_details(username)
 
     @app.route('/admin/checklist/add', methods=['POST'])
@@ -2617,7 +2594,7 @@ def register(app: Flask) -> None:
             flash(f'Checklist item "{task_name}" added successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error adding checklist item: {str(e)}', 'error')
+            flash('Error adding checklist item. Please try again.', 'error')
 
         return redirect(url_for('manage_checklist'))
 
@@ -2655,7 +2632,7 @@ def register(app: Flask) -> None:
             flash(f'Checklist item "{task_name}" updated successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating checklist item: {str(e)}', 'error')
+            flash('Error updating checklist item. Please try again.', 'error')
 
         return redirect(url_for('manage_checklist'))
 
@@ -2680,7 +2657,7 @@ def register(app: Flask) -> None:
             flash(f'Checklist item "{item.task_name}" deleted successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error deleting checklist item: {str(e)}', 'error')
+            flash('Error deleting checklist item. Please try again.', 'error')
 
         return redirect(url_for('manage_checklist'))
 
@@ -2728,7 +2705,7 @@ def register(app: Flask) -> None:
             flash('Checklist item order updated.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating order: {str(e)}', 'error')
+            flash('Error updating order. Please try again.', 'error')
 
         return redirect(url_for('manage_checklist'))
 
@@ -2840,7 +2817,7 @@ def register(app: Flask) -> None:
             flash(f'Finale message sent to {new_hire.first_name} {new_hire.last_name}. They will see it on their next visit.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error saving message: {str(e)}', 'error')
+            flash('Error saving message. Please try again.', 'error')
             return redirect(url_for('view_user_checklist', username=username))
 
         # Optionally save as default for future finale messages (after commit so message send is not rolled back)
@@ -2921,7 +2898,7 @@ def register(app: Flask) -> None:
             flash(f'Checklist updated successfully. {len(completed_item_ids)} items marked as completed.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating checklist: {str(e)}', 'error')
+            flash('Error updating checklist. Please try again.', 'error')
 
         return redirect(url_for('view_user_checklist', username=username))
 
@@ -3021,8 +2998,8 @@ def register(app: Flask) -> None:
             except Exception as e:
                 print(f"Error processing cropped image: {e}")
                 import traceback
-                traceback.print_exc()
-                flash(f'Error processing cropped image: {str(e)}', 'error')
+                app.logger.exception('request failed')
+                flash('Error processing cropped image. Please try again.', 'error')
                 # Fall through to regular image upload
                 cropped_image_data = None
 
@@ -3068,7 +3045,7 @@ def register(app: Flask) -> None:
             flash(f'External link "{title}" added successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error adding link: {str(e)}', 'error')
+            flash('Error adding link. Please try again.', 'error')
 
         return redirect(url_for('manage_external_links'))
 
@@ -3196,8 +3173,8 @@ def register(app: Flask) -> None:
             except Exception as e:
                 print(f"Error processing cropped image: {e}")
                 import traceback
-                traceback.print_exc()
-                flash(f'Error processing cropped image: {str(e)}', 'error')
+                app.logger.exception('request failed')
+                flash('Error processing cropped image. Please try again.', 'error')
                 # Fall through to regular image upload
                 cropped_image_data = None
 
@@ -3248,7 +3225,7 @@ def register(app: Flask) -> None:
             flash(f'External link "{title}" updated successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating link: {str(e)}', 'error')
+            flash('Error updating link. Please try again.', 'error')
 
         return redirect(url_for('manage_external_links'))
 
@@ -3269,7 +3246,7 @@ def register(app: Flask) -> None:
             flash(f'Link "{link.title}" {status} successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error toggling link: {str(e)}', 'error')
+            flash('Error toggling link. Please try again.', 'error')
 
         return redirect(url_for('manage_external_links'))
 
@@ -3299,7 +3276,7 @@ def register(app: Flask) -> None:
             flash(f'External link "{title}" deleted successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error deleting link: {str(e)}', 'error')
+            flash('Error deleting link. Please try again.', 'error')
 
         return redirect(url_for('manage_external_links'))
 
@@ -3365,7 +3342,7 @@ def register(app: Flask) -> None:
             return redirect(url_for('manage_video_quiz', video_id=video.id))
         except Exception as e:
             db.session.rollback()
-            flash(f'Error uploading video: {str(e)}', 'error')
+            flash('Error uploading video. Please try again.', 'error')
 
         return redirect(url_for('manage_training'))
 
@@ -3420,7 +3397,7 @@ def register(app: Flask) -> None:
             flash('Quiz question added successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error adding question: {str(e)}', 'error')
+            flash('Error adding question. Please try again.', 'error')
 
         return redirect(url_for('manage_video_quiz', video_id=video_id))
 
@@ -3445,7 +3422,7 @@ def register(app: Flask) -> None:
             flash('Question deleted successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error deleting question: {str(e)}', 'error')
+            flash('Error deleting question. Please try again.', 'error')
 
         return redirect(url_for('manage_video_quiz', video_id=video_id))
 
@@ -3483,7 +3460,7 @@ def register(app: Flask) -> None:
             flash(f'Store visibility updated for "{video.title}".', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating store visibility: {str(e)}', 'error')
+            flash('Error updating store visibility. Please try again.', 'error')
         return redirect(url_for('manage_training'))
 
     @app.route('/admin/training/toggle-active', methods=['POST'])
@@ -3509,7 +3486,7 @@ def register(app: Flask) -> None:
                 flash(f'"{video.title}" is hidden from users. You can show it again anytime.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating video status: {str(e)}', 'error')
+            flash('Error updating video status. Please try again.', 'error')
 
         return redirect(url_for('manage_training'))
 
@@ -3544,7 +3521,7 @@ def register(app: Flask) -> None:
             flash(f'Training video "{title}" deleted successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error deleting video: {str(e)}', 'error')
+            flash('Error deleting video. Please try again.', 'error')
 
         return redirect(url_for('manage_training'))
 
@@ -3594,7 +3571,7 @@ def register(app: Flask) -> None:
             return jsonify({'success': True})
         except Exception as e:
             db.session.rollback()
-            return jsonify({'success': False, 'error': str(e)}), 500
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/api/training/update-watch-time', methods=['POST'])
     @login_required
@@ -3613,7 +3590,7 @@ def register(app: Flask) -> None:
             return jsonify({'success': True})
         except Exception as e:
             db.session.rollback()
-            return jsonify({'success': False, 'error': str(e)}), 500
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/api/training/save-score', methods=['POST'])
     @login_required
@@ -3660,7 +3637,7 @@ def register(app: Flask) -> None:
             return jsonify({'success': True})
         except Exception as e:
             db.session.rollback()
-            return jsonify({'success': False, 'error': str(e)}), 500
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/api/notifications/count')
     @login_required
@@ -3713,16 +3690,6 @@ def register(app: Flask) -> None:
             if not notification or not notification.is_read:
                 unread_count += 1
 
-        # Check for test notifications (for admins)
-        if current_user.is_admin() and current_user.username.lower() == 'aka':
-            test_notification = UserNotification.query.filter_by(
-                username=current_user.username,
-                notification_type='test',
-                notification_id='999'
-            ).first()
-            if not test_notification or not test_notification.is_read:
-                unread_count += 1
-
         return jsonify({'count': unread_count})
 
     @app.route('/api/notifications/mark-read', methods=['POST'])
@@ -3758,7 +3725,7 @@ def register(app: Flask) -> None:
             return jsonify({'success': True})
         except Exception as e:
             db.session.rollback()
-            return jsonify({'success': False, 'error': str(e)}), 500
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/api/notifications/mark-all-read', methods=['POST'])
     @login_required
@@ -3818,31 +3785,11 @@ def register(app: Flask) -> None:
                     )
                     db.session.add(notification)
 
-            # Handle test notifications (for admins)
-            if current_user.is_admin() and current_user.username.lower() == 'aka':
-                test_notification = UserNotification.query.filter_by(
-                    username=current_user.username,
-                    notification_type='test',
-                    notification_id='999'
-                ).first()
-                if test_notification:
-                    test_notification.is_read = True
-                    test_notification.read_at = datetime.utcnow()
-                else:
-                    test_notification = UserNotification(
-                        username=current_user.username,
-                        notification_type='test',
-                        notification_id='999',
-                        is_read=True,
-                        read_at=datetime.utcnow()
-                    )
-                    db.session.add(test_notification)
-
             db.session.commit()
             return jsonify({'success': True})
         except Exception as e:
             db.session.rollback()
-            return jsonify({'success': False, 'error': str(e)}), 500
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/admin/settings')
     @admin_required
@@ -3880,7 +3827,7 @@ def register(app: Flask) -> None:
                 flash(f'Default documents updated for "{role.name}".', 'success')
             except Exception as e:
                 db.session.rollback()
-                flash(f'Error: {str(e)}', 'error')
+                flash('Error. Please try again.', 'error')
             return redirect(url_for('manage_roles'))
         return render_template('admin/role_default_documents.html', role=role, documents=documents, default_doc_ids=default_doc_ids)
 
@@ -3914,7 +3861,7 @@ def register(app: Flask) -> None:
                 flash(f'User removed. {new_hire.first_name} {new_hire.last_name} can no longer log in and has been removed from the active list.', 'success')
             except Exception as e:
                 db.session.rollback()
-                flash(f'Error removing user: {str(e)}', 'error')
+                flash('Error removing user. Please try again.', 'error')
             return redirect(main.manager_new_hires_list_url()) if main.uses_manager_new_hires_home() else redirect(url_for('view_all_new_hires', staff_console='admin'))
 
         # GET: show confirmation page
@@ -3992,6 +3939,9 @@ def register(app: Flask) -> None:
     @admin_required
     def admin_test_form():
         """Upload a PDF to convert into a step-by-step digital form (admin test tool)."""
+        if not app.config.get('ENABLE_TEST_FORM_WIZARD'):
+            flash('Test Form Wizard is disabled on this server.', 'error')
+            return redirect(url_for('admin_dashboard'))
         state = _test_form_wizard_state()
         resume_url = None
         if state and state.get('fields'):
@@ -4005,6 +3955,9 @@ def register(app: Flask) -> None:
     @app.route('/admin/test-form/analyze', methods=['POST'])
     @admin_required
     def admin_test_form_analyze():
+        if not app.config.get('ENABLE_TEST_FORM_WIZARD'):
+            flash('Test Form Wizard is disabled on this server.', 'error')
+            return redirect(url_for('admin_dashboard'))
         if not PDF_WIZARD_FITZ_AVAILABLE:
             flash('PyMuPDF is not installed on the server.', 'error')
             return redirect(url_for('admin_test_form'))
@@ -4049,12 +4002,15 @@ def register(app: Flask) -> None:
         except Exception as e:
             app.logger.exception('admin_test_form_analyze failed')
             delete_wizard_state(app.config['UPLOAD_FOLDER'], sid)
-            flash(f'Could not analyze PDF: {e}', 'error')
+            flash('Could not analyze PDF. Please try again.', 'error')
             return redirect(url_for('admin_test_form'))
 
     @app.route('/admin/test-form/reset', methods=['POST'])
     @admin_required
     def admin_test_form_reset():
+        if not app.config.get('ENABLE_TEST_FORM_WIZARD'):
+            flash('Test Form Wizard is disabled on this server.', 'error')
+            return redirect(url_for('admin_dashboard'))
         sid = session.pop('test_form_wizard_id', None)
         if sid:
             delete_wizard_state(app.config['UPLOAD_FOLDER'], sid)
@@ -4064,6 +4020,9 @@ def register(app: Flask) -> None:
     @app.route('/admin/test-form/fill')
     @admin_required
     def admin_test_form_fill():
+        if not app.config.get('ENABLE_TEST_FORM_WIZARD'):
+            flash('Test Form Wizard is disabled on this server.', 'error')
+            return redirect(url_for('admin_dashboard'))
         state = _test_form_wizard_state()
         if not state or not state.get('fields'):
             flash('Upload a PDF first.', 'error')
@@ -4102,6 +4061,9 @@ def register(app: Flask) -> None:
     @app.route('/admin/test-form/save-field', methods=['POST'])
     @admin_required
     def admin_test_form_save_field():
+        if not app.config.get('ENABLE_TEST_FORM_WIZARD'):
+            flash('Test Form Wizard is disabled on this server.', 'error')
+            return redirect(url_for('admin_dashboard'))
         state = _test_form_wizard_state()
         if not state:
             return redirect(url_for('admin_test_form'))
@@ -4155,6 +4117,9 @@ def register(app: Flask) -> None:
     @app.route('/admin/test-form/review')
     @admin_required
     def admin_test_form_review():
+        if not app.config.get('ENABLE_TEST_FORM_WIZARD'):
+            flash('Test Form Wizard is disabled on this server.', 'error')
+            return redirect(url_for('admin_dashboard'))
         state = _test_form_wizard_state()
         if not state or not state.get('fields'):
             return redirect(url_for('admin_test_form'))
@@ -4186,6 +4151,9 @@ def register(app: Flask) -> None:
     @app.route('/admin/test-form/download')
     @admin_required
     def admin_test_form_download():
+        if not app.config.get('ENABLE_TEST_FORM_WIZARD'):
+            flash('Test Form Wizard is disabled on this server.', 'error')
+            return redirect(url_for('admin_dashboard'))
         state = _test_form_wizard_state()
         if not state or not state.get('pdf_path'):
             abort(404)
@@ -4205,6 +4173,6 @@ def register(app: Flask) -> None:
             )
         except Exception as e:
             app.logger.exception('admin_test_form_download failed')
-            flash(f'Could not build PDF: {e}', 'error')
+            flash('Could not build PDF. Please try again.', 'error')
             return redirect(url_for('admin_test_form_review'))
 

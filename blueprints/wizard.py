@@ -475,7 +475,7 @@ def register(app: Flask) -> None:
         except Exception as e:
             db.session.rollback()
             app.logger.exception('document_wizard_save_field failed')
-            flash(f'Could not save: {e}', 'error')
+            flash('Could not save. Please try again.', 'error')
             session[_document_wizard_index_key(doc_id)] = idx
 
         return respond(url_for('view_documents', wizard=doc_id))
@@ -573,7 +573,7 @@ def register(app: Flask) -> None:
                 sig_b64_existing=sig_b64_existing, user_document_completed_view_url=user_document_completed_view_url, user_sign_document_classic_url=user_sign_document_classic_url)
         except Exception as e:
             app.logger.exception('document wizard page failed doc_id=%s', doc_id)
-            flash(f'Could not open form: {e}', 'error')
+            flash('Could not open form. Please try again.', 'error')
             return redirect(url_for('view_documents'))
 
     # Exposed for documents blueprint classic→wizard redirect.

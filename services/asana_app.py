@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
 from flask import current_app, url_for
+from werkzeug.utils import secure_filename
 
 from models import db
 import config
@@ -17,6 +19,8 @@ from asana_feedback import (
     refresh_access_token,
     token_expires_at,
 )
+from services.app_hooks import _log_exception_to_file
+from services.feedback_ui import _feedback_allowed_image
 
 ASANA_REDIRECT_URI = getattr(config, "ASANA_REDIRECT_URI", "") or os.getenv("ASANA_REDIRECT_URI", "")
 ASANA_CLIENT_ID = getattr(config, "ASANA_CLIENT_ID", "") or os.getenv("ASANA_CLIENT_ID", "")

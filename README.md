@@ -149,35 +149,44 @@ Check the log file specified in `web.config`:
 ## Application Structure
 
 ```
-NewHireApp/
-├── app.py              # Main Flask application
-├── web.config          # IIS configuration
-├── requirements.txt    # Python dependencies
-├── README.md          # This file
-└── logs/              # Log files directory
+ziebartonboardingapp/
+├── app.py                 # Flask entry (WSGI: app.application)
+├── config.py              # Env / MSSQL / feature flags
+├── blueprints/            # HTTP routes
+├── services/              # Domain logic (PDF, mail, CSRF, jobs, …)
+├── db/migrations_runtime.py
+├── templates/
+├── web.config             # IIS FastCGI + rewrite (uploads via Flask)
+├── requirements.txt
+└── logs/
 ```
 
-## API Endpoints
+## Health check
 
-- `GET /` - Home page
-- `GET /api/health` - Health check
-- `GET /api/info` - Server information
-- `GET /api/data` - Example data endpoint
+- `GET /healthz` — JSON `{app, db, uploads}` (use for IIS/load balancer probes)
+
+## Security notes (production)
+
+- Set a unique `SECRET_KEY` in `.env` (app refuses the insecure default).
+- CSRF is enabled (Flask-WTF); forms and `fetch` get tokens automatically.
+- Only `static/` is served by IIS as files; `uploads/` goes through Flask auth.
+- Document signing today is **visual overlay + audit log**. Cryptographic PAdES signing is not configured (needs HSM/KMS certs).
+- Optional admin Test Form Wizard is off unless `ENABLE_TEST_FORM_WIZARD=true`.
+- Optional `data_api/` service requires `DATA_API_KEY` (refuses to serve without it).
 
 ## Development
 
-For local development without IIS:
-
 ```powershell
+# Set ALLOW_INSECURE_SECRET_KEY=1 only for local throwaway use, or use a real SECRET_KEY
+$env:FLASK_DEBUG="1"
 python app.py
 ```
 
-The app will run on `http://localhost:5000`
+The app runs on `http://localhost:5000` (debug only when `FLASK_DEBUG=1`).
 
 ## Notes
 
-- The `web.config` file uses placeholder paths - **update them** to match your system
-- For production, set `debug=False` in `app.py`
-- Consider using environment variables for configuration
-- Ensure proper security settings for production deployment
+- Update `web.config` paths for your IIS install
+- Prefer `.env` for secrets (blocked from HTTP by IIS hiddenSegments)
+- See `ENV_VARS_REFERENCE.md` for all environment variables
 

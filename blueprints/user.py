@@ -42,7 +42,8 @@ def register(app: Flask) -> None:
     @login_required
     def welcome():
         """Welcome page shown after login; user clicks Continue to go to dashboard."""
-        next_url = request.args.get('next') or url_for('dashboard')
+        from services.security import safe_redirect_url
+        next_url = safe_redirect_url(request.args.get('next'), url_for('dashboard'))
         full_name = current_user.username
         try:
             nh = NewHire.query.filter_by(username=current_user.username).first()
@@ -136,7 +137,7 @@ def register(app: Flask) -> None:
                 flash('Default signature saved. You can now apply it intentionally on each document field.', 'success')
             except Exception as e:
                 db.session.rollback()
-                flash(f'Error saving signature: {e}', 'error')
+                flash('Error saving signature. Please try again.', 'error')
             return redirect(url_for('manage_signature'))
 
         if request.args.get('clear') == '1':
@@ -148,7 +149,7 @@ def register(app: Flask) -> None:
                 flash('Saved signature removed.', 'success')
             except Exception as e:
                 db.session.rollback()
-                flash(f'Error clearing signature: {e}', 'error')
+                flash('Error clearing signature. Please try again.', 'error')
             return redirect(url_for('manage_signature'))
 
         return render_template('user/signature.html', user_record=user_record)
@@ -507,7 +508,8 @@ def register(app: Flask) -> None:
             external_links = []
 
             # Return a basic dashboard with error message
-            flash(f'Error loading dashboard: {str(e)}. Some data may be missing.', 'error')
+            app.logger.exception('Error loading dashboard')
+            flash('Error loading dashboard. Some data may be missing.', 'error')
 
             return render_template_string('''
             <!DOCTYPE html>
@@ -790,7 +792,8 @@ def register(app: Flask) -> None:
             completed_tasks = []
 
             # Return a basic tasks page with error message
-            flash(f'Error loading tasks: {str(e)}. Some data may be missing.', 'error')
+            app.logger.exception('Error loading tasks')
+            flash('Error loading tasks. Some data may be missing.', 'error')
 
             return render_template_string('''
             <!DOCTYPE html>

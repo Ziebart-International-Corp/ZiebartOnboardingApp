@@ -5,9 +5,10 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, url
 from flask_login import current_user, login_required, login_user, logout_user
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from auth import authenticate_by_email_password
+from auth import authenticate_by_email_password, admin_required
 from models import User as UserModel
 from models import db
+from services.security import safe_redirect_url
 
 
 def register(app: Flask) -> None:
@@ -21,38 +22,19 @@ def register(app: Flask) -> None:
         return redirect(url_for("login"))
 
     @app.route("/api/graphql", methods=["GET", "POST"])
-    @login_required
+    @admin_required
     def graphql_api():
-        """GraphQL API: all database access for the API goes through this endpoint."""
+        """GraphQL API (admin only). Prefer REST/admin UI for normal operations."""
         import app as main
 
         graphql_schema = getattr(main, "graphql_schema", None)
         if request.method == "GET":
-            return """
-        <!DOCTYPE html>
-        <html><head><title>GraphQL API</title></head>
-        <body>
-        <h1>GraphQL API</h1>
-        <p>Send a POST request with JSON body: <code>{"query": "query { ... }"}</code></p>
-        <p>Example query:</p>
-        <pre>
-query {
-  newHires(limit: 5) {
-    username
-    firstName
-    lastName
-    email
-    status
-  }
-  roles { id name }
-}
-        </pre>
-        <form method="post" action="/api/graphql">
-        <textarea name="query" rows="12" cols="80" placeholder="query { newHires(limit: 2) { username firstName lastName } }"></textarea><br>
-        <button type="submit">Execute</button>
-        </form>
-        </body></html>
-        """
+            return (
+                "<!DOCTYPE html><html><head><title>GraphQL API</title></head><body>"
+                "<h1>GraphQL API (admin)</h1>"
+                "<p>Send a POST with JSON: <code>{\"query\": \"...\"}</code></p>"
+                "</body></html>"
+            )
         data = request.get_json(silent=True) or {}
         query = data.get("query") or request.form.get("query") or ""
         variables = data.get("variables") or {}
@@ -84,7 +66,7 @@ query {
 
         if current_user.is_authenticated:
             return redirect(url_for("dashboard"))
-        next_url = request.args.get("next") or url_for("dashboard")
+        next_url = safe_redirect_url(request.args.get("next"), url_for("dashboard"))
         if request.method == "POST":
             try:
                 email = (request.form.get("email") or "").strip()
@@ -95,15 +77,22 @@ query {
                     main.update_last_login(user.username)
                     if main.user_must_change_password(user.username):
                         return redirect(url_for("change_password"))
-                    next_after = (
-                        request.form.get("next")
-                        or request.args.get("next")
-                        or url_for("dashboard")
+                    next_after = safe_redirect_url(
+                        request.form.get("next") or request.args.get("next"),
+                        url_for("dashboard"),
                     )
                     return redirect(url_for("welcome", next=next_after))
                 flash("Invalid email or password. Please try again.", "error")
             except Exception as e:
                 main._log_exception_to_file(e)
+                # Avoid Werkzeug debug pages for expected infra failures (DB down, TLS, etc.)
+                from sqlalchemy.exc import OperationalError, DBAPIError
+                if isinstance(e, (OperationalError, DBAPIError)):
+                    flash(
+                        "Cannot reach the database right now. Check your network/VPN and try again.",
+                        "error",
+                    )
+                    return render_template("auth/login.html", next_url=next_url)
                 raise
         return render_template("auth/login.html", next_url=next_url)
 
@@ -148,7 +137,7 @@ query {
                 return redirect(url_for("dashboard"))
             except Exception as e:
                 db.session.rollback()
-                flash(f"Could not update password: {str(e)}", "error")
+                flash("Could not update password. Please try again.", 'error')
                 return redirect(url_for("change_password"))
         return render_template("auth/change_password.html", forced=forced)
 

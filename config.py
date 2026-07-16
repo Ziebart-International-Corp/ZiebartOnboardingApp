@@ -30,8 +30,27 @@ def _env_value(key: str, default: str = '') -> str:
 # Base directory
 BASE_DIR = _config_dir
 
-# Secret key for sessions (change in production!)
-SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+# Secret key for sessions — must be unique in production (reject known default).
+_DEFAULT_SECRET_KEY = 'dev-secret-key-change-in-production'
+SECRET_KEY = (_env_value('SECRET_KEY') or os.environ.get('SECRET_KEY', '') or '').strip()
+_allow_insecure_secret = (
+    os.environ.get('ALLOW_INSECURE_SECRET_KEY', '').strip().lower() in ('1', 'true', 'yes')
+)
+if not SECRET_KEY or SECRET_KEY == _DEFAULT_SECRET_KEY:
+    if _allow_insecure_secret:
+        SECRET_KEY = SECRET_KEY or _DEFAULT_SECRET_KEY
+        import warnings
+        warnings.warn(
+            'SECRET_KEY is missing or set to the insecure default. '
+            'Set a unique SECRET_KEY in .env for production.',
+            RuntimeWarning,
+            stacklevel=1,
+        )
+    else:
+        raise RuntimeError(
+            'SECRET_KEY must be set to a unique non-default value in .env '
+            '(or set ALLOW_INSECURE_SECRET_KEY=1 for local development only).'
+        )
 
 # Windows Domain Configuration
 DOMAIN_NAME = os.environ.get('DOMAIN_NAME', 'YOURDOMAIN')  # e.g., 'CONTOSO'
@@ -70,10 +89,43 @@ DB_MAX_POOL_SIZE = _env_value('DB_MAX_POOL_SIZE') or os.environ.get('DB_MAX_POOL
 # SQLAlchemy connection string — SQL Server only (Neon/Postgres DATABASE_URL is ignored)
 from urllib.parse import quote_plus
 DB_PASSWORD_ENCODED = quote_plus(DB_PASSWORD)
-SQLALCHEMY_DATABASE_URI = (
-    f'mssql+pyodbc://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}'
-    f'?driver=ODBC+Driver+17+for+SQL+Server&TrustServerCertificate=yes'
-)
+_DB_DRIVER = (
+    _env_value('DB_DRIVER') or os.environ.get('DB_DRIVER', '') or ''
+).strip().lower()
+# On macOS local dev, prefer pymssql when requested (ODBC Driver 17 is Windows/IIS default).
+if not _DB_DRIVER and __import__('sys').platform == 'darwin':
+    try:
+        import pymssql  # noqa: F401
+        _DB_DRIVER = 'pymssql'
+    except ImportError:
+        _DB_DRIVER = 'odbc'
+if _DB_DRIVER == 'pymssql':
+    SQLALCHEMY_DATABASE_URI = (
+        f'mssql+pymssql://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}'
+    )
+else:
+    _odbc_driver = (
+        _env_value('ODBC_DRIVER')
+        or os.environ.get('ODBC_DRIVER', '')
+        or 'ODBC Driver 17 for SQL Server'
+    ).strip()
+    _DB_TRUST = (
+        _env_value('DB_TRUST_SERVER_CERTIFICATE')
+        or os.environ.get('DB_TRUST_SERVER_CERTIFICATE', 'yes')
+        or 'yes'
+    ).strip().lower()
+    if _DB_TRUST in ('1', 'true', 'yes'):
+        _DB_TRUST_PARAM = 'yes'
+    elif _DB_TRUST in ('0', 'false', 'no'):
+        _DB_TRUST_PARAM = 'no'
+    else:
+        _DB_TRUST_PARAM = 'yes'
+    from urllib.parse import quote_plus as _qp
+    _odbc_driver_q = _qp(_odbc_driver)
+    SQLALCHEMY_DATABASE_URI = (
+        f'mssql+pyodbc://{DB_USER}:{DB_PASSWORD_ENCODED}@{DB_SERVER}:{DB_PORT}/{DB_NAME}'
+        f'?driver={_odbc_driver_q}&TrustServerCertificate={_DB_TRUST_PARAM}&Encrypt=yes'
+    )
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 SQLALCHEMY_ENGINE_OPTIONS = {
     'pool_size': int(DB_MAX_POOL_SIZE),
@@ -91,9 +143,15 @@ SESSION_COOKIE_SAMESITE = 'Lax'
 PERMANENT_SESSION_LIFETIME = 3600  # 1 hour
 
 # HTTPS/Proxy Configuration
-# When behind IIS with HTTPS, Flask needs to trust proxy headers
+# When behind IIS with HTTPS, Flask needs to trust proxy headers (default on for IIS)
 PREFERRED_URL_SCHEME = os.environ.get('PREFERRED_URL_SCHEME', 'http')  # Change to 'https' when HTTPS is enabled
-PROXY_FIX = os.environ.get('PROXY_FIX', 'False').lower() == 'true'  # Enable if behind reverse proxy
+PROXY_FIX = os.environ.get('PROXY_FIX', 'True').lower() == 'true'
+
+# Feature flags
+ENABLE_TEST_FORM_WIZARD = os.environ.get('ENABLE_TEST_FORM_WIZARD', 'false').lower() in (
+    '1', 'true', 'yes',
+)
+MAX_DOCUMENT_UPLOAD_MB = int(os.environ.get('MAX_DOCUMENT_UPLOAD_MB', '40') or 40)
 
 # IIS Windows Authentication Headers
 # IIS passes authenticated user info in these headers

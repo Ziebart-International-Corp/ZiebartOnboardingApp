@@ -37,7 +37,7 @@ def get_user_domain_groups_via_netapi(username, domain=None):
                     else:
                         groups.append(group_name)
         except Exception as e:
-            print(f"Error getting user groups via NetUserGetGroups: {str(e)}")
+            current_app.logger.warning('Error getting user groups via NetUserGetGroups: %s', e)
             
             # Fallback: try NetUserGetLocalGroups on domain controller
             try:
@@ -51,7 +51,7 @@ def get_user_domain_groups_via_netapi(username, domain=None):
                 pass
         
     except Exception as e:
-        print(f"Error in get_user_domain_groups_via_netapi: {str(e)}")
+        current_app.logger.warning('Error in get_user_domain_groups_via_netapi: %s', e)
         return []
     
     return groups
@@ -94,7 +94,7 @@ def get_user_domain_groups(username, domain=None):
                 user_groups.add(group)
         
     except Exception as e:
-        print(f"Error getting Windows groups: {str(e)}")
+        current_app.logger.warning('Error getting Windows groups: %s', e)
         return []
     
     # Return sorted list of unique group names
@@ -174,7 +174,7 @@ def get_user_domain_groups_via_ldap(username, domain=None):
         conn.unbind()
         
     except Exception as e:
-        print(f"Error getting user groups via LDAP: {str(e)}")
+        current_app.logger.warning('Error getting user groups via LDAP: %s', e)
         return []
     
     return groups

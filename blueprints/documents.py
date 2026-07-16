@@ -562,9 +562,8 @@ def register(app: Flask) -> None:
 
         except Exception as e:
             db.session.rollback()
-            import traceback
-            traceback.print_exc()
-            return jsonify({'success': False, 'error': str(e)}), 500
+            app.logger.exception('request failed')
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
 
 
@@ -606,6 +605,16 @@ def register(app: Flask) -> None:
 
             # Get file size
             file_size = file_path.stat().st_size
+            from services.uploads_allowed import content_matches_extension, document_upload_too_large
+            if document_upload_too_large(file_size):
+                file_path.unlink(missing_ok=True)
+                max_mb = app.config.get('MAX_DOCUMENT_UPLOAD_MB', 40)
+                flash(f'File is too large. Maximum document size is {max_mb} MB.', 'error')
+                return redirect(url_for('manage_documents'))
+            if not content_matches_extension(file_path, original_filename):
+                file_path.unlink(missing_ok=True)
+                flash('File contents do not match the expected file type.', 'error')
+                return redirect(url_for('manage_documents'))
 
             # Store: who can see this document (null = all stores)
             store_id = None
@@ -645,7 +654,7 @@ def register(app: Flask) -> None:
             flash(f'Document "{original_filename}" uploaded successfully.{import_note}', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error uploading file: {str(e)}', 'error')
+            flash('Error uploading file. Please try again.', 'error')
 
         return redirect(url_for('manage_documents'))
 
@@ -858,8 +867,7 @@ def register(app: Flask) -> None:
              sign_overlay_fields=sign_overlay_fields,
              wizard_min_fields=DOCUMENT_WIZARD_MIN_FIELDS)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            app.logger.exception('request failed')
             app.logger.error(f'Error in sign_document (doc_id={doc_id}): {e}')
             flash('Unable to load the sign document page. Please try again or contact support.', 'error')
             return redirect(url_for('view_documents'))
@@ -1332,9 +1340,9 @@ def register(app: Flask) -> None:
             return send_file(output, mimetype='image/png')
 
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return f"Error rendering document: {str(e)}", 500
+            app.logger.exception('request failed')
+            app.logger.exception('Error rendering document')
+            return "Error rendering document. Please try again.", 500
 
     @app.route('/admin/documents/cleanup-orphaned-tasks', methods=['POST'])
     @admin_required
@@ -1353,7 +1361,7 @@ def register(app: Flask) -> None:
         except Exception as e:
             db.session.rollback()
             app.logger.exception('cleanup_orphaned_document_tasks failed')
-            flash(f'Cleanup failed: {e}', 'error')
+            flash('Cleanup failed. Please try again.', 'error')
         return redirect(url_for('manage_documents'))
 
     @app.route('/admin/documents/<int:doc_id>/replace-file', methods=['POST'])
@@ -1398,6 +1406,16 @@ def register(app: Flask) -> None:
             new_file_path = upload_folder / new_filename
             file.save(str(new_file_path))
             new_size = new_file_path.stat().st_size
+            from services.uploads_allowed import content_matches_extension, document_upload_too_large
+            if document_upload_too_large(new_size):
+                new_file_path.unlink(missing_ok=True)
+                max_mb = app.config.get('MAX_DOCUMENT_UPLOAD_MB', 40)
+                flash(f'File is too large. Maximum document size is {max_mb} MB.', 'error')
+                return redirect(url_for('manage_documents'))
+            if not content_matches_extension(new_file_path, original_filename):
+                new_file_path.unlink(missing_ok=True)
+                flash('File contents do not match the expected file type.', 'error')
+                return redirect(url_for('manage_documents'))
 
             old_path = document.file_path
             if old_path and os.path.exists(old_path):
@@ -1430,7 +1448,7 @@ def register(app: Flask) -> None:
         except Exception as e:
             db.session.rollback()
             app.logger.exception('replace_document_file failed for doc_id=%s', doc_id)
-            flash(f'Error replacing file: {str(e)}', 'error')
+            flash('Error replacing file. Please try again.', 'error')
 
         return redirect(url_for('manage_documents'))
 
@@ -1495,7 +1513,7 @@ def register(app: Flask) -> None:
             flash('Document library store scope updated.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating: {str(e)}', 'error')
+            flash('Error updating. Please try again.', 'error')
         return redirect(url_for('manage_documents'))
 
     @app.route('/admin/toggle-document-visibility', methods=['POST'])
@@ -1600,7 +1618,7 @@ def register(app: Flask) -> None:
             flash(msg, 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error deleting document: {str(e)}', 'error')
+            flash('Error deleting document. Please try again.', 'error')
 
         return redirect(url_for('manage_documents'))
 
@@ -1634,7 +1652,7 @@ def register(app: Flask) -> None:
             db.session.commit()
         except Exception as e:
             db.session.rollback()
-            flash(f'Error adding signature field: {str(e)}', 'error')
+            flash('Error adding signature field. Please try again.', 'error')
 
         return _signature_fields_redirect(doc_id, request.form.get('page_number') or request.form.get('return_page'))
 
@@ -1731,9 +1749,8 @@ def register(app: Flask) -> None:
 
         except Exception as e:
             db.session.rollback()
-            import traceback
-            traceback.print_exc()
-            error_msg = f'Error adding typed field: {str(e)}'
+            app.logger.exception('Error adding typed field')
+            error_msg = 'Error adding typed field. Please try again.'
 
             # Check if this is an AJAX request
             if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
@@ -1795,7 +1812,7 @@ def register(app: Flask) -> None:
             db.session.commit()
         except Exception as e:
             db.session.rollback()
-            flash(f'Error updating field: {str(e)}', 'error')
+            flash('Error updating field. Please try again.', 'error')
 
         return _signature_fields_redirect(doc_id, request.form.get('return_page'))
 
@@ -1818,11 +1835,12 @@ def register(app: Flask) -> None:
                 db.session.commit()
             except Exception as e:
                 db.session.rollback()
-                flash(f'Error deleting typed field: {str(e)}', 'error')
+                flash('Error deleting typed field. Please try again.', 'error')
 
             return _signature_fields_redirect(doc_id, request.form.get('return_page'))
         except Exception as e:
-            flash(f'Error: {str(e)}. Typed fields feature may not be available.', 'error')
+            app.logger.exception('Typed fields error')
+            flash('Typed fields feature may not be available. Please try again.', 'error')
             return redirect(url_for('manage_documents'))
 
     @app.route('/admin/documents/signature-fields/<int:field_id>/geometry', methods=['POST'])
@@ -1851,7 +1869,7 @@ def register(app: Flask) -> None:
             })
         except Exception as e:
             db.session.rollback()
-            return jsonify({'success': False, 'message': str(e)}), 500
+            return jsonify({'success': False, 'message': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/admin/documents/typed-fields/<int:field_id>/geometry', methods=['POST'])
     @admin_required
@@ -1879,7 +1897,7 @@ def register(app: Flask) -> None:
             })
         except Exception as e:
             db.session.rollback()
-            return jsonify({'success': False, 'message': str(e)}), 500
+            return jsonify({'success': False, 'message': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/admin/documents/signature-fields/<int:field_id>/delete', methods=['POST'])
     @admin_required
@@ -1918,7 +1936,7 @@ def register(app: Flask) -> None:
             db.session.commit()
         except Exception as e:
             db.session.rollback()
-            flash(f'Error deleting signature field: {str(e)}', 'error')
+            flash('Error deleting signature field. Please try again.', 'error')
 
         return _signature_fields_redirect(doc_id, request.form.get('return_page'))
 
@@ -1994,7 +2012,7 @@ def register(app: Flask) -> None:
             flash(f'Document assigned to {assigned_count} user(s).', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error assigning document: {str(e)}', 'error')
+            flash('Error assigning document. Please try again.', 'error')
 
         return redirect(url_for('assign_document', doc_id=doc_id))
 
@@ -2024,7 +2042,7 @@ def register(app: Flask) -> None:
             flash('Assignment removed successfully.', 'success')
         except Exception as e:
             db.session.rollback()
-            flash(f'Error removing assignment: {str(e)}', 'error')
+            flash('Error removing assignment. Please try again.', 'error')
 
         return redirect(url_for('assign_document', doc_id=doc_id))
 
@@ -2066,12 +2084,11 @@ def register(app: Flask) -> None:
             except Exception as e:
                 db.session.rollback()
                 import traceback
-                traceback.print_exc()
-                return jsonify({'success': False, 'error': f'Error deleting typed field value: {str(e)}'}), 500
+                app.logger.exception('request failed')
+                return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return jsonify({'success': False, 'error': f'Error: {str(e)}'}), 500
+            app.logger.exception('request failed')
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/documents/<int:doc_id>/signature/delete', methods=['POST'])
     @login_required
@@ -2141,12 +2158,11 @@ def register(app: Flask) -> None:
             except Exception as e:
                 db.session.rollback()
                 import traceback
-                traceback.print_exc()
-                return jsonify({'success': False, 'error': f'Error deleting signature: {str(e)}'}), 500
+                app.logger.exception('request failed')
+                return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return jsonify({'success': False, 'error': f'Error: {str(e)}'}), 500
+            app.logger.exception('request failed')
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/documents/<int:doc_id>/typed-field/submit', methods=['POST'])
     @login_required
@@ -2242,7 +2258,7 @@ def register(app: Flask) -> None:
                 except Exception as table_error:
                     # Table might not exist yet
                     import traceback
-                    traceback.print_exc()
+                    app.logger.exception('request failed')
                     return jsonify({'success': False, 'error': 'Database table not available. Please contact administrator.'}), 500
 
                 if field_value == '' and existing_value:
@@ -2291,12 +2307,11 @@ def register(app: Flask) -> None:
             except Exception as e:
                 db.session.rollback()
                 import traceback
-                traceback.print_exc()
-                return jsonify({'success': False, 'error': f'Error saving typed field: {str(e)}'}), 500
+                app.logger.exception('request failed')
+                return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return jsonify({'success': False, 'error': f'Error: {str(e)}'}), 500
+            app.logger.exception('request failed')
+            return jsonify({'success': False, 'error': 'Something went wrong. Please try again.'}), 500
 
     @app.route('/admin/documents/<int:doc_id>/user/<username>/completed-pdf')
     @manager_required
@@ -2410,7 +2425,7 @@ def register(app: Flask) -> None:
                 flash('Document updated.', 'success')
             except Exception as e:
                 db.session.rollback()
-                flash(f'Error updating: {str(e)}', 'error')
+                flash('Error updating. Please try again.', 'error')
             return redirect(url_for('manage_documents'))
 
         return render_template('documents/rename_document.html', document=document, current_name=current_name, stores=stores)
@@ -2779,7 +2794,7 @@ def register(app: Flask) -> None:
                 unsigned_users = [u for u in users_status if not u['signed']]
         except Exception as e:
             # If anything fails, provide default values
-            flash(f'Error loading signature data: {str(e)}', 'error')
+            flash('Error loading signature data. Please try again.', 'error')
             signed_users = []
             unsigned_users = []
             required_fields = []

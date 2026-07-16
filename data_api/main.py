@@ -18,17 +18,22 @@ API_KEY = os.environ.get("DATA_API_KEY", "").strip()
 
 
 def check_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
-    if API_KEY and x_api_key != API_KEY:
+    if not API_KEY:
+        raise HTTPException(
+            503,
+            "DATA_API_KEY is not configured. Refusing to serve the data API without a key.",
+        )
+    if x_api_key != API_KEY:
         raise HTTPException(401, "Invalid or missing X-API-Key")
     return True
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "auth_required": True}
 
 
-@app.get("/users", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/users", dependencies=[Depends(check_api_key)])
 def list_users(
     store_id: int = Query(None),
     role: str = Query(None, description="Filter by role: user, manager, admin"),
@@ -49,7 +54,7 @@ def list_users(
     return [dict(zip(keys, row)) for row in rows]
 
 
-@app.get("/users/by-email", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/users/by-email", dependencies=[Depends(check_api_key)])
 def get_user_by_email(email: str = Query(..., description="User email"), db: Session = Depends(get_db)):
     """Return user by email including password_hash for server-side login (main app only)."""
     r = db.execute(
@@ -65,7 +70,7 @@ def get_user_by_email(email: str = Query(..., description="User email"), db: Ses
     return dict(zip(r.keys(), row))
 
 
-@app.get("/users/by-username/{username}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/users/by-username/{username}", dependencies=[Depends(check_api_key)])
 def get_user_by_username(username: str, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, username, domain, full_name, email, role, store_id, access_revoked_at FROM users WHERE username = :u"),
@@ -77,7 +82,7 @@ def get_user_by_username(username: str, db: Session = Depends(get_db)):
     return dict(zip(r.keys(), row))
 
 
-@app.get("/users/{user_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/users/{user_id}", dependencies=[Depends(check_api_key)])
 def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, username, domain, full_name, email, role, store_id, access_revoked_at FROM users WHERE id = :id"),
@@ -89,7 +94,7 @@ def get_user_by_id(user_id: int, db: Session = Depends(get_db)):
     return dict(zip(r.keys(), row))
 
 
-@app.get("/new-hires", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/new-hires", dependencies=[Depends(check_api_key)])
 def list_new_hires(db: Session = Depends(get_db)):
     r = db.execute(text(
         "SELECT id, username, first_name, last_name, email, department, position, role_id, start_date, "
@@ -99,7 +104,7 @@ def list_new_hires(db: Session = Depends(get_db)):
     return [dict(zip(r.keys(), row)) for row in rows]
 
 
-@app.get("/new-hires/by-username/{username}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/new-hires/by-username/{username}", dependencies=[Depends(check_api_key)])
 def get_new_hire_by_username(username: str, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, username, first_name, last_name, email, department, position, role_id, start_date, "
@@ -114,7 +119,7 @@ def get_new_hire_by_username(username: str, db: Session = Depends(get_db)):
     return dict(zip(r.keys(), row))
 
 
-@app.get("/documents", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/documents", dependencies=[Depends(check_api_key)])
 def list_documents(
     is_visible: bool = Query(None),
     deleted_at_null: bool = Query(True, description="Exclude soft-deleted when True"),
@@ -159,7 +164,7 @@ def list_documents(
     return [dict(zip(r.keys(), row)) for row in rows]
 
 
-@app.get("/documents/count", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/documents/count", dependencies=[Depends(check_api_key)])
 def count_documents(
     deleted_at_null: bool = Query(True, description="False = archived only"),
     store_id: int = Query(None),
@@ -197,7 +202,7 @@ def count_documents(
     return {"count": row[0] if row else 0}
 
 
-@app.get("/documents/with-signature-fields", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/documents/with-signature-fields", dependencies=[Depends(check_api_key)])
 def list_documents_with_signature_fields(
     deleted_at_null: bool = Query(True),
     db: Session = Depends(get_db),
@@ -220,7 +225,7 @@ def list_documents_with_signature_fields(
     return [dict(zip(r.keys(), row)) for row in rows]
 
 
-@app.get("/document-signatures", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/document-signatures", dependencies=[Depends(check_api_key)])
 def list_document_signatures(
     document_id: int = Query(None, description="Filter by document_id"),
     signature_field_id: int = Query(None, description="Filter by signature_field_id"),
@@ -243,7 +248,7 @@ def list_document_signatures(
     return [dict(zip(r.keys(), row)) for row in rows]
 
 
-@app.get("/user-notifications", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/user-notifications", dependencies=[Depends(check_api_key)])
 def list_user_notifications(
     username: str = Query(..., description="Filter by username"),
     notification_type: str = Query(None),
@@ -264,7 +269,7 @@ def list_user_notifications(
     return [dict(zip(r.keys(), row)) for row in rows]
 
 
-@app.get("/user-notifications/{notification_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/user-notifications/{notification_id}", dependencies=[Depends(check_api_key)])
 def get_user_notification_by_id(notification_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, username, notification_type, notification_id, is_read, read_at, created_at FROM user_notifications WHERE id = :id"),
@@ -276,7 +281,7 @@ def get_user_notification_by_id(notification_id: int, db: Session = Depends(get_
     return dict(zip(r.keys(), row))
 
 
-@app.get("/external-links", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/external-links", dependencies=[Depends(check_api_key)])
 def list_external_links(
     is_active: bool = Query(None, description="Filter by is_active; None = all"),
     db: Session = Depends(get_db),
@@ -292,7 +297,7 @@ def list_external_links(
     return [dict(zip(r.keys(), row)) for row in rows]
 
 
-@app.get("/external-links/{link_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/external-links/{link_id}", dependencies=[Depends(check_api_key)])
 def get_external_link(link_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, title, url, description, icon, image_filename, \"order\", is_active, created_by, created_at, updated_at FROM external_links WHERE id = :id"),
@@ -304,7 +309,7 @@ def get_external_link(link_id: int, db: Session = Depends(get_db)):
     return dict(zip(r.keys(), row))
 
 
-@app.get("/documents/{doc_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/documents/{doc_id}", dependencies=[Depends(check_api_key)])
 def get_document(doc_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, filename, original_filename, display_name, file_path, file_size, file_type, description, is_visible, store_id, uploaded_by, created_at, updated_at, deleted_at FROM documents WHERE id = :id"),
@@ -316,13 +321,13 @@ def get_document(doc_id: int, db: Session = Depends(get_db)):
     return dict(zip(r.keys(), row))
 
 
-@app.get("/stores", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/stores", dependencies=[Depends(check_api_key)])
 def list_stores(db: Session = Depends(get_db)):
     r = db.execute(text("SELECT id, name, code FROM stores ORDER BY name"))
     return [dict(zip(r.keys(), row)) for row in r.fetchall()]
 
 
-@app.get("/stores/{store_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/stores/{store_id}", dependencies=[Depends(check_api_key)])
 def get_store(store_id: int, db: Session = Depends(get_db)):
     r = db.execute(text("SELECT id, name, code FROM stores WHERE id = :id"), {"id": store_id})
     row = r.fetchone()
@@ -332,7 +337,7 @@ def get_store(store_id: int, db: Session = Depends(get_db)):
 
 
 # ---- Training videos ----
-@app.get("/training-videos", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/training-videos", dependencies=[Depends(check_api_key)])
 def list_training_videos(db: Session = Depends(get_db)):
     r = db.execute(text(
         "SELECT id, title, description, filename, original_filename, file_path, file_size, duration, "
@@ -342,7 +347,7 @@ def list_training_videos(db: Session = Depends(get_db)):
     return [dict(zip(r.keys(), row)) for row in rows]
 
 
-@app.get("/training-videos/{video_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/training-videos/{video_id}", dependencies=[Depends(check_api_key)])
 def get_training_video(video_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, title, description, filename, original_filename, file_path, file_size, duration, "
@@ -356,7 +361,7 @@ def get_training_video(video_id: int, db: Session = Depends(get_db)):
     return dict(zip(r.keys(), row))
 
 
-@app.get("/new-hires/{new_hire_id}/required-video-ids", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/new-hires/{new_hire_id}/required-video-ids", dependencies=[Depends(check_api_key)])
 def get_new_hire_required_video_ids(new_hire_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT video_id FROM new_hire_required_training WHERE new_hire_id = :id"),
@@ -367,7 +372,7 @@ def get_new_hire_required_video_ids(new_hire_id: int, db: Session = Depends(get_
 
 
 # ---- User tasks ----
-@app.get("/user-tasks", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/user-tasks", dependencies=[Depends(check_api_key)])
 def list_user_tasks(username: str = Query(..., description="Filter by username"), db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, username, task_title, task_description, task_type, document_id, priority, status, "
@@ -380,7 +385,7 @@ def list_user_tasks(username: str = Query(..., description="Filter by username")
 
 
 # ---- User training progress ----
-@app.get("/user-training-progress", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/user-training-progress", dependencies=[Depends(check_api_key)])
 def list_user_training_progress(
     username: str = Query(None, description="Filter by username"),
     video_id: int = Query(None, description="Optional filter by video_id; if only video_id set, returns all users' progress for that video"),
@@ -402,7 +407,7 @@ def list_user_training_progress(
     return [dict(zip(r.keys(), row)) for row in rows]
 
 
-@app.get("/user-training-progress/{progress_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/user-training-progress/{progress_id}", dependencies=[Depends(check_api_key)])
 def get_user_training_progress_by_id(progress_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, username, video_id, attempt_number, score, total_questions, correct_answers, "
@@ -416,7 +421,7 @@ def get_user_training_progress_by_id(progress_id: int, db: Session = Depends(get
     return dict(zip(r.keys(), row))
 
 
-@app.get("/user-training-progress/stats", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/user-training-progress/stats", dependencies=[Depends(check_api_key)])
 def user_training_progress_stats(db: Session = Depends(get_db)):
     """Return counts for admin reports: total, completed_passed, completed_failed, in_progress."""
     r = db.execute(text(
@@ -434,7 +439,7 @@ def user_training_progress_stats(db: Session = Depends(get_db)):
 
 
 # ---- Document assignments ----
-@app.get("/document-assignments", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/document-assignments", dependencies=[Depends(check_api_key)])
 def list_document_assignments(
     username: str = Query(None),
     document_id: int = Query(None),
@@ -456,7 +461,7 @@ def list_document_assignments(
 
 
 # ---- Document signature fields ----
-@app.get("/document-signature-fields", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/document-signature-fields", dependencies=[Depends(check_api_key)])
 def list_document_signature_fields(document_id: int = Query(..., description="Filter by document_id"), db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, document_id, page_number, x_position, y_position, width, height, field_label, "
@@ -469,7 +474,7 @@ def list_document_signature_fields(document_id: int = Query(..., description="Fi
 
 
 # ---- Checklist items (order by column index 5 to avoid reserved word) ----
-@app.get("/checklist-items", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/checklist-items", dependencies=[Depends(check_api_key)])
 def list_checklist_items(db: Session = Depends(get_db)):
     # Use column position in ORDER BY for DB-agnostic reserved word 'order'
     r = db.execute(
@@ -488,14 +493,14 @@ def list_checklist_items(db: Session = Depends(get_db)):
 
 
 # ---- Roles ----
-@app.get("/roles", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/roles", dependencies=[Depends(check_api_key)])
 def list_roles(db: Session = Depends(get_db)):
     r = db.execute(text("SELECT id, name FROM roles ORDER BY name"))
     return [dict(zip(r.keys(), row)) for row in r.fetchall()]
 
 
 # ---- Counts (admin dashboard) ----
-@app.get("/users/count", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/users/count", dependencies=[Depends(check_api_key)])
 def count_users(
     store_id: int = Query(None),
     role: str = Query(None),
@@ -514,7 +519,7 @@ def count_users(
     return {"count": row[0] if row else 0}
 
 
-@app.get("/new-hires/count", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/new-hires/count", dependencies=[Depends(check_api_key)])
 def count_new_hires(status_filter: str = Query(None, description="Exclude status, e.g. 'removed'"), db: Session = Depends(get_db)):
     if status_filter:
         r = db.execute(text("SELECT COUNT(*) AS c FROM new_hires WHERE status != :s"), {"s": status_filter})
@@ -525,7 +530,7 @@ def count_new_hires(status_filter: str = Query(None, description="Exclude status
 
 
 # ---- Manager permissions (for manager_has_permission) ----
-@app.get("/manager-permissions", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/manager-permissions", dependencies=[Depends(check_api_key)])
 def list_manager_permissions(user_id: int = Query(..., description="Filter by user_id"), db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, user_id, permission_key FROM manager_permissions WHERE user_id = :uid"),
@@ -536,7 +541,7 @@ def list_manager_permissions(user_id: int = Query(..., description="Filter by us
 
 
 # ---- Get by id ----
-@app.get("/user-tasks/{task_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/user-tasks/{task_id}", dependencies=[Depends(check_api_key)])
 def get_user_task(task_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, username, task_title, task_description, task_type, document_id, priority, status, "
@@ -548,7 +553,7 @@ def get_user_task(task_id: int, db: Session = Depends(get_db)):
     return dict(zip(r.keys(), row))
 
 
-@app.get("/document-assignments/{assignment_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/document-assignments/{assignment_id}", dependencies=[Depends(check_api_key)])
 def get_document_assignment_by_id(assignment_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, document_id, username, assigned_by, assigned_at, due_date, is_completed, completed_at, notes "
@@ -559,7 +564,7 @@ def get_document_assignment_by_id(assignment_id: int, db: Session = Depends(get_
     return dict(zip(r.keys(), row))
 
 
-@app.get("/document-signature-fields/{field_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/document-signature-fields/{field_id}", dependencies=[Depends(check_api_key)])
 def get_document_signature_field(field_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, document_id, page_number, x_position, y_position, width, height, field_label, "
@@ -571,7 +576,7 @@ def get_document_signature_field(field_id: int, db: Session = Depends(get_db)):
     return dict(zip(r.keys(), row))
 
 
-@app.get("/checklist-items/{item_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/checklist-items/{item_id}", dependencies=[Depends(check_api_key)])
 def get_checklist_item(item_id: int, db: Session = Depends(get_db)):
     r = db.execute(
         text("SELECT id, task_name, description, assigned_to, [order], is_active, created_by, created_at, updated_at "
@@ -585,7 +590,7 @@ def get_checklist_item(item_id: int, db: Session = Depends(get_db)):
     return d
 
 
-@app.get("/roles/{role_id}", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/roles/{role_id}", dependencies=[Depends(check_api_key)])
 def get_role(role_id: int, db: Session = Depends(get_db)):
     r = db.execute(text("SELECT id, name, description, created_at FROM roles WHERE id = :id"), {"id": role_id})
     row = r.fetchone()
@@ -595,7 +600,7 @@ def get_role(role_id: int, db: Session = Depends(get_db)):
 
 
 # ---- Documents visible to store (no rows in document_stores = all stores, else must have store_id) ----
-@app.get("/documents/visible-to-store", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/documents/visible-to-store", dependencies=[Depends(check_api_key)])
 def list_documents_visible_to_store(
     store_id: int = Query(None, description="None = all visible; int = filter by store"),
     db: Session = Depends(get_db),
@@ -622,7 +627,7 @@ def list_documents_visible_to_store(
 
 
 # ---- New hires list with optional status exclude ----
-@app.get("/new-hires/list", dependencies=[Depends(check_api_key)] if API_KEY else [])
+@app.get("/new-hires/list", dependencies=[Depends(check_api_key)])
 def list_new_hires_filtered(
     status_exclude: str = Query(None, description="Exclude this status, e.g. 'removed'"),
     db: Session = Depends(get_db),

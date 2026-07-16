@@ -12,6 +12,10 @@ try:
 except ImportError:
     pass
 
+# macOS system Python often lacks hashlib.scrypt (LibreSSL); polyfill before Werkzeug auth.
+from services.hashlib_scrypt import ensure_scrypt
+ensure_scrypt()
+
 from flask import Flask, render_template, render_template_string, redirect, url_for, request, session, flash, jsonify, send_file, send_from_directory, make_response, abort
 from document_wizard import (
     DOCUMENT_WIZARD_MIN_FIELDS,
@@ -119,11 +123,18 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = SQLALCHEMY_ENGINE_OPTIONS
 app.config['UPLOAD_FOLDER'] = BASE_DIR / 'uploads'
 app.config['VIDEO_UPLOAD_FOLDER'] = BASE_DIR / 'uploads' / 'videos'
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size (for videos)
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # hard ceiling (videos); docs use MAX_DOCUMENT_UPLOAD_MB
+from config import MAX_DOCUMENT_UPLOAD_MB, ENABLE_TEST_FORM_WIZARD, PROXY_FIX
+app.config['MAX_DOCUMENT_UPLOAD_MB'] = MAX_DOCUMENT_UPLOAD_MB
+app.config['ENABLE_TEST_FORM_WIZARD'] = ENABLE_TEST_FORM_WIZARD
 app.config['ALLOWED_EXTENSIONS'] = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'svg'}
 app.config['ALLOWED_VIDEO_EXTENSIONS'] = {'mp4', 'webm', 'ogg', 'mov', 'avi'}
 app.config['FEEDBACK_UPLOAD_FOLDER'] = BASE_DIR / 'uploads' / 'feedback'
 app.config['FEEDBACK_ALLOWED_IMAGE_EXTENSIONS'] = {'jpg', 'jpeg', 'png', 'gif', 'webp'}
+
+if PROXY_FIX:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 FEEDBACK_TYPES = (
     ('comment', 'General comment'),
     ('issue', 'Report an issue'),
@@ -380,7 +391,9 @@ from services.app_hooks import (
 )
 from blueprints import register_blueprints
 from blueprints import static_files as static_files_bp
+from services.csrf_protect import init_csrf
 static_files_bp.register(app)
+init_csrf(app)
 register_app_hooks(app)
 register_blueprints(app)
 
@@ -388,14 +401,26 @@ try:
     from services.jobs import ensure_jobs_table, start_worker, recover_stuck_jobs
     with app.app_context():
         _run_users_migration_if_needed()
+except Exception:
+    app.logger.exception('startup schema migration failed')
+    if os.getenv('SKIP_STARTUP_MIGRATIONS', '').lower() not in ('1', 'true', 'yes'):
+        raise
+    app.logger.warning('Continuing without migrations (SKIP_STARTUP_MIGRATIONS set)')
+
+try:
+    from services.jobs import ensure_jobs_table, start_worker, recover_stuck_jobs
+    with app.app_context():
         ensure_jobs_table()
         recover_stuck_jobs()
     start_worker(app)
 except Exception:
-    app.logger.exception('background job worker / startup migrations failed')
+    app.logger.exception('background job worker failed to start')
+    if os.getenv('SKIP_STARTUP_MIGRATIONS', '').lower() not in ('1', 'true', 'yes'):
+        pass  # worker is optional; migrations already handled above
 
 application = app
 
 if __name__ == '__main__':
-    # For local development
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Local development only — never run with debug in production
+    _debug = os.getenv('FLASK_DEBUG', 'false').lower() in ('1', 'true', 'yes')
+    app.run(debug=_debug, host='0.0.0.0', port=5000)

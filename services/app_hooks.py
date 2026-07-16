@@ -215,7 +215,8 @@ def register_app_hooks(app: Flask) -> None:
         ):
             return
         if not current_user.is_authenticated:
-            return redirect(url_for('login', next=request.url))
+            from services.security import relative_request_path
+            return redirect(url_for('login', next=relative_request_path()))
 
     @app.before_request
     def rate_limit_auth_posts():

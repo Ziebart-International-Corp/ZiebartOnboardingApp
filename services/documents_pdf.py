@@ -326,14 +326,12 @@ def embed_signature_in_pdf(document, signature_field, signature_image_base64):
         x_pdf = max(0, min(x_pdf, page_width - width_pdf))
         y_pdf = max(0, min(y_pdf, page_height - height_pdf))
         
-        # Debug output
-        print(f"\n=== Signature Embedding ===")
-        print(f"Browser coords: x={signature_field.x_position:.1f}, y={signature_field.y_position:.1f}")
-        print(f"PDF page: {page_width:.1f} x {page_height:.1f} points")
-        print(f"Scale: x={scale_x:.6f}, y={scale_y:.6f}")
-        print(f"PDF coords: x={x_pdf:.2f}, y={y_pdf:.2f}")
-        print(f"Size: {width_pdf:.2f} x {height_pdf:.2f}")
-        print(f"========================\n")
+        # Debug coordinate math at DEBUG level only
+        current_app.logger.debug(
+            'signature embed browser=(%.1f,%.1f) page=%.1fx%.1f scale=(%.6f,%.6f) pdf=(%.2f,%.2f) size=%.2fx%.2f',
+            signature_field.x_position, signature_field.y_position,
+            page_width, page_height, scale_x, scale_y, x_pdf, y_pdf, width_pdf, height_pdf,
+        )
         
         # Decode signature image
         sig_image_data = base64.b64decode(signature_image_base64)
@@ -350,8 +348,7 @@ def embed_signature_in_pdf(document, signature_field, signature_image_base64):
         # x_pdf and y_pdf are already in PDF points from top-left, so use directly
         img_rect = fitz.Rect(x_pdf, y_pdf, x_pdf + width_pdf, y_pdf + height_pdf)
         
-        print(f"PyMuPDF rect: {img_rect}")
-        
+        current_app.logger.debug('PyMuPDF rect: %s', img_rect)        
         # Insert the image into the PDF page
         page.insert_image(img_rect, stream=img_bytes.getvalue())
         
@@ -362,9 +359,8 @@ def embed_signature_in_pdf(document, signature_field, signature_image_base64):
         return True, "Signature embedded successfully"
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return False, f"Error embedding signature: {str(e)}"
+        current_app.logger.exception('Error embedding signature')
+        return False, "Error embedding signature. Please try again."
 
 
 def calculate_pdf_hash(file_path):
@@ -390,8 +386,9 @@ def sign_pdf_cryptographically(document, signature_field, username):
         # In production, you MUST use a CA-issued document signing certificate
         # and store private keys securely (HSM/KMS)
         
+        # Accepted limitation: visual signature overlay + SignatureAuditLog are used in
+        # production today. PAdES/crypto signing needs a CA cert in HSM/KMS — not configured.
         # TODO: Load certificate and key from secure storage (HSM/KMS)
-        # For now, return an error indicating certificate setup is needed
         return False, "Cryptographic signing requires certificate setup. Please configure signing certificate and key in secure storage (HSM/KMS)."
         
         # Example implementation (commented out until certificates are configured):
