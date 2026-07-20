@@ -212,6 +212,43 @@ def send_password_reset_email(user, temporary_password):
     return send_email(to_email, subject, body_html, body_text=body_text)
 
 
+def send_password_reset_link_email(user, reset_url):
+    """Email a one-time password reset link (no password in the message)."""
+    import html as html_module
+    to_email = normalize_email(getattr(user, 'email', None))
+    if not to_email or not reset_url:
+        return False
+    display_name = (getattr(user, 'full_name', None) or getattr(user, 'username', None) or '').strip() or 'there'
+    safe_name = html_module.escape(display_name)
+    safe_reset = html_module.escape(reset_url, quote=True)
+    subject = 'Reset your Ziebart Onboarding password'
+    body_html = f'''
+    <p>Hello {safe_name},</p>
+    <p>We received a request to reset your password for the Ziebart Onboarding portal.</p>
+    <p>This link expires in 1 hour and can be used only once.</p>
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0;">
+      <tr>
+        <td align="center" bgcolor="#FE0100" style="background-color:#FE0100;border-radius:6px;">
+          <a href="{safe_reset}" target="_blank" style="display:inline-block;padding:12px 20px;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none;">Reset password</a>
+        </td>
+      </tr>
+    </table>
+    <p>If the button does not work, copy and paste this link into your browser:<br>{html_module.escape(reset_url)}</p>
+    <p>If you did not request this, you can ignore this email. Your password will stay the same.</p>
+    <p>Thank you,<br>Onboarding Team</p>
+    '''
+    body_text = (
+        f"Hello {display_name},\n\n"
+        "We received a request to reset your password for the Ziebart Onboarding portal.\n\n"
+        "This link expires in 1 hour and can be used only once.\n\n"
+        f"Reset your password:\n{reset_url}\n\n"
+        "If you did not request this, you can ignore this email. Your password will stay the same.\n\n"
+        "Thank you,\n"
+        "Onboarding Team"
+    )
+    return send_email(to_email, subject, body_html, body_text=body_text)
+
+
 def send_onboarding_welcome_email(first_name, last_name, to_email, password):
     """Email new hire a get-started link plus login credentials after onboarding is created."""
     import html as html_module

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>{{ article.title }} - Help</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <style>
+        {{ global_theme_css|safe }}
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        body { background: #0c1017; color: #f2f5fb; min-height: 100vh; }
+        .top-header {
+            background: #000; padding: 12px 30px; display: flex; justify-content: space-between;
+            align-items: center; min-height: 60px;
+        }
+        .logo-section { display: flex; align-items: center; gap: 12px; font-size: 1.25em; font-weight: 800; color: #fff; }
+        .back-btn {
+            background: rgba(255,255,255,0.12); color: #fff; padding: 8px 14px; border-radius: 0.5rem;
+            text-decoration: none; border: 1px solid rgba(255,255,255,0.22); font-weight: 600; font-size: 0.9em;
+        }
+        .container { max-width: 760px; margin: 28px auto; padding: 0 20px 48px; }
+        .meta { color: #9aa6b8; font-size: 0.9em; margin-bottom: 18px; }
+        h1 { font-size: 1.7em; margin-bottom: 10px; line-height: 1.25; }
+        .body { line-height: 1.65; font-size: 1.05em; color: #e6ebf2; }
+        .body p { margin-bottom: 1em; }
+        .related {
+            margin-top: 28px; padding: 16px; border-radius: 0.5rem;
+            background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);
+        }
+        .related a { color: #ff8a8a; font-weight: 600; text-decoration: none; }
+        .related a:hover { color: #ffb3b3; }
+        .ask-link { margin-top: 24px; }
+        .ask-link a {
+            display: inline-block; padding: 10px 16px; border-radius: 0.5rem;
+            background: rgba(255,255,255,0.1); color: #fff; text-decoration: none;
+            border: 1px solid rgba(255,255,255,0.22); font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <div class="logo-section">Help</div>
+        <a class="back-btn" href="{{ url_for('help_center') }}">← All articles</a>
+    </div>
+    <div class="container">
+        <h1>{{ article.title }}</h1>
+        <div class="meta">
+            For: {{ article.audience }}
+            {% if article.permission_key %} · {{ permission_label(article.permission_key) }}{% endif %}
+        </div>
+        <div class="body">{{ body_html }}</div>
+        {% if article.related_path %}
+        <div class="related">
+            Related page: <a href="{{ article.related_path }}">{{ article.related_path }}</a>
+        </div>
+        {% endif %}
+        <div class="ask-link">
+            <a href="{{ url_for('feedback') }}">Still stuck? Send Feedback</a>
+        </div>
+    </div>
+</body>
+</html>

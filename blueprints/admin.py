@@ -1960,6 +1960,7 @@ def register(app: Flask) -> None:
             return redirect(url_for('manage_users'))
         user.password_hash = generate_password_hash(new_password)
         user.must_change_password = False
+        user.password_changed_at = datetime.utcnow()
         try:
             db.session.commit()
             flash(f'Password updated for "{user.username}".', 'success')
@@ -1973,6 +1974,11 @@ def register(app: Flask) -> None:
     def users_send_password_reset_email(user_id):
         """Generate a temporary password, email it to the user, and require password change on next login."""
         _ensure_users_must_change_password_column()
+        try:
+            from db.migrations_runtime import _ensure_password_reset_schema
+            _ensure_password_reset_schema()
+        except Exception:
+            pass
         user = UserModel.query.get(user_id)
         if not user:
             flash('User not found.', 'error')
@@ -1984,6 +1990,7 @@ def register(app: Flask) -> None:
         temporary_password = generate_temporary_password()
         user.password_hash = generate_password_hash(temporary_password)
         user.must_change_password = True
+        user.password_changed_at = datetime.utcnow()
         try:
             db.session.commit()
         except Exception as e:

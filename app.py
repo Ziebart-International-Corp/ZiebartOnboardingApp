@@ -233,7 +233,7 @@ from db.migrations_runtime import (
     _ensure_new_hires_finale_columns, _ensure_admin_settings_table,
     _ensure_stores_and_store_id, _ensure_departments_table,
     _ensure_document_typed_field_columns, _ensure_user_task_order_columns,
-    _run_users_migration_if_needed,
+    _ensure_help_tables, _ensure_password_reset_schema, _run_users_migration_if_needed,
 )
 
 

@@ -126,6 +126,19 @@
             box-shadow: 0 10px 24px rgba(254,1,0,0.35), inset 0 1px 0 rgba(255,255,255,0.4);
             transform: translateY(-1px);
         }
+        .forgot-wrap {
+            margin-top: 16px;
+            text-align: center;
+            position: relative;
+            z-index: 1;
+        }
+        .forgot-link {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+        .forgot-link:hover { color: #fff; text-decoration: underline; }
         .alert {
             padding: 12px;
             border-radius: 8px;
@@ -139,6 +152,16 @@
             background: rgba(255, 94, 94, 0.14);
             color: #ffd5d5;
             border-color: rgba(255, 117, 117, 0.4);
+        }
+        .alert-success {
+            background: rgba(52, 160, 90, 0.18);
+            color: #d4f5e2;
+            border-color: rgba(80, 200, 130, 0.4);
+        }
+        .alert-info {
+            background: rgba(120, 160, 220, 0.16);
+            color: #d5e6ff;
+            border-color: rgba(140, 180, 240, 0.4);
         }
         .construction-banner {
             display: flex;
@@ -189,6 +212,7 @@
             </div>
             <button type="submit" class="btn-login">Log in</button>
         </form>
+        <p class="forgot-wrap"><a class="forgot-link" href="{{ url_for('forgot_password') }}">Forgot password?</a></p>
     </div>
 </body>
 </html>

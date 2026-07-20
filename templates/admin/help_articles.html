@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Help Articles - Admin</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        {{ global_theme_css|safe }}
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'URW Form', Arial, sans-serif; }
+        .header {
+            background: linear-gradient(160deg, #121821 0%, #090d14 100%); color: #fff;
+            padding: 12px 30px; display: flex; justify-content: space-between; align-items: center; min-height: 60px;
+        }
+        .header h1 { font-size: 1.35em; font-weight: 800; }
+        .header-actions { display: flex; gap: 10px; align-items: center; }
+        .back-btn, .btn {
+            background: rgba(255,255,255,0.1); color: #fff; padding: 8px 14px; border-radius: 0.5rem;
+            text-decoration: none; border: 1px solid rgba(255,255,255,0.22); font-weight: 600; font-size: 0.9em;
+        }
+        .btn-primary {
+            background: linear-gradient(180deg, #ff2928 0%, #fe0100 62%, #b30000 100%) !important;
+        }
+        .container { max-width: 1000px; margin: 24px auto; padding: 0 20px 40px; color: var(--text-primary, #f2f5fb); }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid rgba(255,255,255,0.12); vertical-align: top; }
+        th { color: #9aa6b8; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.03em; }
+        .badge { font-size: 0.75em; padding: 3px 8px; border-radius: 999px; background: rgba(255,255,255,0.1); }
+        .badge.off { opacity: 0.6; }
+        .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .row-actions form { display: inline; }
+        .row-actions button {
+            background: rgba(220,53,69,0.2); color: #ffb8bf; border: 1px solid rgba(220,53,69,0.4);
+            padding: 6px 10px; border-radius: 0.35rem; cursor: pointer; font-weight: 600;
+        }
+        .flash-success { padding: 12px 16px; margin-bottom: 14px; border-radius: 0.5rem; background: rgba(40,167,69,0.18); color: #b8f0c8; }
+        .flash-error { padding: 12px 16px; margin-bottom: 14px; border-radius: 0.5rem; background: rgba(220,53,69,0.18); color: #ffb8bf; }
+        a { color: #ff8a8a; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Help Articles</h1>
+        <div class="header-actions">
+            <a class="btn btn-primary" href="{{ url_for('manage_help_new') }}">New article</a>
+            <a class="back-btn" href="{{ url_for('admin_dashboard') }}">← Dashboard</a>
+        </div>
+    </div>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+            <div class="{% if category == 'error' %}flash-error{% else %}flash-success{% endif %}">{{ msg }}</div>
+            {% endfor %}
+        {% endif %}
+        {% endwith %}
+
+        {% if articles %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Audience</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in articles %}
+                <tr>
+                    <td>
+                        <strong>{{ a.title }}</strong><br>
+                        <span style="color:#9aa6b8;font-size:0.85em;">/help/article/{{ a.slug }}</span>
+                    </td>
+                    <td>
+                        {{ a.audience }}
+                        {% if a.permission_key %}<br><span style="font-size:0.85em;color:#9aa6b8;">{{ permission_label(a.permission_key) }}</span>{% endif %}
+                    </td>
+                    <td>
+                        {% if a.is_published %}<span class="badge">Published</span>{% else %}<span class="badge off">Draft</span>{% endif %}
+                    </td>
+                    <td>
+                        <div class="row-actions">
+                            <a class="back-btn" href="{{ url_for('manage_help_edit', article_id=a.id) }}">Edit</a>
+                            <a class="back-btn" href="{{ url_for('help_article', slug=a.slug) }}" target="_blank">View</a>
+                            <form method="post" action="{{ url_for('manage_help_delete', article_id=a.id) }}" onsubmit="return confirm('Delete this article?');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <button type="submit">Delete</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No articles yet. <a href="{{ url_for('manage_help_new') }}">Create one</a>.</p>
+        {% endif %}
+    </div>
+</body>
+</html>

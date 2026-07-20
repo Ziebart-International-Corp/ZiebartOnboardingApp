@@ -453,6 +453,126 @@ def _ensure_user_task_order_columns():
             db.session.rollback()
 
 
+_help_tables_migrated = False
+_password_reset_migrated = False
+
+
+def _ensure_password_reset_schema():
+    """Ensure users.password_changed_at and password_reset_tokens exist."""
+    global _password_reset_migrated
+    if _password_reset_migrated:
+        return
+    try:
+        db.session.execute(text('SELECT TOP 1 password_changed_at FROM users'))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text('ALTER TABLE users ADD password_changed_at DATETIME NULL'))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    try:
+        db.session.execute(text('SELECT TOP 1 id FROM password_reset_tokens'))
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text(
+                'CREATE TABLE password_reset_tokens ('
+                'id INT PRIMARY KEY IDENTITY(1,1), '
+                'user_id INT NOT NULL, '
+                'token_hash NVARCHAR(64) NOT NULL, '
+                'expires_at DATETIME NOT NULL, '
+                'used_at DATETIME NULL, '
+                'created_at DATETIME NOT NULL, '
+                'requested_ip NVARCHAR(50) NULL'
+                ')'
+            ))
+            db.session.execute(text(
+                'CREATE UNIQUE INDEX uq_password_reset_tokens_hash ON password_reset_tokens(token_hash)'
+            ))
+            db.session.execute(text(
+                'CREATE INDEX ix_password_reset_tokens_user ON password_reset_tokens(user_id)'
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            return
+    _password_reset_migrated = True
+
+
+def _ensure_help_tables():
+    """Ensure help_articles and help_requests tables exist; seed starter articles."""
+    global _help_tables_migrated
+    if _help_tables_migrated:
+        return
+    articles_ok = False
+    requests_ok = False
+    try:
+        db.session.execute(text('SELECT TOP 1 id FROM help_articles'))
+        articles_ok = True
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text(
+                'CREATE TABLE help_articles ('
+                'id INT PRIMARY KEY IDENTITY(1,1), '
+                'title NVARCHAR(200) NOT NULL, '
+                'slug NVARCHAR(220) NOT NULL, '
+                'body NVARCHAR(MAX) NOT NULL, '
+                'audience NVARCHAR(20) NOT NULL DEFAULT \'all\', '
+                'permission_key NVARCHAR(80) NULL, '
+                'related_path NVARCHAR(300) NULL, '
+                'tags NVARCHAR(300) NULL, '
+                'is_published BIT NOT NULL DEFAULT 1, '
+                'sort_order INT NOT NULL DEFAULT 0, '
+                'created_by NVARCHAR(100) NULL, '
+                'created_at DATETIME NULL, '
+                'updated_at DATETIME NULL'
+                ')'
+            ))
+            db.session.execute(text(
+                'CREATE UNIQUE INDEX uq_help_articles_slug ON help_articles(slug)'
+            ))
+            db.session.commit()
+            articles_ok = True
+        except Exception:
+            db.session.rollback()
+    try:
+        db.session.execute(text('SELECT TOP 1 id FROM help_requests'))
+        requests_ok = True
+    except Exception:
+        db.session.rollback()
+        try:
+            db.session.execute(text(
+                'CREATE TABLE help_requests ('
+                'id INT PRIMARY KEY IDENTITY(1,1), '
+                'user_id INT NOT NULL, '
+                'username NVARCHAR(100) NOT NULL, '
+                'store_id INT NULL, '
+                'role NVARCHAR(20) NULL, '
+                'question NVARCHAR(MAX) NOT NULL, '
+                'page_path NVARCHAR(500) NULL, '
+                'status NVARCHAR(20) NOT NULL DEFAULT \'open\', '
+                'admin_reply NVARCHAR(MAX) NULL, '
+                'answered_by NVARCHAR(100) NULL, '
+                'answered_at DATETIME NULL, '
+                'created_at DATETIME NULL'
+                ')'
+            ))
+            db.session.commit()
+            requests_ok = True
+        except Exception:
+            db.session.rollback()
+    if articles_ok:
+        try:
+            from services.help_content import ensure_seed_help_articles
+            ensure_seed_help_articles()
+        except Exception as e:
+            current_app.logger.warning('help articles seed failed: %s', e)
+    if articles_ok and requests_ok:
+        _help_tables_migrated = True
+
+
 def _run_users_migration_if_needed():
     """Run schema checks/migrations (safe at startup or on demand)."""
     try:
@@ -468,6 +588,8 @@ def _run_users_migration_if_needed():
         _ensure_stores_and_store_id()
         _ensure_departments_table()
         _ensure_signature_audit_logs_table()
+        _ensure_help_tables()
+        _ensure_password_reset_schema()
     except Exception:
         import logging
         logging.getLogger(__name__).exception('Schema migration failed')

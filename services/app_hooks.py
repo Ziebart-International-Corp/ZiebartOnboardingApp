@@ -19,6 +19,7 @@ from admin_console_nav import (
 )
 from config import BASE_DIR
 from services.feedback_ui import feedback_global_inject_markup
+from services.help_ui import help_global_inject_markup
 from services.nav_markup import (
     staff_console_dropdown_links_markup,
     user_mobile_bottom_nav_markup,
@@ -136,6 +137,28 @@ def register_app_hooks(app: Flask) -> None:
         return response
 
     @app.after_request
+    def inject_help_header_button(response):
+        try:
+            if response.status_code != 200:
+                return response
+            content_type = response.content_type or ''
+            if 'text/html' not in content_type:
+                return response
+            try:
+                if not current_user.is_authenticated:
+                    return response
+            except Exception:
+                return response
+            data = response.get_data(as_text=True)
+            if '</body>' not in data or 'app-help-header-btn' in data:
+                return response
+            snippet = str(help_global_inject_markup())
+            response.set_data(data.replace('</body>', snippet + '</body>', 1))
+        except Exception:
+            pass
+        return response
+
+    @app.after_request
     def inject_admin_console_nav(response):
         try:
             if response.status_code != 200:
@@ -212,7 +235,10 @@ def register_app_hooks(app: Flask) -> None:
         if request.path in (
             '/login', '/logout', '/', '/healthz',
             '/favicon.ico', '/uploads/ziebart.svg',
+            '/forgot-password',
         ):
+            return
+        if request.path.startswith('/reset-password/'):
             return
         if not current_user.is_authenticated:
             from services.security import relative_request_path
@@ -222,13 +248,16 @@ def register_app_hooks(app: Flask) -> None:
     def rate_limit_auth_posts():
         if request.method != 'POST':
             return
-        if request.path not in ('/login', '/change-password'):
+        path = request.path or ''
+        if path not in ('/login', '/change-password', '/forgot-password') and not path.startswith('/reset-password/'):
             return
         from services.rate_limit import too_many_requests
         forwarded = (request.headers.get('X-Forwarded-For') or '').split(',')[0].strip()
         ip = forwarded or (request.remote_addr or 'unknown')
-        key = f'auth:{ip}:{request.path}'
-        if too_many_requests(key, limit=10, window_seconds=60):
+        # Forgot-password is stricter to limit email spam / token farming
+        limit = 5 if path == '/forgot-password' else 10
+        key = f'auth:{ip}:{path if path != "/forgot-password" else "forgot-password"}'
+        if too_many_requests(key, limit=limit, window_seconds=60):
             return (
                 'Too many requests. Please wait a minute and try again.',
                 429,

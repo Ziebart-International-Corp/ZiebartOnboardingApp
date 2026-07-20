@@ -48,11 +48,28 @@ class User(db.Model):
     saved_signature_kind = db.Column(db.String(20), nullable=True)  # 'drawn' or 'typed'
     saved_signature_updated_at = db.Column(db.DateTime, nullable=True)
     must_change_password = db.Column(db.Boolean, default=False, nullable=True)
+    password_changed_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_login = db.Column(db.DateTime)
     
     def __repr__(self):
         return f'<User {self.username} ({self.role})>'
+
+
+class PasswordResetToken(db.Model):
+    """One-time password reset link tokens (store only the hash)."""
+    __tablename__ = 'password_reset_tokens'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    requested_ip = db.Column(db.String(50), nullable=True)
+
+    def __repr__(self):
+        return f'<PasswordResetToken user_id={self.user_id}>'
 
 
 # Association table for new hire required training videos
@@ -705,4 +722,47 @@ class SignatureAuditLog(db.Model):
 
     def __repr__(self):
         return f'<SignatureAuditLog doc={self.document_id} user={self.username} event={self.event_type}>'
+
+
+class HelpArticle(db.Model):
+    """Searchable how-to article for the in-app Help Center."""
+    __tablename__ = 'help_articles'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    title = db.Column(db.String(200), nullable=False)
+    slug = db.Column(db.String(220), nullable=False, unique=True, index=True)
+    body = db.Column(db.Text, nullable=False)
+    audience = db.Column(db.String(20), nullable=False, default='all')  # user|manager|admin|all
+    permission_key = db.Column(db.String(80), nullable=True)  # manager permission gate
+    related_path = db.Column(db.String(300), nullable=True)
+    tags = db.Column(db.String(300), nullable=True)
+    is_published = db.Column(db.Boolean, default=True, nullable=False)
+    sort_order = db.Column(db.Integer, default=0, nullable=False)
+    created_by = db.Column(db.String(100), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<HelpArticle {self.slug}>'
+
+
+class HelpRequest(db.Model):
+    """User help question submitted when search did not answer it."""
+    __tablename__ = 'help_requests'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    username = db.Column(db.String(100), nullable=False, index=True)
+    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=True)
+    role = db.Column(db.String(20), nullable=True)
+    question = db.Column(db.Text, nullable=False)
+    page_path = db.Column(db.String(500), nullable=True)
+    status = db.Column(db.String(20), nullable=False, default='open')  # open|answered|closed
+    admin_reply = db.Column(db.Text, nullable=True)
+    answered_by = db.Column(db.String(100), nullable=True)
+    answered_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<HelpRequest {self.id} {self.status}>'
 

@@ -28,6 +28,9 @@ _STAFF_CONSOLE_EXACT = frozenset({
     'admin_jobs',
     'manage_external_links',
     'manage_onboarding_messages',
+    'manage_help',
+    'manage_help_new',
+    'manage_help_edit',
     'admin_asana_feedback',
     'assign_document',
     'assign_document_submit',
@@ -264,6 +267,12 @@ def build_admin_nav_items(
             'icon': '💬',
             'url': url_for('manage_onboarding_messages'),
             'endpoints': ('manage_onboarding_messages',),
+        },
+        {
+            'label': 'Help Articles',
+            'icon': '❓',
+            'url': url_for('manage_help'),
+            'endpoints': ('manage_help', 'manage_help_new', 'manage_help_edit'),
         },
         {
             'label': 'Asana Feedback',
